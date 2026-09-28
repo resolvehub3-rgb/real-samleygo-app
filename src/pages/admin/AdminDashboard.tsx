@@ -36,6 +36,7 @@ import {
   CourierDocument,
   CourierVerificationStatus,
   Order,
+  OrderStatus,
   PlatformPricingSettings,
   AuditLog,
 } from '../../types/database';
@@ -75,6 +76,18 @@ const TAB_KEYS: AdminTab[] = [
   'AUDIT',
 ];
 
+/** Statuses that mean an order is no longer moving through the pipeline. */
+const TERMINAL_ORDER_STATUSES: OrderStatus[] = [
+  'COMPLETED',
+  'DELIVERED',
+  'CANCELLED',
+  'REJECTED',
+  'FAILED',
+];
+
+const isActiveOrder = (status: OrderStatus): boolean =>
+  !TERMINAL_ORDER_STATUSES.includes(status);
+
 /** A typo'd or outdated `?tab=` falls back to the overview instead of a blank console. */
 const isTabKey = (value: string | null): value is AdminTab =>
   !!value && (TAB_KEYS as string[]).includes(value);
@@ -112,6 +125,13 @@ const STAT_TONE = {
     fill: 'bg-violet-500',
     tint: 'bg-violet-50 text-violet-700 ring-violet-500/20',
   },
+  rose: {
+    tile: 'bg-rose-50 text-rose-600 ring-rose-500/15',
+    bar: 'bg-gradient-to-r from-rose-400 via-rose-500 to-pink-500',
+    blob: 'bg-rose-500/10 group-hover:bg-rose-500/20',
+    fill: 'bg-rose-500',
+    tint: 'bg-rose-50 text-rose-700 ring-rose-500/20',
+  },
 } as const;
 
 type StatTone = keyof typeof STAT_TONE;
@@ -130,6 +150,82 @@ const monogram = (name: string): string =>
     .slice(0, 2)
     .map((part) => part.charAt(0).toUpperCase())
     .join('') || '–';
+
+/** Compact "3m ago" / "12 Feb" timestamp used across the console lists. */
+const formatRelativeTime = (iso: string): string => {
+  const minutes = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString('en-GH', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+};
+
+interface ListToolbarProps<T extends string> {
+  query: string;
+  onQueryChange: (value: string) => void;
+  placeholder: string;
+  ariaLabel: string;
+  filters: { key: T; label: string; count: number }[];
+  activeKey: T;
+  onFilterChange: (key: T) => void;
+}
+
+/** Search field + segmented status filters shared by the tabular sections. */
+function ListToolbar<T extends string>({
+  query,
+  onQueryChange,
+  placeholder,
+  ariaLabel,
+  filters,
+  activeKey,
+  onFilterChange,
+}: ListToolbarProps<T>) {
+  return (
+    <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+      <div className="relative w-full lg:max-w-xs">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => onQueryChange(e.target.value)}
+          placeholder={placeholder}
+          aria-label={ariaLabel}
+          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-xs font-bold text-slate-900 transition placeholder:font-medium placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+        />
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {filters.map((f) => {
+          const isActive = activeKey === f.key;
+          return (
+            <button
+              key={f.key}
+              type="button"
+              onClick={() => onFilterChange(f.key)}
+              aria-pressed={isActive}
+              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-black transition ${
+                isActive
+                  ? 'bg-slate-900 text-white shadow-md shadow-slate-900/20'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900'
+              }`}
+            >
+              {f.label}
+              <span className={`tabular-nums ${isActive ? 'text-white/60' : 'text-slate-400'}`}>
+                {f.count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 interface SectionCardProps {
   title: string;
@@ -457,6 +553,18 @@ export const AdminDashboard: React.FC = () => {
     'ALL' | 'PENDING' | 'APPROVED' | 'OPEN'
   >('ALL');
 
+  // Courier verification directory filters
+  const [courierQuery, setCourierQuery] = useState('');
+  const [courierFilter, setCourierFilter] = useState<
+    'ALL' | 'PENDING' | 'ONLINE' | 'APPROVED'
+  >('ALL');
+
+  // Live order pipeline filters
+  const [orderQuery, setOrderQuery] = useState('');
+  const [orderFilter, setOrderFilter] = useState<
+    'ALL' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED'
+  >('ALL');
+
   const notify = (text: string, tone: 'success' | 'error' = 'success') =>
     setNotice({ text, tone });
 
@@ -700,6 +808,71 @@ export const AdminDashboard: React.FC = () => {
     });
   }, [restaurants, restaurantQuery, restaurantFilter]);
 
+  // Courier directory rollups + filtered list
+  const courierFilters: { key: typeof courierFilter; label: string; count: number }[] = [
+    { key: 'ALL', label: 'All', count: couriers.length },
+    { key: 'PENDING', label: 'Awaiting', count: pendingCouriers },
+    { key: 'ONLINE', label: 'Online', count: onlineCouriers },
+    { key: 'APPROVED', label: 'Approved', count: couriers.length - pendingCouriers },
+  ];
+
+  const filteredCouriers = useMemo(() => {
+    const query = courierQuery.trim().toLowerCase();
+    return couriers.filter((c) => {
+      const matchesQuery =
+        !query ||
+        [
+          c.profile?.full_name,
+          c.profile?.email,
+          c.vehicle_plate,
+          c.vehicle_type,
+        ].some((field) => (field ?? '').toLowerCase().includes(query));
+      if (!matchesQuery) return false;
+      if (courierFilter === 'PENDING') return !c.is_approved;
+      if (courierFilter === 'ONLINE') return c.is_online;
+      if (courierFilter === 'APPROVED') return c.is_approved;
+      return true;
+    });
+  }, [couriers, courierQuery, courierFilter]);
+
+  // Live order rollups + filtered list
+  const activeOrdersCount = orders.filter((o) => isActiveOrder(o.status)).length;
+  const completedOrdersCount = orders.filter(
+    (o) => o.status === 'COMPLETED' || o.status === 'DELIVERED'
+  ).length;
+  const cancelledOrdersCount = orders.filter(
+    (o) => o.status === 'CANCELLED' || o.status === 'REJECTED' || o.status === 'FAILED'
+  ).length;
+
+  const orderFilters: { key: typeof orderFilter; label: string; count: number }[] = [
+    { key: 'ALL', label: 'All', count: orders.length },
+    { key: 'ACTIVE', label: 'In progress', count: activeOrdersCount },
+    { key: 'COMPLETED', label: 'Completed', count: completedOrdersCount },
+    { key: 'CANCELLED', label: 'Cancelled', count: cancelledOrdersCount },
+  ];
+
+  const filteredOrders = useMemo(() => {
+    const query = orderQuery.trim().toLowerCase();
+    return orders.filter((o) => {
+      const matchesQuery =
+        !query ||
+        [
+          o.order_number,
+          o.restaurant?.name,
+          o.courier?.full_name,
+          o.delivery_address,
+          o.payment_method,
+        ].some((field) => (field ?? '').toLowerCase().includes(query));
+      if (!matchesQuery) return false;
+      if (orderFilter === 'ACTIVE') return isActiveOrder(o.status);
+      if (orderFilter === 'COMPLETED')
+        return o.status === 'COMPLETED' || o.status === 'DELIVERED';
+      if (orderFilter === 'CANCELLED')
+        return o.status === 'CANCELLED' || o.status === 'REJECTED' || o.status === 'FAILED';
+      return true;
+    });
+  }, [orders, orderQuery, orderFilter]);
+
   // Pricing preview (mirrors the exact fee the customer would be charged)
   const sampleFee = calculateDeliveryFee(SAMPLE_DISTANCE_KM, pricingSettings);
   const sampleCourierPayout =
@@ -740,23 +913,48 @@ export const AdminDashboard: React.FC = () => {
     navigate('/login');
   };
 
-  // Pill styling for the Live Orders table.
+  // Pill styling for the Live Orders list.
   const orderStatusStyle = (status: Order['status']) => {
     switch (status) {
       case 'COMPLETED':
       case 'DELIVERED':
-        return 'bg-emerald-100 text-emerald-800';
+        return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-500/20';
       case 'CANCELLED':
       case 'REJECTED':
       case 'FAILED':
-        return 'bg-rose-100 text-rose-800';
+        return 'bg-rose-50 text-rose-700 ring-1 ring-rose-500/20';
       case 'PENDING_PAYMENT':
       case 'RESTAURANT_PENDING':
-        return 'bg-amber-100 text-amber-800';
+        return 'bg-amber-50 text-amber-700 ring-1 ring-amber-500/25';
       default:
-        return 'bg-sky-100 text-sky-800';
+        return 'bg-sky-50 text-sky-700 ring-1 ring-sky-500/20';
     }
   };
+
+  /** Leading status dot — pulses while the order is still moving. */
+  const orderStatusDot = (status: Order['status']) => {
+    switch (status) {
+      case 'COMPLETED':
+      case 'DELIVERED':
+        return 'bg-emerald-500';
+      case 'CANCELLED':
+      case 'REJECTED':
+      case 'FAILED':
+        return 'bg-rose-500';
+      case 'PENDING_PAYMENT':
+      case 'RESTAURANT_PENDING':
+        return 'bg-amber-500';
+      default:
+        return 'bg-sky-500';
+    }
+  };
+
+  const paymentStatusStyle = (status: Order['payment_status']) =>
+    status === 'COMPLETED'
+      ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-500/20'
+      : status === 'FAILED'
+        ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-500/20'
+        : 'bg-amber-50 text-amber-700 ring-1 ring-amber-500/25';
 
   // Prevent the page behind the mobile drawer from scrolling under it.
   useEffect(() => {
@@ -1259,46 +1457,15 @@ export const AdminDashboard: React.FC = () => {
                     }
                   >
                     {/* ---- Toolbar: search + segmented status filters ---- */}
-                    <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                      <div className="relative w-full lg:max-w-xs">
-                        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-                        <input
-                          type="search"
-                          value={restaurantQuery}
-                          onChange={(e) => setRestaurantQuery(e.target.value)}
-                          placeholder="Search kitchen, cuisine or city…"
-                          aria-label="Search restaurants"
-                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-xs font-bold text-slate-900 transition placeholder:font-medium placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
-                        />
-                      </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {restaurantFilters.map((f) => {
-                          const isActive = restaurantFilter === f.key;
-                          return (
-                            <button
-                              key={f.key}
-                              type="button"
-                              onClick={() => setRestaurantFilter(f.key)}
-                              aria-pressed={isActive}
-                              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-black transition ${
-                                isActive
-                                  ? 'bg-slate-900 text-white shadow-md shadow-slate-900/20'
-                                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900'
-                              }`}
-                            >
-                              {f.label}
-                              <span
-                                className={`tabular-nums ${
-                                  isActive ? 'text-white/60' : 'text-slate-400'
-                                }`}
-                              >
-                                {f.count}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
+                    <ListToolbar
+                      query={restaurantQuery}
+                      onQueryChange={setRestaurantQuery}
+                      placeholder="Search kitchen, cuisine or city…"
+                      ariaLabel="Search restaurants"
+                      filters={restaurantFilters}
+                      activeKey={restaurantFilter}
+                      onFilterChange={setRestaurantFilter}
+                    />
 
                     {/* ---- Results ---- */}
                     {restaurants.length === 0 ? (
@@ -1461,336 +1628,521 @@ export const AdminDashboard: React.FC = () => {
 
               {/* ================= COURIERS ================= */}
               {activeTab === 'COURIERS' && (
-                <SectionCard
-                  title="Courier verification"
-                  subtitle="Review Ghana Card photos, licences and rider approvals"
-                  action={
-                    <span className="rounded-full bg-sky-50 px-3 py-1.5 text-[11px] font-black text-sky-700 ring-1 ring-sky-500/15">
-                      {onlineCouriers} online · {couriers.length} total
-                    </span>
-                  }
-                >
-                  {couriers.length === 0 ? (
-                    <EmptyState
-                      icon={Bike}
-                      title="No couriers registered"
-                      hint="Riders who sign up will land here with their Ghana Card and licence documents ready for review."
+                <>
+                  <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+                    <SummaryTile
+                      label="Riders registered"
+                      value={String(couriers.length)}
+                      icon={Users}
+                      tone="sky"
                     />
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <table className="w-full min-w-[880px] text-left text-[13px]">
-                        <thead>
-                          <tr className="border-b border-slate-200 text-[10px] text-slate-500">
-                            <th className={TH}>Courier</th>
-                            <th className={TH}>Vehicle &amp; documents</th>
-                            <th className={TH}>Online</th>
-                            <th className={TH}>Completed</th>
-                            <th className={TH}>Status</th>
-                            <th className="pb-3 text-right font-black uppercase tracking-wider">
-                              Action
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {couriers.map((c) => {
-                            const docs = courierDocs.filter((d) => d.courier_id === c.id);
-                            const photoDocs = docs.filter(
-                              (d) =>
-                                d.document_type === 'GHANA_CARD_FRONT' ||
-                                d.document_type === 'GHANA_CARD_BACK'
-                            );
-                            const cardNumber = docs.find(
-                              (d) => d.document_type === 'GHANA_CARD_FRONT'
-                            )?.document_number;
-                            const licenceNumber = docs.find(
-                              (d) => d.document_type === 'DRIVING_LICENCE'
-                            )?.document_number;
-                            const status: CourierVerificationStatus =
-                              c.verification_status || 'UNSUBMITTED';
-                            const meta = VERIFICATION_META[status];
-                            const isExpanded = expandedCourierId === c.id;
+                    <SummaryTile
+                      label="Online right now"
+                      value={String(onlineCouriers)}
+                      icon={Bike}
+                      tone="emerald"
+                    />
+                    <SummaryTile
+                      label="Awaiting approval"
+                      value={String(pendingCouriers)}
+                      icon={AlertCircle}
+                      tone="amber"
+                    />
+                    <SummaryTile
+                      label="Documents pending"
+                      value={String(pendingDocs)}
+                      icon={FileCheck}
+                      tone="violet"
+                    />
+                  </div>
 
-                            return (
-                              <React.Fragment key={c.id}>
-                                <tr className="align-top transition hover:bg-slate-50/70">
-                                  <td className={TD}>
-                                    <p className="font-bold text-slate-900">
-                                      {c.profile?.full_name || 'Courier partner'}
-                                    </p>
-                                    <p className="text-[11px] text-slate-400">
+                  <SectionCard
+                    title="Courier verification"
+                    subtitle="Review Ghana Card photos, licences and rider approvals"
+                    action={
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-50 px-3 py-1.5 text-[11px] font-black text-sky-700 ring-1 ring-sky-500/15">
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${
+                            onlineCouriers > 0 ? 'bg-emerald-500' : 'bg-slate-400'
+                          }`}
+                        />
+                        {onlineCouriers} online · {couriers.length} total
+                      </span>
+                    }
+                  >
+                    <ListToolbar
+                      query={courierQuery}
+                      onQueryChange={setCourierQuery}
+                      placeholder="Search rider, plate or email…"
+                      ariaLabel="Search couriers"
+                      filters={courierFilters}
+                      activeKey={courierFilter}
+                      onFilterChange={setCourierFilter}
+                    />
+
+                    {couriers.length === 0 ? (
+                      <EmptyState
+                        icon={Bike}
+                        title="No couriers registered"
+                        hint="Riders who sign up will land here with their Ghana Card and licence documents ready for review."
+                      />
+                    ) : filteredCouriers.length === 0 ? (
+                      <EmptyState
+                        icon={Search}
+                        title="No riders match your search"
+                        hint="Try a rider name, number plate or email — or clear the filters to see the whole fleet."
+                        action={
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCourierQuery('');
+                              setCourierFilter('ALL');
+                            }}
+                            className="rounded-xl bg-slate-900 px-4 py-2 text-[11px] font-black text-white transition hover:bg-slate-800"
+                          >
+                            Clear search & filters
+                          </button>
+                        }
+                      />
+                    ) : (
+                      <ul className="divide-y divide-slate-100">
+                        {filteredCouriers.map((c) => {
+                          const docs = courierDocs.filter((d) => d.courier_id === c.id);
+                          const photoDocs = docs.filter(
+                            (d) =>
+                              d.document_type === 'GHANA_CARD_FRONT' ||
+                              d.document_type === 'GHANA_CARD_BACK'
+                          );
+                          const cardNumber = docs.find(
+                            (d) => d.document_type === 'GHANA_CARD_FRONT'
+                          )?.document_number;
+                          const licenceNumber = docs.find(
+                            (d) => d.document_type === 'DRIVING_LICENCE'
+                          )?.document_number;
+                          const status: CourierVerificationStatus =
+                            c.verification_status || 'UNSUBMITTED';
+                          const meta = VERIFICATION_META[status];
+                          const isExpanded = expandedCourierId === c.id;
+                          const riderName = c.profile?.full_name || 'Courier partner';
+
+                          return (
+                            <li
+                              key={c.id}
+                              className={`group relative -mx-2 px-2 py-4 transition first:pt-0 last:pb-0 ${
+                                c.is_approved ? 'hover:bg-slate-50/70' : 'bg-amber-50/40'
+                              }`}
+                            >
+                              {!c.is_approved && (
+                                <span
+                                  aria-hidden="true"
+                                  className="absolute inset-y-0 left-0 w-1 rounded-full bg-gradient-to-b from-amber-400 to-orange-500 sm:-left-2"
+                                />
+                              )}
+
+                              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+                                <div className="flex min-w-0 flex-1 items-start gap-3">
+                                  <span className="relative shrink-0">
+                                    <span className="grid h-12 w-12 place-items-center overflow-hidden rounded-2xl bg-gradient-to-br from-sky-400 via-sky-500 to-indigo-600 text-xs font-black text-white shadow-md shadow-sky-900/15 ring-1 ring-black/5">
+                                      {c.profile?.avatar_url ? (
+                                        <img
+                                          src={c.profile.avatar_url}
+                                          alt=""
+                                          className="h-full w-full object-cover"
+                                          loading="lazy"
+                                        />
+                                      ) : (
+                                        monogram(riderName)
+                                      )}
+                                    </span>
+                                    <span
+                                      className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-white ${
+                                        c.is_online ? 'bg-emerald-500' : 'bg-slate-300'
+                                      }`}
+                                    />
+                                  </span>
+
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <p className="truncate text-[13px] font-black text-slate-900">
+                                        {riderName}
+                                      </p>
+                                      <span
+                                        className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[9px] font-black uppercase tracking-wider ${meta.chipClass}`}
+                                      >
+                                        {meta.label}
+                                      </span>
+                                      <span
+                                        className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${
+                                          c.is_online
+                                            ? 'bg-emerald-50 text-emerald-700'
+                                            : 'bg-slate-100 text-slate-500'
+                                        }`}
+                                      >
+                                        <span
+                                          className={`h-1.5 w-1.5 rounded-full ${
+                                            c.is_online
+                                              ? 'animate-pulse bg-emerald-500'
+                                              : 'bg-slate-400'
+                                          }`}
+                                        />
+                                        {c.is_online ? 'Online' : 'Offline'}
+                                      </span>
+                                    </div>
+
+                                    <p className="mt-1 truncate text-[11px] text-slate-400">
                                       {c.profile?.email}
                                     </p>
-                                  </td>
-                                  <td className={TD}>
-                                    <button
-                                      type="button"
-                                      onClick={() => setExpandedCourierId(isExpanded ? null : c.id)}
-                                      aria-expanded={isExpanded}
-                                      className="flex items-start gap-1.5 rounded-lg p-1 -m-1 text-left transition hover:text-emerald-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
-                                    >
-                                      {isExpanded ? (
-                                        <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                                      ) : (
-                                        <ChevronRight className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                                      )}
-                                      <span>
-                                        <span className="block font-bold text-slate-800">
-                                          {c.vehicle_plate || 'No plate on file'}
-                                        </span>
-                                        <span className="block text-[11px] text-slate-500">
-                                          {c.vehicle_type} · Card: {cardNumber || '—'}
-                                        </span>
-                                        <span className="block text-[11px] text-slate-500">
-                                          Licence: {licenceNumber || '—'}
-                                        </span>
-                                        <span
-                                          className={`mt-1 inline-block rounded-md px-2 py-0.5 text-[10px] font-bold ${meta.chipClass}`}
-                                        >
-                                          {meta.label} · {photoDocs.length} photo
-                                          {photoDocs.length === 1 ? '' : 's'}
-                                        </span>
+
+                                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                      <span className="rounded-md border border-slate-300 bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-black tracking-wide text-slate-700">
+                                        {c.vehicle_plate || 'NO PLATE'}
                                       </span>
-                                    </button>
-                                  </td>
-                                  <td className={TD}>
-                                    <span
-                                      className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[10px] font-bold ${
-                                        c.is_online
-                                          ? 'bg-emerald-100 text-emerald-800'
-                                          : 'bg-slate-100 text-slate-500'
-                                      }`}
-                                    >
-                                      <span
-                                        className={`h-1.5 w-1.5 rounded-full ${
-                                          c.is_online ? 'bg-emerald-500' : 'bg-slate-400'
-                                        }`}
-                                      />
-                                      {c.is_online ? 'Online' : 'Offline'}
-                                    </span>
-                                  </td>
-                                  <td className={`${TD} font-bold tabular-nums text-slate-800`}>
-                                    {c.total_deliveries}
-                                  </td>
-                                  <td className={TD}>
-                                    <span
-                                      className={`inline-block rounded-md px-2 py-0.5 text-[10px] font-bold ${
-                                        c.is_approved
-                                          ? 'bg-emerald-100 text-emerald-800'
-                                          : 'bg-amber-100 text-amber-800'
-                                      }`}
-                                    >
-                                      {c.is_approved ? 'Approved' : 'Pending review'}
-                                    </span>
-                                  </td>
-                                  <td className="py-3 text-right">
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        handleToggleCourierApproval(c.id, c.is_approved)
-                                      }
-                                      className={`rounded-lg px-3 py-1.5 text-[11px] font-bold transition ${
-                                        c.is_approved
-                                          ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-100 hover:bg-rose-600 hover:text-white hover:ring-rose-600'
-                                          : 'bg-emerald-600 text-white shadow-sm shadow-emerald-600/20 hover:bg-emerald-700'
-                                      }`}
-                                    >
-                                      {c.is_approved ? 'Suspend' : 'Approve courier'}
-                                    </button>
-                                  </td>
-                                </tr>
+                                      <span className="text-[11px] text-slate-500">
+                                        {c.vehicle_type}
+                                      </span>
+                                    </div>
 
-                                {isExpanded && (
-                                  <tr className="bg-emerald-50/50">
-                                    <td colSpan={6} className="px-3 py-4">
-                                      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                                        <div className="space-y-1.5 rounded-2xl bg-white p-4 text-[12px] text-slate-600 ring-1 ring-slate-200/70">
-                                          <span className="block text-[10px] font-black uppercase tracking-wider text-slate-400">
-                                            Identity details
-                                          </span>
-                                          <p>
-                                            <strong>Ghana Card:</strong> {cardNumber || 'Not provided'}
-                                          </p>
-                                          <p>
-                                            <strong>Licence ID:</strong>{' '}
-                                            {licenceNumber || 'Not provided'}
-                                          </p>
-                                          <p>
-                                            <strong>Number plate:</strong>{' '}
-                                            {c.vehicle_plate || 'Not provided'}
-                                          </p>
-                                          <p>
-                                            <strong>Submitted:</strong>{' '}
-                                            {c.verification_submitted_at
-                                              ? new Date(
-                                                  c.verification_submitted_at
-                                                ).toLocaleString('en-GH', {
-                                                  dateStyle: 'medium',
-                                                  timeStyle: 'short',
-                                                })
-                                              : '—'}
-                                          </p>
-                                          <p>
-                                            <strong>Last review:</strong>{' '}
-                                            {c.verification_reviewed_at
-                                              ? new Date(
-                                                  c.verification_reviewed_at
-                                                ).toLocaleString('en-GH', {
-                                                  dateStyle: 'medium',
-                                                  timeStyle: 'short',
-                                                })
-                                              : '—'}
-                                          </p>
-                                          {c.verification_note && (
-                                            <p className="text-slate-500 italic">
-                                              {c.verification_note}
-                                            </p>
-                                          )}
-                                        </div>
+                                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                      <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black tabular-nums text-slate-600">
+                                        <CheckCircle className="h-3 w-3 text-emerald-500" />
+                                        {c.total_deliveries} deliveries
+                                      </span>
+                                      <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black tabular-nums text-slate-600">
+                                        <Star className="h-3 w-3 fill-current text-amber-500" />
+                                        {(c.rating || 0).toFixed(1)}
+                                      </span>
+                                      <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-600">
+                                        <FileCheck className="h-3 w-3 text-slate-400" />
+                                        {photoDocs.length} photo
+                                        {photoDocs.length === 1 ? '' : 's'}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
 
-                                        <div className="space-y-2 md:col-span-2">
-                                          <span className="block text-[10px] font-black uppercase tracking-wider text-slate-400">
-                                            Ghana Card photos ({photoDocs.length})
-                                          </span>
-                                          {photoDocs.length === 0 ? (
-                                            <p className="rounded-xl border border-dashed border-slate-300 bg-white p-4 text-[11px] text-slate-500">
-                                              No photos were uploaded for this courier yet.
-                                            </p>
-                                          ) : (
-                                            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                                              {photoDocs.map((doc) => (
-                                                <div
-                                                  key={doc.id}
-                                                  className="overflow-hidden rounded-xl border border-slate-200 bg-white"
+                                <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setExpandedCourierId(isExpanded ? null : c.id)
+                                    }
+                                    aria-expanded={isExpanded}
+                                    className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-[11px] font-black transition ${
+                                      isExpanded
+                                        ? 'bg-slate-900 text-white shadow-md shadow-slate-900/20'
+                                        : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50 hover:text-slate-900'
+                                    }`}
+                                  >
+                                    {isExpanded ? (
+                                      <ChevronDown className="h-3.5 w-3.5" />
+                                    ) : (
+                                      <ChevronRight className="h-3.5 w-3.5" />
+                                    )}
+                                    {isExpanded ? 'Hide documents' : 'Review documents'}
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleToggleCourierApproval(c.id, c.is_approved)
+                                    }
+                                    className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-[11px] font-black transition active:scale-95 ${
+                                      c.is_approved
+                                        ? 'bg-white text-rose-600 ring-1 ring-rose-200 hover:bg-rose-600 hover:text-white hover:ring-rose-600'
+                                        : 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25 hover:bg-emerald-700 hover:shadow-lg'
+                                    }`}
+                                  >
+                                    {c.is_approved ? 'Suspend' : 'Approve courier'}
+                                  </button>
+                                </div>
+                              </div>
+
+                              {isExpanded && (
+                                <div className="mt-4 overflow-hidden rounded-2xl border border-emerald-100 bg-emerald-50/40">
+                                  <div className="grid grid-cols-1 gap-4 p-4 md:grid-cols-3">
+                                    <div className="space-y-1.5 rounded-2xl bg-white p-4 text-[12px] text-slate-600 ring-1 ring-slate-200/70">
+                                      <span className="block text-[10px] font-black uppercase tracking-wider text-slate-400">
+                                        Identity details
+                                      </span>
+                                      <p>
+                                        <strong>Ghana Card:</strong>{' '}
+                                        {cardNumber || 'Not provided'}
+                                      </p>
+                                      <p>
+                                        <strong>Licence ID:</strong>{' '}
+                                        {licenceNumber || 'Not provided'}
+                                      </p>
+                                      <p>
+                                        <strong>Number plate:</strong>{' '}
+                                        {c.vehicle_plate || 'Not provided'}
+                                      </p>
+                                      <p>
+                                        <strong>Submitted:</strong>{' '}
+                                        {c.verification_submitted_at
+                                          ? new Date(
+                                              c.verification_submitted_at
+                                            ).toLocaleString('en-GH', {
+                                              dateStyle: 'medium',
+                                              timeStyle: 'short',
+                                            })
+                                          : '—'}
+                                      </p>
+                                      <p>
+                                        <strong>Last review:</strong>{' '}
+                                        {c.verification_reviewed_at
+                                          ? new Date(
+                                              c.verification_reviewed_at
+                                            ).toLocaleString('en-GH', {
+                                              dateStyle: 'medium',
+                                              timeStyle: 'short',
+                                            })
+                                          : '—'}
+                                      </p>
+                                      <p className="pt-1 text-slate-500 italic">
+                                        {meta.hint}
+                                      </p>
+                                      {c.verification_note && (
+                                        <p className="text-slate-500 italic">
+                                          {c.verification_note}
+                                        </p>
+                                      )}
+                                    </div>
+
+                                    <div className="space-y-2 md:col-span-2">
+                                      <span className="block text-[10px] font-black uppercase tracking-wider text-slate-400">
+                                        Ghana Card photos ({photoDocs.length})
+                                      </span>
+                                      {photoDocs.length === 0 ? (
+                                        <p className="rounded-xl border border-dashed border-emerald-200 bg-white p-4 text-[11px] text-slate-500">
+                                          No photos were uploaded for this courier yet.
+                                        </p>
+                                      ) : (
+                                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                                          {photoDocs.map((doc) => (
+                                            <div
+                                              key={doc.id}
+                                              className="overflow-hidden rounded-xl border border-slate-200 bg-white transition hover:shadow-lg hover:shadow-slate-900/10"
+                                            >
+                                              <DocumentImage
+                                                document={doc}
+                                                className="h-28 w-full object-cover"
+                                              />
+                                              <div className="p-2">
+                                                <span className="block text-[10px] font-bold text-slate-700">
+                                                  {doc.document_type.replace(/_/g, ' ')}
+                                                </span>
+                                                <span
+                                                  className={`mt-1 inline-block rounded px-1.5 py-0.5 text-[9px] font-bold ${
+                                                    doc.status === 'APPROVED'
+                                                      ? 'bg-emerald-100 text-emerald-800'
+                                                      : doc.status === 'REJECTED'
+                                                        ? 'bg-rose-100 text-rose-800'
+                                                        : 'bg-amber-100 text-amber-800'
+                                                  }`}
                                                 >
-                                                  <DocumentImage
-                                                    document={doc}
-                                                    className="h-28 w-full object-cover"
-                                                  />
-                                                  <div className="p-2">
-                                                    <span className="block text-[10px] font-bold text-slate-700">
-                                                      {doc.document_type.replace(/_/g, ' ')}
-                                                    </span>
-                                                    <span
-                                                      className={`mt-1 inline-block rounded px-1.5 py-0.5 text-[9px] font-bold ${
-                                                        doc.status === 'APPROVED'
-                                                          ? 'bg-emerald-100 text-emerald-800'
-                                                          : doc.status === 'REJECTED'
-                                                            ? 'bg-rose-100 text-rose-800'
-                                                            : 'bg-amber-100 text-amber-800'
-                                                      }`}
-                                                    >
-                                                      {doc.status}
-                                                    </span>
-                                                  </div>
-                                                </div>
-                                              ))}
+                                                  {doc.status}
+                                                </span>
+                                              </div>
                                             </div>
-                                          )}
+                                          ))}
                                         </div>
-                                      </div>
-                                    </td>
-                                  </tr>
-                                )}
-                              </React.Fragment>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </SectionCard>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </SectionCard>
+                </>
               )}
 
               {/* ================= LIVE ORDERS ================= */}
               {activeTab === 'ORDERS' && (
-                <SectionCard
-                  title="Live order pipeline"
-                  subtitle={`${orders.length} order${orders.length === 1 ? '' : 's'} in the system`}
-                  action={
-                    <span className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-slate-500 ring-1 ring-slate-200">
-                      <span className="relative flex h-2 w-2">
-                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-                      </span>
-                      Refreshes in realtime
-                    </span>
-                  }
-                >
-                  {orders.length === 0 ? (
-                    <EmptyState
+                <>
+                  <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+                    <SummaryTile
+                      label="Total orders"
+                      value={String(orders.length)}
                       icon={Receipt}
-                      title="No orders have been placed yet"
-                      hint="New orders appear here the moment a customer checks out, with live status changes."
+                      tone="sky"
                     />
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <table className="w-full min-w-[860px] text-left text-[13px]">
-                        <thead>
-                          <tr className="border-b border-slate-200 text-[10px] text-slate-500">
-                            <th className={TH}>Order</th>
-                            <th className={TH}>Restaurant</th>
-                            <th className={TH}>Courier</th>
-                            <th className={TH}>Status</th>
-                            <th className={TH}>Payment</th>
-                            <th className="pb-3 pr-4 text-right font-black uppercase tracking-wider">
-                              Total
-                            </th>
-                            <th className="pb-3 text-right font-black uppercase tracking-wider">
-                              Placed
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {orders.map((o) => (
-                            <tr key={o.id} className="transition hover:bg-slate-50/70">
-                              <td className={`${TD} font-black text-slate-900`}>
-                                #{o.order_number}
-                              </td>
-                              <td className={`${TD} text-slate-600`}>
-                                {o.restaurant?.name ?? '—'}
-                              </td>
-                              <td className={`${TD} text-slate-600`}>
-                                {o.courier?.full_name ?? (
-                                  <span className="text-slate-400">Unassigned</span>
-                                )}
-                              </td>
-                              <td className={TD}>
-                                <span
-                                  className={`inline-block rounded-md px-2 py-0.5 text-[10px] font-bold ${orderStatusStyle(
-                                    o.status
-                                  )}`}
-                                >
-                                  {o.status.replace(/_/g, ' ')}
-                                </span>
-                              </td>
-                              <td className={TD}>
-                                <span
-                                  className={`inline-block rounded-md px-2 py-0.5 text-[10px] font-bold ${
-                                    o.payment_status === 'COMPLETED'
-                                      ? 'bg-emerald-100 text-emerald-800'
-                                      : o.payment_status === 'FAILED'
-                                        ? 'bg-rose-100 text-rose-800'
-                                        : 'bg-amber-100 text-amber-800'
-                                  }`}
-                                >
-                                  {o.payment_status.replace(/_/g, ' ')}
-                                </span>
-                              </td>
-                              <td className="py-3 pr-4 text-right font-black tabular-nums text-slate-900">
-                                {formatGHS(o.total_amount)}
-                              </td>
-                              <td className="py-3 text-right text-slate-400">
-                                {new Date(o.created_at).toLocaleString()}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </SectionCard>
-              )}
+                    <SummaryTile
+                      label="In progress"
+                      value={String(activeOrdersCount)}
+                      icon={Bike}
+                      tone="amber"
+                    />
+                    <SummaryTile
+                      label="Completed"
+                      value={String(completedOrdersCount)}
+                      icon={CheckCircle}
+                      tone="emerald"
+                    />
+                    <SummaryTile
+                      label="Cancelled / failed"
+                      value={String(cancelledOrdersCount)}
+                      icon={AlertCircle}
+                      tone="rose"
+                    />
+                  </div>
 
+                  <SectionCard
+                    title="Live order pipeline"
+                    subtitle={`${orders.length} order${orders.length === 1 ? '' : 's'} · ${activeOrdersCount} moving right now`}
+                    action={
+                      <span className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-[10px] font-black uppercase tracking-widest text-slate-500 ring-1 ring-slate-200">
+                        <span className="relative flex h-2 w-2">
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                          <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+                        </span>
+                        Refreshes in realtime
+                      </span>
+                    }
+                  >
+                    <ListToolbar
+                      query={orderQuery}
+                      onQueryChange={setOrderQuery}
+                      placeholder="Search order, kitchen or rider…"
+                      ariaLabel="Search orders"
+                      filters={orderFilters}
+                      activeKey={orderFilter}
+                      onFilterChange={setOrderFilter}
+                    />
+
+                    {orders.length === 0 ? (
+                      <EmptyState
+                        icon={Receipt}
+                        title="No orders have been placed yet"
+                        hint="New orders appear here the moment a customer checks out, with live status changes."
+                      />
+                    ) : filteredOrders.length === 0 ? (
+                      <EmptyState
+                        icon={Search}
+                        title="No orders match your search"
+                        hint="Try an order number, kitchen, rider or delivery area — or clear the filters."
+                        action={
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setOrderQuery('');
+                              setOrderFilter('ALL');
+                            }}
+                            className="rounded-xl bg-slate-900 px-4 py-2 text-[11px] font-black text-white transition hover:bg-slate-800"
+                          >
+                            Clear search & filters
+                          </button>
+                        }
+                      />
+                    ) : (
+                      <ul className="divide-y divide-slate-100">
+                        {filteredOrders.map((o) => {
+                          const inFlight = isActiveOrder(o.status);
+                          return (
+                            <li
+                              key={o.id}
+                              className={`group relative -mx-2 px-2 py-4 transition first:pt-0 last:pb-0 ${
+                                inFlight
+                                  ? 'bg-emerald-50/40 hover:bg-emerald-50/70'
+                                  : 'hover:bg-slate-50/70'
+                              }`}
+                            >
+                              {inFlight && (
+                                <span
+                                  aria-hidden="true"
+                                  className="absolute inset-y-0 left-0 w-1 rounded-full bg-gradient-to-b from-emerald-400 to-teal-500 sm:-left-2"
+                                />
+                              )}
+
+                              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+                                <div className="flex min-w-0 flex-1 items-start gap-3">
+                                  <span className="grid h-12 w-12 shrink-0 place-items-center overflow-hidden rounded-2xl bg-gradient-to-br from-violet-400 via-violet-500 to-indigo-600 text-xs font-black text-white shadow-md shadow-violet-900/15 ring-1 ring-black/5">
+                                    {o.restaurant?.logo_url ? (
+                                      <img
+                                        src={o.restaurant.logo_url}
+                                        alt=""
+                                        className="h-full w-full object-cover"
+                                        loading="lazy"
+                                      />
+                                    ) : (
+                                      monogram(o.restaurant?.name || 'KG')
+                                    )}
+                                  </span>
+
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <p className="text-[13px] font-black tabular-nums text-slate-900">
+                                        #{o.order_number}
+                                      </p>
+                                      <span
+                                        className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[9px] font-black uppercase tracking-wider ${orderStatusStyle(
+                                          o.status
+                                        )}`}
+                                      >
+                                        <span
+                                          className={`h-1.5 w-1.5 rounded-full ${orderStatusDot(
+                                            o.status
+                                          )} ${inFlight ? 'animate-pulse' : ''}`}
+                                        />
+                                        {o.status.replace(/_/g, ' ')}
+                                      </span>
+                                      <span
+                                        className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${paymentStatusStyle(
+                                          o.payment_status
+                                        )}`}
+                                      >
+                                        {o.payment_status.replace(/_/g, ' ')}
+                                      </span>
+                                    </div>
+
+                                    <p className="mt-1 flex items-center gap-1 truncate text-[11px] text-slate-500">
+                                      <Store className="h-3 w-3 shrink-0 text-slate-400" />
+                                      <span className="truncate font-bold text-slate-700">
+                                        {o.restaurant?.name ?? 'Kitchen'}
+                                      </span>
+                                      <span className="text-slate-300">·</span>
+                                      <span>{o.payment_method}</span>
+                                    </p>
+
+                                    <p className="mt-0.5 flex items-center gap-1 truncate text-[11px] text-slate-500">
+                                      <MapPin className="h-3 w-3 shrink-0 text-slate-400" />
+                                      <span className="truncate">{o.delivery_address}</span>
+                                    </p>
+
+                                    <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
+                                      <span className="inline-flex items-center gap-1">
+                                        <Bike className="h-3 w-3" />
+                                        {o.courier?.full_name ?? (
+                                          <span className="font-bold text-amber-600">
+                                            Unassigned
+                                          </span>
+                                        )}
+                                      </span>
+                                      <span>Placed {formatRelativeTime(o.created_at)}</span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="flex shrink-0 items-baseline gap-2 sm:flex-col sm:items-end sm:gap-1">
+                                  <span className="text-base font-black leading-none tabular-nums text-slate-900">
+                                    {formatGHS(o.total_amount)}
+                                  </span>
+                                  <span className="text-[10px] font-bold tabular-nums text-slate-400">
+                                    incl. {formatGHS(o.delivery_fee)} delivery
+                                  </span>
+                                </div>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </SectionCard>
+                </>
+              )}
               {/* ================= SETTINGS ================= */}
               {activeTab === 'SETTINGS' && (
                 <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
