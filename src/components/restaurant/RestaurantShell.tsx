@@ -218,7 +218,66 @@ export const RestaurantShell: React.FC<RestaurantShellProps> = ({
       )}
 
       {/* ── Page content ────────────────────────────────── */}
-      <main className="lg:pl-64">{children}</main>
+      <main className="lg:pl-64 pb-24 lg:pb-12">{children}</main>
+
+      {/* ── Mobile bottom navigation bar for kitchen owners ─── */}
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/90 shadow-lg pb-safe">
+        <div className="flex items-center justify-around h-16 px-1">
+          <NavLink
+            to="/restaurant/dashboard"
+            end
+            className={({ isActive }) =>
+              `flex flex-col items-center justify-center flex-1 py-1 transition-colors ${
+                isActive ? 'text-emerald-600 font-bold' : 'text-slate-500 hover:text-slate-800'
+              }`
+            }
+          >
+            <LayoutDashboard className="w-5 h-5 mb-0.5" />
+            <span className="text-[10px] tracking-tight">Orders</span>
+          </NavLink>
+
+          <NavLink
+            to="/restaurant/menu"
+            className={({ isActive }) =>
+              `flex flex-col items-center justify-center flex-1 py-1 transition-colors ${
+                isActive ? 'text-emerald-600 font-bold' : 'text-slate-500 hover:text-slate-800'
+              }`
+            }
+          >
+            <Utensils className="w-5 h-5 mb-0.5" />
+            <span className="text-[10px] tracking-tight">Menu</span>
+          </NavLink>
+
+          <NavLink
+            to="/restaurant/settings"
+            className={({ isActive }) =>
+              `flex flex-col items-center justify-center flex-1 py-1 transition-colors ${
+                isActive ? 'text-emerald-600 font-bold' : 'text-slate-500 hover:text-slate-800'
+              }`
+            }
+          >
+            <Settings className="w-5 h-5 mb-0.5" />
+            <span className="text-[10px] tracking-tight">Settings</span>
+          </NavLink>
+
+          {onToggleOpen && (
+            <button
+              onClick={onToggleOpen}
+              disabled={isUpdatingOpenStatus}
+              className="flex flex-col items-center justify-center flex-1 py-1 text-slate-600 active:scale-95 transition"
+            >
+              <span
+                className={`w-4 h-4 rounded-full mb-1 flex items-center justify-center ${
+                  isOpen ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'
+                }`}
+              />
+              <span className={`text-[10px] font-bold ${isOpen ? 'text-emerald-700' : 'text-rose-600'}`}>
+                {isOpen ? 'Open' : 'Closed'}
+              </span>
+            </button>
+          )}
+        </div>
+      </nav>
     </div>
   );
 };

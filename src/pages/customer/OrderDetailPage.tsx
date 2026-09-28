@@ -13,12 +13,18 @@ import {
   Sparkles,
   Receipt,
   Check,
+  EyeOff,
+  Eye,
+  Bell,
+  X,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { Order, OrderItem, OrderStatusHistory, DeliveryLocation, Courier } from '../../types/database';
 import { useAuth } from '../../context/AuthContext';
 import { formatGHS } from '../../lib/pricing';
 import { CourierLiveMap } from '../../components/courier/CourierLiveMap';
+import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
+import { playCustomerPickupAlert, playCustomerDeliveredAlert } from '../../lib/soundAlerts';
 
 const STATUS_STEPS = [
   { key: 'RESTAURANT_PENDING', label: 'Order Sent', desc: 'Awaiting kitchen confirmation' },
@@ -38,8 +44,16 @@ export const OrderDetailPage: React.FC = () => {
   const [courierDetails, setCourierDetails] = useState<Courier | null>(null);
   const [lastLocation, setLastLocation] = useState<DeliveryLocation | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [showLiveMapModal, setShowLiveMapModal] = useState(false);
+  const [isInlineMapHidden, setIsInlineMapHidden] = useState(false);
+  const [soundAlertBanner, setSoundAlertBanner] = useState<{
+    type: 'PICKED_UP' | 'DELIVERED';
+    title: string;
+    message: string;
+  } | null>(null);
   // Mirrors the assigned courier id so the realtime channel filter can use it
   const courierIdRef = useRef<string | null>(null);
+  const prevStatusRef = useRef<string | null>(null);
 
   // Review state
   const [restRating, setRestRating] = useState(5);
@@ -69,6 +83,7 @@ export const OrderDetailPage: React.FC = () => {
       }
 
       setOrder(orderData as Order);
+      prevStatusRef.current = orderData.status;
 
       // 2. Fetch Order Items
       const { data: itemsData } = await supabase
@@ -136,7 +151,8 @@ export const OrderDetailPage: React.FC = () => {
 
     // Realtime subscription for order updates
     const orderChannel = supabase
-      .channel(`order-live-${id}`)      .on(
+      .channel(`order-live-${id}`)
+      .on(
         'postgres_changes',
         {
           event: '*',
@@ -144,7 +160,33 @@ export const OrderDetailPage: React.FC = () => {
           table: 'orders',
           filter: `id=eq.${id}`,
         },
-        () => {
+        (payload) => {
+          const newOrder = payload.new as Order | undefined;
+          if (newOrder?.status) {
+            const oldStatus = prevStatusRef.current;
+            if (newOrder.status === 'PICKED_UP' && oldStatus !== 'PICKED_UP') {
+              playCustomerPickupAlert();
+              setSoundAlertBanner({
+                type: 'PICKED_UP',
+                title: '🛵 Food Picked Up by Courier!',
+                message: 'Your courier has collected your food from the kitchen and is driving towards you.',
+              });
+              setTimeout(() => setSoundAlertBanner(null), 9000);
+            } else if (
+              (newOrder.status === 'DELIVERED' || newOrder.status === 'COMPLETED') &&
+              oldStatus !== 'DELIVERED' &&
+              oldStatus !== 'COMPLETED'
+            ) {
+              playCustomerDeliveredAlert();
+              setSoundAlertBanner({
+                type: 'DELIVERED',
+                title: '🎉 Order Delivered Safely!',
+                message: 'Your food has arrived at your destination. Enjoy your meal!',
+              });
+              setTimeout(() => setSoundAlertBanner(null), 12000);
+            }
+            prevStatusRef.current = newOrder.status;
+          }
           fetchOrderDetails();
         }
       )
@@ -193,6 +235,45 @@ export const OrderDetailPage: React.FC = () => {
       supabase.removeChannel(orderChannel);
     };
   }, [id]);
+
+  // Dedicated realtime listener for assigned courier's moving GPS pings
+  useEffect(() => {
+    if (!order?.courier_id || !isSupabaseConfigured) return;
+
+    const courierChannel = supabase
+      .channel(`order-courier-gps-${order.id}-${order.courier_id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'couriers',
+          filter: `id=eq.${order.courier_id}`,
+        },
+        (payload) => {
+          const next = payload.new as {
+            current_latitude?: number | null;
+            current_longitude?: number | null;
+            current_location_updated_at?: string;
+          };
+          if (next.current_latitude != null && next.current_longitude != null) {
+            setCourierDetails((prev) =>
+              prev
+                ? ({ ...prev, ...next } as Courier)
+                : ({
+                    current_latitude: next.current_latitude,
+                    current_longitude: next.current_longitude,
+                  } as unknown as Courier)
+            );
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(courierChannel);
+    };
+  }, [order?.courier_id, order?.id]);
 
   const handleSubmitReview = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -326,6 +407,40 @@ export const OrderDetailPage: React.FC = () => {
           </span>
         </div>
 
+        {/* Real-time Order Alert Banner (Bolt/Yango ride style) */}
+        {soundAlertBanner && (
+          <div
+            className={`p-4 sm:p-5 rounded-3xl text-white shadow-xl flex items-center justify-between gap-4 border animate-in fade-in slide-in-from-top-4 ${
+              soundAlertBanner.type === 'DELIVERED'
+                ? 'bg-gradient-to-r from-emerald-600 to-teal-800 border-emerald-400'
+                : 'bg-gradient-to-r from-sky-600 via-indigo-600 to-slate-900 border-sky-400'
+            }`}
+          >
+            <div className="flex items-center gap-3.5 min-w-0">
+              <div className="w-12 h-12 rounded-2xl bg-white/15 text-white flex items-center justify-center flex-shrink-0 backdrop-blur-xs ring-1 ring-white/20">
+                <Bell className="w-6 h-6 animate-bounce" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="font-extrabold text-sm sm:text-base">
+                  {soundAlertBanner.title}
+                </h3>
+                <p className="text-xs text-white/90 mt-0.5 leading-snug">
+                  {soundAlertBanner.message}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setSoundAlertBanner(null)}
+              className="p-2 rounded-xl text-white/70 hover:text-white hover:bg-white/10 transition flex-shrink-0"
+              title="Dismiss"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* Live Order Banner */}
         <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-xs space-y-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
@@ -339,6 +454,25 @@ export const OrderDetailPage: React.FC = () => {
               <p className="text-xs text-slate-500 mt-0.5">
                 Kitchen: <span className="font-bold text-emerald-700">{order.restaurant?.name}</span>
               </p>
+              <div className="pt-2 flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setShowLiveMapModal(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs shadow-xs transition"
+                >
+                  <Navigation className="w-3.5 h-3.5" />
+                  <span>Live Map</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => playCustomerPickupAlert()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 font-bold text-xs transition"
+                  title="Test pickup alert sound (Bolt/Yango chime)"
+                >
+                  <Bell className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Test Alert Sound</span>
+                </button>
+              </div>
             </div>
 
             <div className="text-left sm:text-right">
@@ -464,7 +598,7 @@ export const OrderDetailPage: React.FC = () => {
 
                 return (
                   <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
-                    <div className="px-3.5 py-2.5 flex items-center justify-between gap-2 border-b border-slate-100">
+                    <div className="px-3.5 py-2.5 flex items-center justify-between gap-2 border-b border-slate-100 flex-wrap">
                       <div className="flex items-center gap-2 text-xs font-bold text-slate-900">
                         <Navigation className="w-4 h-4 text-emerald-600" />
                         <span>Live Tracking</span>
@@ -475,24 +609,77 @@ export const OrderDetailPage: React.FC = () => {
                           </span>
                         )}
                       </div>
-                      {lastPingAge !== null && (
-                        <span className="text-[10px] text-slate-400">
-                          {lastPingAge < 1 ? 'Updated just now' : `Updated ${lastPingAge} min ago`}
-                        </span>
-                      )}
+                      <div className="flex items-center gap-2">
+                        {lastPingAge !== null && (
+                          <span className="text-[10px] text-slate-400">
+                            {lastPingAge < 1 ? 'Updated just now' : `Updated ${lastPingAge} min ago`}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setShowLiveMapModal(true)}
+                          className="px-3 py-1 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs transition"
+                        >
+                          <Navigation className="w-3.5 h-3.5" />
+                          <span>Live Map</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsInlineMapHidden(!isInlineMapHidden)}
+                          className="px-2.5 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 font-bold text-xs flex items-center gap-1 transition"
+                          title={isInlineMapHidden ? 'Show live map on page' : 'Hide map from page'}
+                        >
+                          {isInlineMapHidden ? (
+                            <>
+                              <Eye className="w-3.5 h-3.5 text-slate-500" />
+                              <span>Show Map</span>
+                            </>
+                          ) : (
+                            <>
+                              <EyeOff className="w-3.5 h-3.5 text-slate-500" />
+                              <span>Hide Map</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
                     </div>
 
-                    {hasAnyPin ? (
-                      <CourierLiveMap
-                        courierPosition={courierPosition}
-                        destination={destination}
-                        pickup={pickup}
-                        courierName={order.courier?.full_name}
-                        className="h-64 sm:h-72"
-                      />
+                    {!isInlineMapHidden ? (
+                      hasAnyPin ? (
+                        <CourierLiveMap
+                          courierPosition={courierPosition}
+                          destination={destination}
+                          pickup={pickup}
+                          courierName={order.courier?.full_name}
+                          className="h-64 sm:h-72"
+                        />
+                      ) : (
+                        <div className="p-6 text-center text-xs text-slate-500">
+                          Waiting for the first GPS ping from your courier…
+                        </div>
+                      )
                     ) : (
-                      <div className="p-6 text-center text-xs text-slate-500">
-                        Waiting for the first GPS ping from your courier…
+                      <div className="p-4 bg-slate-50 flex items-center justify-between text-xs text-slate-500">
+                        <span className="flex items-center gap-1.5">
+                          <EyeOff className="w-4 h-4 text-slate-400" />
+                          <span>Map hidden. Live delivery updates are running in realtime.</span>
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setShowLiveMapModal(true)}
+                            className="font-bold text-emerald-600 hover:text-emerald-700"
+                          >
+                            Open Live Map
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsInlineMapHidden(false)}
+                            className="font-bold text-slate-700 hover:text-slate-900 underline"
+                          >
+                            Show Map
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -680,6 +867,48 @@ export const OrderDetailPage: React.FC = () => {
             )}
           </div>
         )}
+
+        {/* Customer Live Delivery Map Modal */}
+        <LiveDeliveryMapModal
+          isOpen={showLiveMapModal}
+          onClose={() => setShowLiveMapModal(false)}
+          orderNumber={order?.order_number}
+          status={order?.status}
+          courierPosition={
+            courierDetails?.current_latitude && courierDetails?.current_longitude
+              ? { lat: courierDetails.current_latitude, lng: courierDetails.current_longitude }
+              : lastLocation?.latitude && lastLocation?.longitude
+              ? { lat: lastLocation.latitude, lng: lastLocation.longitude }
+              : null
+          }
+          pickup={
+            order?.restaurant?.latitude && order?.restaurant?.longitude
+              ? { lat: order.restaurant.latitude, lng: order.restaurant.longitude }
+              : null
+          }
+          pickupName={order?.restaurant?.name}
+          pickupAddress={
+            order?.restaurant
+              ? `${order.restaurant.address}, ${order.restaurant.city}`
+              : undefined
+          }
+          destination={
+            order?.delivery_latitude && order?.delivery_longitude
+              ? { lat: order.delivery_latitude, lng: order.delivery_longitude }
+              : null
+          }
+          destinationName={order?.customer?.full_name || 'Your Address'}
+          destinationAddress={order?.delivery_address}
+          courierName={order?.courier?.full_name || 'Assigned Courier'}
+          courierPhone={order?.courier?.phone}
+          customerPhone={order?.customer_phone}
+          lastPingAgeMinutes={
+            lastLocation
+              ? Math.floor((Date.now() - new Date(lastLocation.recorded_at).getTime()) / 60000)
+              : null
+          }
+          role="CUSTOMER"
+        />
 
       </div>
     </div>

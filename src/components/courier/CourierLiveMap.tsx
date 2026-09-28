@@ -99,9 +99,22 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     map.on('click', () => map.scrollWheelZoom.enable());
     map.on('mouseout', () => map.scrollWheelZoom.disable());
 
+    const invalidateTimer = setTimeout(() => {
+      map.invalidateSize();
+    }, 150);
+
+    const resizeObserver = new ResizeObserver(() => {
+      map.invalidateSize();
+    });
+    if (containerRef.current) {
+      resizeObserver.observe(containerRef.current);
+    }
+
     mapRef.current = map;
 
     return () => {
+      clearTimeout(invalidateTimer);
+      resizeObserver.disconnect();
       if (animFrameRef.current !== null) {
         cancelAnimationFrame(animFrameRef.current);
         animFrameRef.current = null;
@@ -245,7 +258,16 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       rebuildRoute(null);
 
       if (destination && !hasFitRef.current) {
-        map.setView([destination.lat, destination.lng], 14);
+        if (pickup) {
+          map.fitBounds(
+            L.latLngBounds([
+              [pickup.lat, pickup.lng],
+              [destination.lat, destination.lng],
+            ]).pad(0.35)
+          );
+        } else {
+          map.setView([destination.lat, destination.lng], 14);
+        }
         hasFitRef.current = true;
       }
     }

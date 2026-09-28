@@ -14,6 +14,8 @@ import {
   Star,
   Inbox,
   Navigation,
+  EyeOff,
+  Eye,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
@@ -21,28 +23,8 @@ import { Restaurant, Order } from '../../types/database';
 import { formatGHS } from '../../lib/pricing';
 import { RestaurantShell } from '../../components/restaurant/RestaurantShell';
 import { CourierLiveMap, LatLng, haversineKm } from '../../components/courier/CourierLiveMap';
-
-// Web Audio API synthesized alert chime for incoming orders
-function playOrderAlertTone() {
-  try {
-    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'triangle';
-    osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.15); // A5
-    gain.gain.setValueAtTime(0.3, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.5);
-  } catch {
-    // Audio context may require prior user interaction
-  }
-}
+import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
+import { playRestaurantOrderAlert } from '../../lib/soundAlerts';
 
 // "3 min ago" style helper for order cards
 function timeAgo(iso: string) {
@@ -86,8 +68,9 @@ export const RestaurantDashboard: React.FC = () => {
   // Live courier GPS positions for dispatched orders, keyed by courier id.
   // Seeded from the couriers table and updated via realtime.
   const [courierPositions, setCourierPositions] = useState<
-    Record<string, { lat: number; lng: number; updatedAt?: string; name?: string }>
+    Record<string, { lat: number; lng: number; updatedAt?: string; name?: string; phone?: string }>
   >({});
+  const [selectedMapOrder, setSelectedMapOrder] = useState<Order | null>(null);
 
   // Realtime alerts & Driver assignment
   const [newOrderAlert, setNewOrderAlert] = useState<string | null>(null);
@@ -144,7 +127,7 @@ export const RestaurantDashboard: React.FC = () => {
         if (courierIds.length > 0) {
           const { data: courierRows } = await supabase
             .from('couriers')
-            .select('id, current_latitude, current_longitude, current_location_updated_at, profile:profiles(id, full_name)')
+            .select('id, current_latitude, current_longitude, current_location_updated_at, profile:profiles(id, full_name, phone)')
             .in('id', courierIds);
 
           if (courierRows) {
@@ -159,6 +142,7 @@ export const RestaurantDashboard: React.FC = () => {
                       lng: c.current_longitude as number,
                       updatedAt: c.current_location_updated_at as string | undefined,
                       name: (c.profile as { full_name?: string } | null)?.full_name,
+                      phone: (c.profile as { phone?: string } | null)?.phone,
                     },
                   ])
               )
@@ -189,7 +173,7 @@ export const RestaurantDashboard: React.FC = () => {
         (payload) => {
           fetchRestaurantAndOrders();
           if (payload.eventType === 'INSERT') {
-            playOrderAlertTone();
+            playRestaurantOrderAlert();
             setNewOrderAlert(`🔔 New Order #${(payload.new as Order)?.order_number || 'Incoming'} received in real-time!`);
             setTimeout(() => setNewOrderAlert(null), 8000);
           }
@@ -214,6 +198,31 @@ export const RestaurantDashboard: React.FC = () => {
                 lng: next.current_longitude as number,
                 updatedAt: next.current_location_updated_at,
                 name: prev[next.id]?.name,
+                phone: prev[next.id]?.phone,
+              },
+            }));
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'delivery_locations' },
+        (payload) => {
+          const loc = payload.new as {
+            courier_id: string;
+            latitude: number;
+            longitude: number;
+            recorded_at: string;
+          };
+          if (loc?.courier_id && loc?.latitude != null && loc?.longitude != null) {
+            setCourierPositions((prev) => ({
+              ...prev,
+              [loc.courier_id]: {
+                lat: loc.latitude,
+                lng: loc.longitude,
+                updatedAt: loc.recorded_at,
+                name: prev[loc.courier_id]?.name,
+                phone: prev[loc.courier_id]?.phone,
               },
             }));
           }
@@ -539,6 +548,10 @@ export const RestaurantDashboard: React.FC = () => {
     ['READY_FOR_PICKUP', 'COURIER_ASSIGNED', 'COURIER_ACCEPTED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED'].includes(o.status)
   );
   const completedOrders = orders.filter((o) => ['DELIVERED', 'COMPLETED'].includes(o.status));
+  const liveDispatches = orders.filter((o) =>
+    ['COURIER_ASSIGNED', 'COURIER_ACCEPTED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED'].includes(o.status) ||
+    Boolean(o.courier_id && !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REJECTED'].includes(o.status))
+  );
 
   // Financial calculations
   const totalRevenue = completedOrders.reduce((sum, o) => sum + o.subtotal, 0);
@@ -612,16 +625,27 @@ export const RestaurantDashboard: React.FC = () => {
             </div>
 
             <div className="flex flex-col gap-2 sm:items-end">
-              <span
-                className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-black uppercase tracking-wider ring-1 ${
-                  restaurant.is_open
-                    ? 'bg-emerald-400/15 text-emerald-200 ring-emerald-300/30'
-                    : 'bg-rose-400/15 text-rose-200 ring-rose-300/30'
-                }`}
-              >
-                <span className={`w-2 h-2 rounded-full ${restaurant.is_open ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
-                {restaurant.is_open ? 'Kitchen Open' : 'Kitchen Closed'}
-              </span>
+              <div className="flex items-center gap-2 flex-wrap sm:justify-end">
+                <button
+                  type="button"
+                  onClick={() => playRestaurantOrderAlert()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-white/15 hover:bg-white/25 active:scale-95 text-emerald-100 ring-1 ring-white/20 transition backdrop-blur-xs"
+                  title="Test professional restaurant ringing bell alert"
+                >
+                  <Bell className="w-3.5 h-3.5 text-amber-300" />
+                  <span>Test Ring Bell</span>
+                </button>
+                <span
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-black uppercase tracking-wider ring-1 ${
+                    restaurant.is_open
+                      ? 'bg-emerald-400/15 text-emerald-200 ring-emerald-300/30'
+                      : 'bg-rose-400/15 text-rose-200 ring-rose-300/30'
+                  }`}
+                >
+                  <span className={`w-2 h-2 rounded-full ${restaurant.is_open ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+                  {restaurant.is_open ? 'Kitchen Open' : 'Kitchen Closed'}
+                </span>
+              </div>
               <p className="hidden sm:block text-[10px] text-emerald-100/60">
                 Open/Close, menu & photos live in the sidebar →
               </p>
@@ -693,6 +717,85 @@ export const RestaurantDashboard: React.FC = () => {
           </div>
         </div>
 
+        {/* Live Dispatches & Moving Couriers Tracker Banner */}
+        {liveDispatches.length > 0 && (
+          <div className="bg-emerald-950 text-white rounded-3xl p-5 border border-emerald-800 shadow-md space-y-4">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center flex-shrink-0">
+                  <Navigation className="w-4 h-4 animate-pulse" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-sm font-black tracking-tight">
+                      Live Dispatches &amp; Moving Couriers
+                    </h2>
+                    <span className="text-[10px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                      {liveDispatches.length} Moving Live
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-emerald-300/80">
+                    Realtime courier movements assigned to your kitchen orders
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {liveDispatches.map((dispatch) => {
+                const pos = dispatch.courier_id ? courierPositions[dispatch.courier_id] : null;
+                const isHeadingToKitchen =
+                  dispatch.status === 'COURIER_ASSIGNED' ||
+                  dispatch.status === 'COURIER_ACCEPTED' ||
+                  dispatch.status === 'PREPARING' ||
+                  dispatch.status === 'READY_FOR_PICKUP';
+                const distToKitchen =
+                  pos && restaurant?.latitude && restaurant?.longitude
+                    ? haversineKm(pos, { lat: restaurant.latitude, lng: restaurant.longitude })
+                    : null;
+                const distToCustomer =
+                  pos && dispatch.delivery_latitude && dispatch.delivery_longitude
+                    ? haversineKm(pos, { lat: dispatch.delivery_latitude, lng: dispatch.delivery_longitude })
+                    : null;
+
+                return (
+                  <div
+                    key={dispatch.id}
+                    className="p-3.5 rounded-2xl bg-emerald-900/60 border border-emerald-700/60 flex items-center justify-between gap-3 text-xs"
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-black text-white">#{dispatch.order_number}</span>
+                        <span className="text-[10px] font-bold text-emerald-200 uppercase bg-emerald-800/80 px-2 py-0.5 rounded">
+                          {dispatch.status.replace(/_/g, ' ')}
+                        </span>
+                      </div>
+                      <p className="text-emerald-100 font-semibold truncate text-[11px]">
+                        🛵 {dispatch.courier?.full_name || 'Courier'} &rarr; {dispatch.customer?.full_name || 'Customer'}
+                      </p>
+                      <p className="text-[10px] text-emerald-300/90 font-medium">
+                        {isHeadingToKitchen
+                          ? `Moving to kitchen ${distToKitchen !== null ? `(${distToKitchen.toFixed(1)} km away)` : ''}`
+                          : `Delivering to customer ${distToCustomer !== null ? `(${distToCustomer.toFixed(1)} km to drop-off)` : ''}`}
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setSelectedMapOrder(dispatch)}
+                      className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-slate-950 font-black text-xs flex items-center gap-1.5 shadow-sm transition flex-shrink-0"
+                    >
+                      <Navigation className="w-3.5 h-3.5" />
+                      <span>Live Map</span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Orders Pipeline Tabs */}
         <div className="bg-white rounded-3xl p-4 sm:p-6 border border-slate-200 shadow-xs space-y-5">
 
@@ -757,6 +860,16 @@ export const RestaurantDashboard: React.FC = () => {
                     onMarkReady={() => handleUpdateOrderStatus(order.id, 'READY_FOR_PICKUP')}
                     onAssignDriver={() => handleOpenAssignDriverModal(order)}
                     actionType="PREPARING"
+                    courierPosition={
+                      order.courier_id ? courierPositions[order.courier_id] ?? null : null
+                    }
+                    courierName={order.courier?.full_name}
+                    pickup={
+                      restaurant?.latitude && restaurant?.longitude
+                        ? { lat: restaurant.latitude, lng: restaurant.longitude }
+                        : null
+                    }
+                    onOpenLiveMap={() => setSelectedMapOrder(order)}
                   />
                 ))
               )
@@ -785,6 +898,7 @@ export const RestaurantDashboard: React.FC = () => {
                         ? { lat: restaurant.latitude, lng: restaurant.longitude }
                         : null
                     }
+                    onOpenLiveMap={() => setSelectedMapOrder(order)}
                   />
                 ))
               )
@@ -803,6 +917,7 @@ export const RestaurantDashboard: React.FC = () => {
                     key={order.id}
                     order={order}
                     actionType="COMPLETED"
+                    onOpenLiveMap={() => setSelectedMapOrder(order)}
                   />
                 ))
               )
@@ -908,6 +1023,47 @@ export const RestaurantDashboard: React.FC = () => {
         </div>
       )}
 
+      {/* Live Delivery Map Modal for Restaurant */}
+      {selectedMapOrder && (
+        <LiveDeliveryMapModal
+          isOpen={Boolean(selectedMapOrder)}
+          onClose={() => setSelectedMapOrder(null)}
+          orderNumber={selectedMapOrder.order_number}
+          status={selectedMapOrder.status}
+          courierPosition={
+            selectedMapOrder.courier_id
+              ? courierPositions[selectedMapOrder.courier_id] ?? null
+              : null
+          }
+          pickup={
+            restaurant?.latitude && restaurant?.longitude
+              ? { lat: restaurant.latitude, lng: restaurant.longitude }
+              : null
+          }
+          pickupName={restaurant?.name || 'Your Kitchen'}
+          pickupAddress={
+            restaurant
+              ? `${restaurant.address}, ${restaurant.city}`
+              : undefined
+          }
+          destination={
+            selectedMapOrder.delivery_latitude && selectedMapOrder.delivery_longitude
+              ? { lat: selectedMapOrder.delivery_latitude, lng: selectedMapOrder.delivery_longitude }
+              : null
+          }
+          destinationName={selectedMapOrder.customer?.full_name || 'Customer'}
+          destinationAddress={selectedMapOrder.delivery_address}
+          courierName={selectedMapOrder.courier?.full_name || 'Assigned Courier'}
+          courierPhone={
+            selectedMapOrder.courier_id
+              ? courierPositions[selectedMapOrder.courier_id]?.phone
+              : undefined
+          }
+          customerPhone={selectedMapOrder.customer_phone}
+          role="RESTAURANT"
+        />
+      )}
+
     </RestaurantShell>
   );
 };
@@ -935,6 +1091,7 @@ interface OrderCardProps {
   onReject?: () => void;
   onMarkReady?: () => void;
   onAssignDriver?: () => void;
+  onOpenLiveMap?: () => void;
   /** Live GPS fix of the assigned courier (null = no fix yet) */
   courierPosition?: LatLng | null;
   courierName?: string;
@@ -956,10 +1113,13 @@ const RestaurantOrderCard: React.FC<OrderCardProps> = ({
   onReject,
   onMarkReady,
   onAssignDriver,
+  onOpenLiveMap,
   courierPosition,
   courierName,
   pickup,
 }) => {
+  const [isCardMapHidden, setIsCardMapHidden] = useState(false);
+
   return (
     <div className="relative bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden hover:shadow-md transition">
       {/* Status accent stripe */}
@@ -1021,51 +1181,138 @@ const RestaurantOrderCard: React.FC<OrderCardProps> = ({
         {/* Courier Status indicator if assigned (+ live map on dispatched cards) */}
         {order.courier && (
           <div className="space-y-3">
-            <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2 text-xs">
+            <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2 text-xs flex-wrap">
               <div className="flex items-center gap-2 min-w-0">
                 <Bike className="w-4 h-4 text-emerald-700 flex-shrink-0" />
                 <span className="font-bold text-emerald-900 truncate">
                   Courier: {order.courier.full_name}
                 </span>
               </div>
-              <span className="text-[10px] font-bold text-emerald-700 uppercase flex-shrink-0">
-                {order.status.replace(/_/g, ' ')}
-              </span>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {onOpenLiveMap && (
+                  <button
+                    type="button"
+                    onClick={onOpenLiveMap}
+                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-[11px] flex items-center gap-1 shadow-xs transition"
+                  >
+                    <Navigation className="w-3 h-3" />
+                    <span>Live Map</span>
+                  </button>
+                )}
+                {Boolean(
+                  ['COURIER_ASSIGNED', 'COURIER_ACCEPTED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED'].includes(order.status) ||
+                  (order.courier_id && !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REJECTED'].includes(order.status))
+                ) && (
+                  <button
+                    type="button"
+                    onClick={() => setIsCardMapHidden(!isCardMapHidden)}
+                    className="px-2 py-1 rounded-lg bg-white hover:bg-slate-100 border border-emerald-300 text-slate-700 font-bold text-[11px] flex items-center gap-1 transition"
+                    title={isCardMapHidden ? 'Show live map on card' : 'Hide map on card'}
+                  >
+                    {isCardMapHidden ? (
+                      <>
+                        <Eye className="w-3 h-3 text-slate-500" />
+                        <span>Show Map</span>
+                      </>
+                    ) : (
+                      <>
+                        <EyeOff className="w-3 h-3 text-slate-500" />
+                        <span>Hide Map</span>
+                      </>
+                    )}
+                  </button>
+                )}
+                <span className="text-[10px] font-bold text-emerald-700 uppercase flex-shrink-0">
+                  {order.status.replace(/_/g, ' ')}
+                </span>
+              </div>
             </div>
 
-            {/* Live courier map for dispatched orders */}
-            {['COURIER_ASSIGNED', 'COURIER_ACCEPTED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED'].includes(
-              order.status
+            {/* Live courier moves for dispatched orders */}
+            {Boolean(
+              ['COURIER_ASSIGNED', 'COURIER_ACCEPTED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED'].includes(order.status) ||
+              (order.courier_id && !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REJECTED'].includes(order.status))
             ) && (
               <>
-                {/* Distance readout: courier → customer drop-off */}
-                {courierPosition && order.delivery_latitude && order.delivery_longitude && (
-                  <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-white border border-slate-200 text-[11px]">
-                    <span className="flex items-center gap-1.5 font-bold text-slate-700">
-                      <Navigation className="w-3.5 h-3.5 text-emerald-600" />
-                      Courier → Customer
+                {/* Movement direction readout */}
+                {(() => {
+                  const isHeadingToKitchen =
+                    order.status === 'COURIER_ASSIGNED' ||
+                    order.status === 'COURIER_ACCEPTED' ||
+                    order.status === 'PREPARING' ||
+                    order.status === 'READY_FOR_PICKUP';
+                  const distToKitchen =
+                    courierPosition && pickup ? haversineKm(courierPosition, pickup) : null;
+                  const distToCustomer =
+                    courierPosition && order.delivery_latitude && order.delivery_longitude
+                      ? haversineKm(courierPosition, {
+                          lat: order.delivery_latitude,
+                          lng: order.delivery_longitude,
+                        })
+                      : null;
+
+                  return (
+                    <div
+                      className={`flex items-center justify-between px-3 py-2 rounded-xl text-[11px] border ${
+                        isHeadingToKitchen
+                          ? 'bg-amber-50/80 border-amber-200 text-amber-900'
+                          : 'bg-emerald-50/80 border-emerald-200 text-emerald-900'
+                      }`}
+                    >
+                      <span className="flex items-center gap-1.5 font-bold">
+                        <Navigation
+                          className={`w-3.5 h-3.5 animate-pulse ${
+                            isHeadingToKitchen ? 'text-amber-600' : 'text-emerald-600'
+                          }`}
+                        />
+                        <span>
+                          {isHeadingToKitchen
+                            ? '🛵 Courier is moving to your kitchen for pickup'
+                            : '🛵 Courier is delivering food to customer'}
+                        </span>
+                      </span>
+                      {isHeadingToKitchen && distToKitchen !== null ? (
+                        <span className="font-black text-amber-800">
+                          {distToKitchen.toFixed(1)} km away
+                        </span>
+                      ) : !isHeadingToKitchen && distToCustomer !== null ? (
+                        <span className="font-black text-emerald-800">
+                          {distToCustomer.toFixed(1)} km to drop-off
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 font-medium">Tracking live</span>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {!isCardMapHidden ? (
+                  <CourierLiveMap
+                    courierPosition={courierPosition ?? null}
+                    destination={
+                      order.delivery_latitude && order.delivery_longitude
+                        ? { lat: order.delivery_latitude, lng: order.delivery_longitude }
+                        : null
+                    }
+                    pickup={pickup ?? null}
+                    courierName={courierName ?? order.courier.full_name}
+                    className="h-56 sm:h-64"
+                  />
+                ) : (
+                  <div className="py-2.5 px-3 rounded-xl bg-slate-50 border border-dashed border-slate-200 flex items-center justify-between text-xs text-slate-500">
+                    <span className="flex items-center gap-1.5 text-[11px]">
+                      <EyeOff className="w-3.5 h-3.5 text-slate-400" />
+                      <span>Card map hidden. Courier moves are tracking in background.</span>
                     </span>
-                    <span className="font-black text-emerald-700">
-                      {haversineKm(
-                        courierPosition,
-                        { lat: order.delivery_latitude, lng: order.delivery_longitude }
-                      ).toFixed(1)}{' '}
-                      km away
-                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsCardMapHidden(false)}
+                      className="font-bold text-emerald-600 hover:text-emerald-700 underline text-[11px]"
+                    >
+                      Show Map
+                    </button>
                   </div>
                 )}
-
-                <CourierLiveMap
-                  courierPosition={courierPosition ?? null}
-                  destination={
-                    order.delivery_latitude && order.delivery_longitude
-                      ? { lat: order.delivery_latitude, lng: order.delivery_longitude }
-                      : null
-                  }
-                  pickup={pickup ?? null}
-                  courierName={courierName ?? order.courier.full_name}
-                  className="h-56 sm:h-64"
-                />
               </>
             )}
           </div>

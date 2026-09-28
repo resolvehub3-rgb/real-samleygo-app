@@ -1,15 +1,84 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ShoppingBag, ChevronRight, Clock, MapPin, AlertCircle } from 'lucide-react';
+import { ShoppingBag, ChevronRight, Clock, MapPin, AlertCircle, Navigation } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { Order } from '../../types/database';
 import { useAuth } from '../../context/AuthContext';
 import { formatGHS } from '../../lib/pricing';
+import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
+import { playCustomerPickupAlert, playCustomerDeliveredAlert } from '../../lib/soundAlerts';
 
 export const OrdersPage: React.FC = () => {
   const { user } = useAuth();
   const [orders, setOrders] = useState<Order[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [mapOrder, setMapOrder] = useState<Order | null>(null);
+  const [mapCourierPos, setMapCourierPos] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Live GPS courier tracking for the opened map modal on Orders list
+  useEffect(() => {
+    if (!mapOrder?.courier_id || !isSupabaseConfigured) {
+      setMapCourierPos(null);
+      return;
+    }
+
+    let isMounted = true;
+
+    // Fetch initial courier location
+    supabase
+      .from('couriers')
+      .select('current_latitude, current_longitude')
+      .eq('id', mapOrder.courier_id)
+      .single()
+      .then(({ data }) => {
+        if (isMounted && data?.current_latitude && data?.current_longitude) {
+          setMapCourierPos({ lat: data.current_latitude, lng: data.current_longitude });
+        }
+      });
+
+    // Listen to courier live movements in realtime
+    const channel = supabase
+      .channel(`modal-courier-track-${mapOrder.courier_id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'couriers',
+          filter: `id=eq.${mapOrder.courier_id}`,
+        },
+        (payload) => {
+          const next = payload.new as {
+            current_latitude?: number | null;
+            current_longitude?: number | null;
+          };
+          if (isMounted && next.current_latitude != null && next.current_longitude != null) {
+            setMapCourierPos({ lat: next.current_latitude, lng: next.current_longitude });
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'delivery_locations',
+          filter: `courier_id=eq.${mapOrder.courier_id}`,
+        },
+        (payload) => {
+          const loc = payload.new as { latitude?: number; longitude?: number };
+          if (isMounted && loc.latitude != null && loc.longitude != null) {
+            setMapCourierPos({ lat: loc.latitude, lng: loc.longitude });
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      isMounted = false;
+      supabase.removeChannel(channel);
+    };
+  }, [mapOrder?.courier_id]);
 
   const fetchOrders = async () => {
     if (!user || !isSupabaseConfigured) {
@@ -49,7 +118,22 @@ export const OrdersPage: React.FC = () => {
             table: 'orders',
             filter: `customer_id=eq.${user.id}`,
           },
-          () => {
+          (payload) => {
+            const newOrder = payload.new as Order | undefined;
+            const oldOrder = payload.old as Partial<Order> | undefined;
+
+            if (payload.eventType === 'UPDATE' && newOrder?.status) {
+              if (newOrder.status === 'PICKED_UP' && oldOrder?.status !== 'PICKED_UP') {
+                playCustomerPickupAlert();
+              } else if (
+                (newOrder.status === 'DELIVERED' || newOrder.status === 'COMPLETED') &&
+                oldOrder?.status !== 'DELIVERED' &&
+                oldOrder?.status !== 'COMPLETED'
+              ) {
+                playCustomerDeliveredAlert();
+              }
+            }
+
             fetchOrders();
           }
         )
@@ -179,21 +263,69 @@ export const OrdersPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
+                  <div className="mt-3 flex items-center justify-between text-xs text-slate-500 flex-wrap gap-2">
                     <div className="flex items-center gap-1.5 truncate max-w-xs sm:max-w-md">
                       <MapPin className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
                       <span className="truncate">{order.delivery_address}</span>
                     </div>
 
-                    <div className="flex items-center gap-1 text-emerald-700 font-bold flex-shrink-0">
-                      <span>{isActive ? 'Track Live' : 'View Details'}</span>
-                      <ChevronRight className="w-4 h-4" />
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {isActive && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setMapOrder(order);
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-[11px] flex items-center gap-1 shadow-xs transition"
+                        >
+                          <Navigation className="w-3 h-3" />
+                          <span>Live Map</span>
+                        </button>
+                      )}
+                      <div className="flex items-center gap-1 text-emerald-700 font-bold">
+                        <span>{isActive ? 'Track Live' : 'View Details'}</span>
+                        <ChevronRight className="w-4 h-4" />
+                      </div>
                     </div>
                   </div>
                 </Link>
               );
             })}
           </div>
+        )}
+
+        {/* Live Delivery Map Modal */}
+        {mapOrder && (
+          <LiveDeliveryMapModal
+            isOpen={Boolean(mapOrder)}
+            onClose={() => setMapOrder(null)}
+            orderNumber={mapOrder.order_number}
+            status={mapOrder.status}
+            courierPosition={mapCourierPos}
+            pickup={
+              mapOrder.restaurant?.latitude && mapOrder.restaurant?.longitude
+                ? { lat: mapOrder.restaurant.latitude, lng: mapOrder.restaurant.longitude }
+                : null
+            }
+            pickupName={mapOrder.restaurant?.name}
+            pickupAddress={
+              mapOrder.restaurant
+                ? `${mapOrder.restaurant.address}, ${mapOrder.restaurant.city}`
+                : undefined
+            }
+            destination={
+              mapOrder.delivery_latitude && mapOrder.delivery_longitude
+                ? { lat: mapOrder.delivery_latitude, lng: mapOrder.delivery_longitude }
+                : null
+            }
+            destinationName={mapOrder.customer?.full_name || 'Delivery Address'}
+            destinationAddress={mapOrder.delivery_address}
+            courierName={mapOrder.courier?.full_name || 'Assigned Courier'}
+            customerPhone={mapOrder.customer_phone}
+            role="CUSTOMER"
+          />
         )}
       </div>
     </div>
