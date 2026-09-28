@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowRight,
@@ -13,11 +13,15 @@ import {
   Inbox,
   LayoutDashboard,
   LogOut,
+  MapPin,
   Menu,
+  Phone,
   Receipt,
   RefreshCw,
+  Search,
   ShieldCheck,
   Sliders,
+  Star,
   Store,
   UserCheck,
   Users,
@@ -158,17 +162,48 @@ interface EmptyStateProps {
   icon: LucideIcon;
   title: string;
   hint?: string;
+  action?: React.ReactNode;
 }
 
-const EmptyState: React.FC<EmptyStateProps> = ({ icon: Icon, title, hint }) => (
+const EmptyState: React.FC<EmptyStateProps> = ({ icon: Icon, title, hint, action }) => (
   <div className="flex flex-col items-center py-12 text-center">
     <span className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400 ring-1 ring-slate-200">
       <Icon className="w-5 h-5" />
     </span>
     <p className="mt-3 text-sm font-bold text-slate-700">{title}</p>
     {hint && <p className="mt-1 max-w-sm text-xs text-slate-400">{hint}</p>}
+    {action && <div className="mt-4">{action}</div>}
   </div>
 );
+
+interface SummaryTileProps {
+  label: string;
+  value: string;
+  icon: LucideIcon;
+  tone: StatTone;
+}
+
+/** Compact metric tile used above tabular sections (restaurants, couriers). */
+const SummaryTile: React.FC<SummaryTileProps> = ({ label, value, icon: Icon, tone }) => {
+  const t = STAT_TONE[tone];
+  return (
+    <div
+      className={`flex items-center gap-3 rounded-2xl bg-white p-4 ring-1 ring-slate-200/80 transition duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/5`}
+    >
+      <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ring-1 ${t.tile}`}>
+        <Icon className="h-4 w-4" />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-lg font-black leading-none tabular-nums text-slate-900">
+          {value}
+        </span>
+        <span className="mt-1.5 block truncate text-[10px] font-black uppercase tracking-wider text-slate-400">
+          {label}
+        </span>
+      </span>
+    </div>
+  );
+};
 
 interface StatCardProps {
   label: string;
@@ -416,6 +451,12 @@ export const AdminDashboard: React.FC = () => {
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [notice, setNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
 
+  // Restaurant partner directory filters (client-side; the table is small)
+  const [restaurantQuery, setRestaurantQuery] = useState('');
+  const [restaurantFilter, setRestaurantFilter] = useState<
+    'ALL' | 'PENDING' | 'APPROVED' | 'OPEN'
+  >('ALL');
+
   const notify = (text: string, tone: 'success' | 'error' = 'success') =>
     setNotice({ text, tone });
 
@@ -627,6 +668,37 @@ export const AdminDashboard: React.FC = () => {
   const fleetOnlinePercent =
     couriers.length > 0 ? (onlineCouriers / couriers.length) * 100 : 0;
   const pendingTotal = pendingRestaurants + pendingCouriers + pendingDocs;
+
+  // Restaurant directory rollups
+  const approvedRestaurants = restaurants.length - pendingRestaurants;
+  const openRestaurants = restaurants.filter((r) => r.is_open).length;
+  const averageRating =
+    restaurants.length > 0
+      ? restaurants.reduce((sum, r) => sum + (r.rating || 0), 0) / restaurants.length
+      : 0;
+
+  const restaurantFilters: { key: typeof restaurantFilter; label: string; count: number }[] = [
+    { key: 'ALL', label: 'All', count: restaurants.length },
+    { key: 'PENDING', label: 'Pending', count: pendingRestaurants },
+    { key: 'APPROVED', label: 'Approved', count: approvedRestaurants },
+    { key: 'OPEN', label: 'Open now', count: openRestaurants },
+  ];
+
+  const filteredRestaurants = useMemo(() => {
+    const query = restaurantQuery.trim().toLowerCase();
+    return restaurants.filter((r) => {
+      const matchesQuery =
+        !query ||
+        [r.name, r.cuisine_type, r.city, r.address, r.phone].some((field) =>
+          (field ?? '').toLowerCase().includes(query)
+        );
+      if (!matchesQuery) return false;
+      if (restaurantFilter === 'PENDING') return !r.is_approved;
+      if (restaurantFilter === 'APPROVED') return r.is_approved;
+      if (restaurantFilter === 'OPEN') return r.is_open;
+      return true;
+    });
+  }, [restaurants, restaurantQuery, restaurantFilter]);
 
   // Pricing preview (mirrors the exact fee the customer would be charged)
   const sampleFee = calculateDeliveryFee(SAMPLE_DISTANCE_KM, pricingSettings);
@@ -1149,86 +1221,242 @@ export const AdminDashboard: React.FC = () => {
 
               {/* ================= RESTAURANTS ================= */}
               {activeTab === 'RESTAURANTS' && (
-                <SectionCard
-                  title="Restaurant partners"
-                  subtitle={`Approve or suspend kitchens operating on the platform · ${restaurants.length} registered`}
-                  action={
-                    <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-black text-emerald-700 ring-1 ring-emerald-500/15">
-                      {restaurants.filter((r) => r.is_approved).length} approved
-                    </span>
-                  }
-                >
-                  {restaurants.length === 0 ? (
-                    <EmptyState
-                      icon={Store}
-                      title="No restaurant registrations"
-                      hint="Kitchens that sign up through SamleyGo will appear here so you can review and approve them."
+                <>
+                  <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+                    <SummaryTile
+                      label="Approved partners"
+                      value={String(approvedRestaurants)}
+                      icon={CheckCircle}
+                      tone="emerald"
                     />
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <table className="w-full min-w-[780px] text-left text-[13px]">
-                        <thead>
-                          <tr className="border-b border-slate-200 text-[10px] text-slate-500">
-                            <th className={TH}>Restaurant</th>
-                            <th className={TH}>City / address</th>
-                            <th className={TH}>Phone</th>
-                            <th className={TH}>Status</th>
-                            <th className="pb-3 text-right font-black uppercase tracking-wider">
-                              Approval action
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {restaurants.map((r) => (
-                            <tr key={r.id} className="transition hover:bg-slate-50/70">
-                              <td className={TD}>
-                                <div className="flex min-w-0 items-center gap-3">
-                                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-[11px] font-black text-slate-500 ring-1 ring-slate-200">
-                                    {monogram(r.name)}
-                                  </span>
-                                  <div className="min-w-0">
-                                    <p className="truncate font-bold text-slate-900">{r.name}</p>
-                                    <p className="truncate text-[11px] text-slate-500">
-                                      {r.cuisine_type}
-                                    </p>
-                                  </div>
-                                </div>
-                              </td>
-                              <td className={`${TD} text-slate-500`}>
-                                {r.address}, {r.city}
-                              </td>
-                              <td className={`${TD} font-medium text-slate-700`}>{r.phone}</td>
-                              <td className={TD}>
-                                <span
-                                  className={`inline-block rounded-md px-2 py-0.5 text-[10px] font-bold ${
-                                    r.is_approved
-                                      ? 'bg-emerald-100 text-emerald-800'
-                                      : 'bg-amber-100 text-amber-800'
-                                  }`}
-                                >
-                                  {r.is_approved ? 'Approved' : 'Pending verification'}
-                                </span>
-                              </td>
-                              <td className="py-3 text-right">
-                                <button
-                                  type="button"
-                                  onClick={() => handleToggleRestaurantApproval(r.id, r.is_approved)}
-                                  className={`rounded-lg px-3 py-1.5 text-[11px] font-bold transition ${
-                                    r.is_approved
-                                      ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-100 hover:bg-rose-600 hover:text-white hover:ring-rose-600'
-                                      : 'bg-emerald-600 text-white shadow-sm shadow-emerald-600/20 hover:bg-emerald-700'
-                                  }`}
-                                >
-                                  {r.is_approved ? 'Suspend' : 'Approve partner'}
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                    <SummaryTile
+                      label="Awaiting review"
+                      value={String(pendingRestaurants)}
+                      icon={AlertCircle}
+                      tone="amber"
+                    />
+                    <SummaryTile
+                      label="Open right now"
+                      value={String(openRestaurants)}
+                      icon={Store}
+                      tone="sky"
+                    />
+                    <SummaryTile
+                      label="Average rating"
+                      value={averageRating > 0 ? averageRating.toFixed(1) : '—'}
+                      icon={Star}
+                      tone="violet"
+                    />
+                  </div>
+
+                  <SectionCard
+                    title="Restaurant partners"
+                    subtitle="Approve or suspend kitchens operating on the platform"
+                    action={
+                      <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-black text-emerald-700 ring-1 ring-emerald-500/15">
+                        {approvedRestaurants} of {restaurants.length} approved
+                      </span>
+                    }
+                  >
+                    {/* ---- Toolbar: search + segmented status filters ---- */}
+                    <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="relative w-full lg:max-w-xs">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="search"
+                          value={restaurantQuery}
+                          onChange={(e) => setRestaurantQuery(e.target.value)}
+                          placeholder="Search kitchen, cuisine or city…"
+                          aria-label="Search restaurants"
+                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-xs font-bold text-slate-900 transition placeholder:font-medium placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {restaurantFilters.map((f) => {
+                          const isActive = restaurantFilter === f.key;
+                          return (
+                            <button
+                              key={f.key}
+                              type="button"
+                              onClick={() => setRestaurantFilter(f.key)}
+                              aria-pressed={isActive}
+                              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-black transition ${
+                                isActive
+                                  ? 'bg-slate-900 text-white shadow-md shadow-slate-900/20'
+                                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900'
+                              }`}
+                            >
+                              {f.label}
+                              <span
+                                className={`tabular-nums ${
+                                  isActive ? 'text-white/60' : 'text-slate-400'
+                                }`}
+                              >
+                                {f.count}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
-                  )}
-                </SectionCard>
+
+                    {/* ---- Results ---- */}
+                    {restaurants.length === 0 ? (
+                      <EmptyState
+                        icon={Store}
+                        title="No restaurant registrations"
+                        hint="Kitchens that sign up through SamleyGo will appear here so you can review and approve them."
+                      />
+                    ) : filteredRestaurants.length === 0 ? (
+                      <EmptyState
+                        icon={Search}
+                        title="No kitchens match your search"
+                        hint="Try a different kitchen name, cuisine or city — or clear the filters to see every partner."
+                        action={
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRestaurantQuery('');
+                              setRestaurantFilter('ALL');
+                            }}
+                            className="rounded-xl bg-slate-900 px-4 py-2 text-[11px] font-black text-white transition hover:bg-slate-800"
+                          >
+                            Clear search & filters
+                          </button>
+                        }
+                      />
+                    ) : (
+                      <ul className="divide-y divide-slate-100">
+                        {filteredRestaurants.map((r) => (
+                          <li
+                            key={r.id}
+                            className={`group relative -mx-2 flex flex-col gap-3 px-2 py-4 transition first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:gap-4 ${
+                              r.is_approved ? 'hover:bg-slate-50/70' : 'bg-amber-50/40'
+                            }`}
+                          >
+                            {/* Pending kitchens get a attention rail down the left edge */}
+                            {!r.is_approved && (
+                              <span
+                                aria-hidden="true"
+                                className="absolute inset-y-0 left-0 w-1 rounded-full bg-gradient-to-b from-amber-400 to-orange-500 sm:-left-2"
+                              />
+                            )}
+
+                            {/* Identity: logo, name, cuisine, location, rating */}
+                            <div className="flex min-w-0 flex-1 items-start gap-3">
+                              <span className="relative grid h-12 w-12 shrink-0 place-items-center overflow-hidden rounded-2xl bg-gradient-to-br from-emerald-400 via-emerald-500 to-teal-600 text-xs font-black text-white shadow-md shadow-emerald-900/15 ring-1 ring-black/5">
+                                {r.logo_url ? (
+                                  <img
+                                    src={r.logo_url}
+                                    alt=""
+                                    className="h-full w-full object-cover"
+                                    loading="lazy"
+                                  />
+                                ) : (
+                                  monogram(r.name)
+                                )}
+                              </span>
+
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <p className="truncate text-[13px] font-black text-slate-900">
+                                    {r.name}
+                                  </p>
+                                  <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider text-slate-500">
+                                    {r.cuisine_type}
+                                  </span>
+                                  <span
+                                    className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider ${
+                                      r.is_open
+                                        ? 'bg-emerald-50 text-emerald-700'
+                                        : 'bg-slate-100 text-slate-500'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`h-1.5 w-1.5 rounded-full ${
+                                        r.is_open ? 'bg-emerald-500' : 'bg-slate-400'
+                                      }`}
+                                    />
+                                    {r.is_open ? 'Open' : 'Closed'}
+                                  </span>
+                                </div>
+
+                                <p className="mt-1 flex items-center gap-1 truncate text-[11px] text-slate-500">
+                                  <MapPin className="h-3 w-3 shrink-0 text-slate-400" />
+                                  <span className="truncate">
+                                    {r.address}, {r.city}
+                                  </span>
+                                </p>
+
+                                <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                                  <span className="inline-flex items-center gap-1">
+                                    <Phone className="h-3 w-3 text-slate-400" />
+                                    {r.phone}
+                                  </span>
+                                  <span className="inline-flex items-center gap-1 font-bold text-amber-500">
+                                    <Star className="h-3 w-3 fill-current" />
+                                    {(r.rating || 0).toFixed(1)}
+                                    <span className="font-normal text-slate-400">
+                                      ({r.total_reviews || 0})
+                                    </span>
+                                  </span>
+                                  <span className="hidden text-slate-400 md:inline">
+                                    Joined{' '}
+                                    {new Date(r.created_at).toLocaleDateString('en-GH', {
+                                      day: 'numeric',
+                                      month: 'short',
+                                      year: 'numeric',
+                                    })}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Status + actions */}
+                            <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
+                              <span
+                                className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-wider ring-1 ${
+                                  r.is_approved
+                                    ? 'bg-emerald-50 text-emerald-700 ring-emerald-500/20'
+                                    : 'bg-amber-50 text-amber-700 ring-amber-500/25'
+                                }`}
+                              >
+                                {r.is_approved ? (
+                                  <CheckCircle className="h-3 w-3" />
+                                ) : (
+                                  <AlertCircle className="h-3 w-3" />
+                                )}
+                                {r.is_approved ? 'Approved' : 'Pending review'}
+                              </span>
+
+                              <Link
+                                to={`/restaurant/${r.id}`}
+                                className="inline-flex items-center gap-1.5 rounded-xl bg-white px-3 py-2 text-[11px] font-black text-slate-600 ring-1 ring-slate-200 transition hover:bg-slate-50 hover:text-slate-900"
+                              >
+                                View
+                                <ExternalLink className="h-3 w-3" />
+                              </Link>
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleToggleRestaurantApproval(r.id, r.is_approved)
+                                }
+                                className={`inline-flex items-center gap-1.5 rounded-xl px-3.5 py-2 text-[11px] font-black transition active:scale-95 ${
+                                  r.is_approved
+                                    ? 'bg-white text-rose-600 ring-1 ring-rose-200 hover:bg-rose-600 hover:text-white hover:ring-rose-600'
+                                    : 'bg-emerald-600 text-white shadow-md shadow-emerald-600/25 hover:bg-emerald-700 hover:shadow-lg'
+                                }`}
+                              >
+                                {r.is_approved ? 'Suspend' : 'Approve partner'}
+                              </button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </SectionCard>
+                </>
               )}
 
               {/* ================= COURIERS ================= */}
