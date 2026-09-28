@@ -80,10 +80,34 @@ const CARD =
   'bg-white rounded-3xl border border-slate-200/80 shadow-[0_1px_3px_rgba(15,23,42,0.05)]';
 
 const STAT_TONE = {
-  emerald: { tile: 'bg-emerald-50 text-emerald-600 ring-emerald-500/15', bar: 'bg-emerald-500' },
-  amber: { tile: 'bg-amber-50 text-amber-600 ring-amber-500/15', bar: 'bg-amber-500' },
-  sky: { tile: 'bg-sky-50 text-sky-600 ring-sky-500/15', bar: 'bg-sky-500' },
-  violet: { tile: 'bg-violet-50 text-violet-600 ring-violet-500/15', bar: 'bg-violet-500' },
+  emerald: {
+    tile: 'bg-emerald-50 text-emerald-600 ring-emerald-500/15',
+    bar: 'bg-gradient-to-r from-emerald-400 via-emerald-500 to-teal-500',
+    blob: 'bg-emerald-500/10 group-hover:bg-emerald-500/20',
+    fill: 'bg-emerald-500',
+    tint: 'bg-emerald-50 text-emerald-700 ring-emerald-500/20',
+  },
+  amber: {
+    tile: 'bg-amber-50 text-amber-600 ring-amber-500/15',
+    bar: 'bg-gradient-to-r from-amber-400 via-amber-500 to-orange-500',
+    blob: 'bg-amber-500/10 group-hover:bg-amber-500/20',
+    fill: 'bg-amber-500',
+    tint: 'bg-amber-50 text-amber-700 ring-amber-500/20',
+  },
+  sky: {
+    tile: 'bg-sky-50 text-sky-600 ring-sky-500/15',
+    bar: 'bg-gradient-to-r from-sky-400 via-sky-500 to-cyan-500',
+    blob: 'bg-sky-500/10 group-hover:bg-sky-500/20',
+    fill: 'bg-sky-500',
+    tint: 'bg-sky-50 text-sky-700 ring-sky-500/20',
+  },
+  violet: {
+    tile: 'bg-violet-50 text-violet-600 ring-violet-500/15',
+    bar: 'bg-gradient-to-r from-violet-400 via-violet-500 to-fuchsia-500',
+    blob: 'bg-violet-500/10 group-hover:bg-violet-500/20',
+    fill: 'bg-violet-500',
+    tint: 'bg-violet-50 text-violet-700 ring-violet-500/20',
+  },
 } as const;
 
 type StatTone = keyof typeof STAT_TONE;
@@ -152,33 +176,118 @@ interface StatCardProps {
   caption: string;
   icon: LucideIcon;
   tone: StatTone;
+  /** Plain-language definition shown when the admin hovers the ⓘ hint. */
+  hint?: string;
+  /** Small secondary read-out rendered under the value (e.g. "12 orders today"). */
+  meta?: string;
+  /** Optional 0–100 completion bar shown above the footer. */
+  progress?: number;
+  progressLabel?: string;
+  /** Makes the whole card a clickable shortcut to the related section. */
+  onClick?: () => void;
 }
 
-const StatCard: React.FC<StatCardProps> = ({ label, value, caption, icon: Icon, tone }) => {
+/**
+ * Platform Overview KPI card: colour-coded accent, gradient wash, hover lift,
+ * an optional ⓘ definition (so a new admin never has to guess what a number
+ * means) and an optional progress bar for ratio metrics.
+ */
+const StatCard: React.FC<StatCardProps> = ({
+  label,
+  value,
+  caption,
+  icon: Icon,
+  tone,
+  hint,
+  meta,
+  progress,
+  progressLabel,
+  onClick,
+}) => {
   const t = STAT_TONE[tone];
-  return (
-    <div
-      className={`group relative overflow-hidden ${CARD} p-5 transition duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/5`}
-    >
+  const clamped = typeof progress === 'number' ? Math.min(100, Math.max(0, progress)) : null;
+
+  const body = (
+    <>
+      {/* Gradient accent bar + ambient glow */}
       <span aria-hidden="true" className={`absolute inset-x-0 top-0 h-1 ${t.bar}`} />
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <span className="block text-[11px] font-black uppercase tracking-wider text-slate-400">
+      <span
+        aria-hidden="true"
+        className={`pointer-events-none absolute -right-10 -top-12 h-32 w-32 rounded-full blur-2xl transition duration-500 ${t.blob}`}
+      />
+
+      <span className="relative flex items-start justify-between gap-3">
+        <span className="block min-w-0">
+          <span className="flex items-center gap-1.5 text-[11px] font-black uppercase tracking-wider text-slate-400">
             {label}
+            {hint && (
+              <span
+                tabIndex={0}
+                role="note"
+                title={hint}
+                className="grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full bg-slate-200 text-[8px] font-black not-italic leading-none text-slate-500 transition hover:bg-slate-900 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+              >
+                i
+              </span>
+            )}
           </span>
           <span className="mt-2 block text-2xl font-black tabular-nums tracking-tight text-slate-900">
             {value}
           </span>
-        </div>
+          {meta && (
+            <span className="mt-1.5 block text-[11px] font-bold tabular-nums text-slate-500">
+              {meta}
+            </span>
+          )}
+        </span>
         <span
-          className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl ring-1 transition group-hover:scale-105 ${t.tile}`}
+          className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl ring-1 transition duration-200 group-hover:scale-110 group-hover:-rotate-6 ${t.tile}`}
         >
           <Icon className="w-5 h-5" />
         </span>
-      </div>
-      <p className="mt-3 text-[11px] leading-relaxed text-slate-500">{caption}</p>
-    </div>
+      </span>
+
+      {clamped !== null && (
+        <span className="mt-4 block">
+          <span className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-slate-400">
+            <span>{progressLabel}</span>
+            <span className="tabular-nums text-slate-600">{Math.round(clamped)}%</span>
+          </span>
+          <span className="mt-1.5 block h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+            <span
+              className={`block h-full rounded-full ${t.fill} transition-[width] duration-700 ease-out`}
+              style={{ width: `${clamped}%` }}
+            />
+          </span>
+        </span>
+      )}
+
+      <span className="relative mt-3 block text-[11px] leading-relaxed text-slate-500">
+        {caption}
+      </span>
+
+      {onClick && (
+        <span className="relative mt-3 inline-flex items-center gap-1 text-[11px] font-black text-slate-400 transition group-hover:text-emerald-600">
+          Open section
+          <ArrowRight className="h-3 w-3 transition group-hover:translate-x-0.5" />
+        </span>
+      )}
+    </>
   );
+
+  const baseClass = `group relative isolate overflow-hidden ${CARD} p-5 transition duration-200 hover:-translate-y-1 hover:shadow-xl hover:shadow-slate-900/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60`;
+
+  // Interactive cards are real buttons so keyboard and screen-reader users get
+  // the same shortcut as mouse users.
+  if (onClick) {
+    return (
+      <button type="button" onClick={onClick} className={`${baseClass} block w-full text-left`}>
+        {body}
+      </button>
+    );
+  }
+
+  return <div className={baseClass}>{body}</div>;
 };
 
 interface QuickActionCardProps {
@@ -200,24 +309,55 @@ const QuickActionCard: React.FC<QuickActionCardProps> = ({
   onClick,
 }) => {
   const t = STAT_TONE[tone];
+  const hasWork = count > 0;
+
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`group flex items-center gap-3 p-4 text-left ${CARD} transition duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60`}
+      className={`group relative isolate flex items-center gap-3.5 overflow-hidden p-4 text-left ${CARD} transition duration-200 hover:-translate-y-1 hover:shadow-xl hover:shadow-slate-900/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 ${
+        hasWork ? 'ring-2 ring-inset ring-amber-400/50' : ''
+      }`}
     >
+      {/* Attention rail: only shown when there is something to review */}
+      {hasWork && (
+        <span aria-hidden="true" className={`absolute inset-y-0 left-0 w-1 ${t.bar}`} />
+      )}
+
       <span
-        className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ring-1 ${t.tile}`}
+        className={`relative grid h-11 w-11 shrink-0 place-items-center rounded-2xl ring-1 transition duration-200 group-hover:scale-110 ${t.tile}`}
       >
-        <Icon className="h-4 w-4" />
+        <Icon className="h-5 w-5" />
       </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-black text-slate-900">{label}</span>
-        <span className="block truncate text-[11px] text-slate-500">{caption}</span>
+
+      <span className="relative min-w-0 flex-1">
+        <span className="flex items-center gap-1.5">
+          <span className="truncate text-xs font-black text-slate-900">{label}</span>
+          {hasWork && (
+            <span className="relative flex h-2 w-2 shrink-0">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
+            </span>
+          )}
+        </span>
+        <span className="mt-0.5 block truncate text-[11px] text-slate-500">{caption}</span>
       </span>
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-[11px] font-black tabular-nums text-slate-700 transition group-hover:bg-emerald-50 group-hover:text-emerald-700">
-        {count}
-        <ArrowRight className="w-3 h-3" />
+
+      <span
+        className={`relative inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-black tabular-nums transition ${
+          hasWork
+            ? 'bg-slate-900 text-white shadow-md shadow-slate-900/20 group-hover:bg-emerald-600'
+            : 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-500/20'
+        }`}
+      >
+        {hasWork ? (
+          <>
+            {count}
+            <ArrowRight className="h-3.5 w-3.5 transition group-hover:translate-x-0.5" />
+          </>
+        ) : (
+          <CheckCircle className="h-4 w-4" />
+        )}
       </span>
     </button>
   );
@@ -480,6 +620,13 @@ export const AdminDashboard: React.FC = () => {
   const pendingRestaurants = restaurants.filter((r) => !r.is_approved).length;
   const pendingCouriers = couriers.filter((c) => !c.is_approved).length;
   const pendingDocs = courierDocs.filter((d) => d.status === 'PENDING').length;
+
+  // Ratio metrics that make the overview cards readable at a glance
+  const avgOrderValue = orders.length > 0 ? totalVolume / orders.length : 0;
+  const takeRatePercent = totalVolume > 0 ? (totalPlatformCut / totalVolume) * 100 : 0;
+  const fleetOnlinePercent =
+    couriers.length > 0 ? (onlineCouriers / couriers.length) * 100 : 0;
+  const pendingTotal = pendingRestaurants + pendingCouriers + pendingDocs;
 
   // Pricing preview (mirrors the exact fee the customer would be charged)
   const sampleFee = calculateDeliveryFee(SAMPLE_DISTANCE_KM, pricingSettings);
@@ -827,58 +974,107 @@ export const AdminDashboard: React.FC = () => {
                     <StatCard
                       label="Gross merchandise value"
                       value={formatGHS(totalVolume)}
+                      meta={
+                        orders.length > 0
+                          ? `${orders.length} orders · ${formatGHS(avgOrderValue)} average`
+                          : 'No orders recorded yet'
+                      }
                       caption="Total order volume processed through the platform"
+                      hint="The sum of every order total placed across all kitchens — before commissions or delivery fees are taken out."
                       icon={Wallet}
                       tone="emerald"
+                      onClick={() => handleSelectTab('ORDERS')}
                     />
                     <StatCard
                       label="Platform commission"
                       value={formatGHS(totalPlatformCut)}
-                      caption="Delivery share plus restaurant commission"
+                      meta="Delivery share plus restaurant commission"
+                      caption={`Approx. ${takeRatePercent.toFixed(1)}% of everything sold on the platform`}
+                      hint="What SamleyGo earns: 15% of each order subtotal plus 20% of each delivery fee. Adjust both in Pricing Rules."
+                      progress={takeRatePercent}
+                      progressLabel="Take rate"
                       icon={Receipt}
                       tone="sky"
+                      onClick={() => handleSelectTab('SETTINGS')}
                     />
                     <StatCard
                       label="Registered users"
                       value={String(usersCount)}
+                      meta={`${restaurants.length} kitchens · ${couriers.length} riders on the platform`}
                       caption="Customer, courier and restaurant owner accounts"
+                      hint="Every account that has signed up, including customers, kitchen owners and delivery riders."
                       icon={Users}
                       tone="violet"
                     />
                     <StatCard
                       label="Couriers online"
                       value={`${onlineCouriers}/${couriers.length}`}
-                      caption="Riders currently on shift right now"
+                      meta="Riders currently on shift right now"
+                      caption={
+                        couriers.length > 0
+                          ? fleetOnlinePercent >= 50
+                            ? 'Fleet capacity looks healthy'
+                            : 'Below half the fleet — coverage may be thin'
+                          : 'No riders registered yet'
+                      }
+                      hint="Riders who have toggled themselves ONLINE and can accept deliveries this minute."
+                      progress={fleetOnlinePercent}
+                      progressLabel="Fleet online"
                       icon={Bike}
                       tone="amber"
+                      onClick={() => handleSelectTab('COURIERS')}
                     />
                   </div>
 
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                    <QuickActionCard
-                      label="Restaurant approvals"
-                      caption={pendingRestaurants ? 'Waiting for your review' : 'Everything is approved'}
-                      count={pendingRestaurants}
-                      icon={Store}
-                      tone="emerald"
-                      onClick={() => handleSelectTab('RESTAURANTS')}
-                    />
-                    <QuickActionCard
-                      label="Courier reviews"
-                      caption={pendingCouriers ? 'Riders awaiting a decision' : 'Everyone is verified'}
-                      count={pendingCouriers}
-                      icon={UserCheck}
-                      tone="sky"
-                      onClick={() => handleSelectTab('COURIERS')}
-                    />
-                    <QuickActionCard
-                      label="Documents pending"
-                      caption={pendingDocs ? 'Ghana Card & licence uploads' : 'Inbox zero'}
-                      count={pendingDocs}
-                      icon={FileCheck}
-                      tone="violet"
-                      onClick={() => handleSelectTab('COURIERS')}
-                    />
+                  <div>
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h2 className="text-[13px] font-black tracking-tight text-slate-900">
+                          Needs your attention
+                        </h2>
+                        <p className="text-[11px] text-slate-500">
+                          {pendingTotal > 0
+                            ? `${pendingTotal} item${pendingTotal === 1 ? '' : 's'} waiting for a decision`
+                            : 'Nothing is waiting on you right now'}
+                        </p>
+                      </div>
+                      {pendingTotal > 0 && (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-black text-amber-700 ring-1 ring-amber-500/20">
+                          <span className="relative flex h-1.5 w-1.5">
+                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+                            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-500" />
+                          </span>
+                          {pendingTotal} pending
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                      <QuickActionCard
+                        label="Restaurant approvals"
+                        caption={pendingRestaurants ? 'Waiting for your review' : 'Everything is approved'}
+                        count={pendingRestaurants}
+                        icon={Store}
+                        tone="emerald"
+                        onClick={() => handleSelectTab('RESTAURANTS')}
+                      />
+                      <QuickActionCard
+                        label="Courier reviews"
+                        caption={pendingCouriers ? 'Riders awaiting a decision' : 'Everyone is verified'}
+                        count={pendingCouriers}
+                        icon={UserCheck}
+                        tone="sky"
+                        onClick={() => handleSelectTab('COURIERS')}
+                      />
+                      <QuickActionCard
+                        label="Documents pending"
+                        caption={pendingDocs ? 'Ghana Card & licence uploads' : 'Inbox zero'}
+                        count={pendingDocs}
+                        icon={FileCheck}
+                        tone="violet"
+                        onClick={() => handleSelectTab('COURIERS')}
+                      />
+                    </div>
                   </div>
 
                   <SectionCard
