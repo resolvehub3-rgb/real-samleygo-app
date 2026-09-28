@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#16a34a" />
+      <stop offset="50%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#047857" />
+    </linearGradient>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24" />
+      <stop offset="100%" stop-color="#f59e0b" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+  <!-- Background with safe zone margin -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
+  <!-- Gold Accent Ring -->
+  <circle cx="256" cy="256" r="190" fill="none" stroke="url(#goldGrad)" stroke-width="8" stroke-dasharray="8 12" opacity="0.4"/>
+  <!-- Central Food Cloche & Delivery Lightning Symbol -->
+  <g filter="url(#shadow)" transform="translate(0, -10)">
+    <!-- Food Cloche Cover -->
+    <path d="M140 290 C140 190 372 190 372 290 Z" fill="#ffffff"/>
+    <circle cx="256" cy="180" r="18" fill="#fbbf24"/>
+    <!-- Cloche Base Tray -->
+    <rect x="120" y="296" width="272" height="20" rx="10" fill="#ffffff"/>
+    <!-- Speed motion streaks -->
+    <rect x="90" y="324" width="70" height="8" rx="4" fill="#fbbf24"/>
+    <rect x="110" y="340" width="40" height="8" rx="4" fill="#fbbf24" opacity="0.75"/>
+    <rect x="350" y="324" width="70" height="8" rx="4" fill="#fbbf24"/>
+    <!-- S mark in gold -->
+    <path d="M240 226 C240 216 250 210 260 210 C270 210 278 215 278 224 C278 240 240 242 240 260 C240 268 248 274 258 274 C268 274 276 268 278 262" 
+          fill="none" stroke="#059669" stroke-width="8" stroke-linecap="round"/>
+  </g>
+  <!-- Brand Wordmark Base -->
+  <text x="256" y="420" font-family="system-ui, -apple-system, sans-serif" font-size="44" font-weight="900" fill="#ffffff" text-anchor="middle" letter-spacing="1">SAMLEY<tspan fill="#fbbf24">GO</tspan></text>
+</svg>

@@ -1,0 +1,687 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { useParams, Link } from 'react-router-dom';
+import {
+  ArrowLeft,
+  Clock,
+  MapPin,
+  CheckCircle2,
+  Bike,
+  Store,
+  Phone,
+  Star,
+  Navigation,
+  Sparkles,
+  Receipt,
+  Check,
+} from 'lucide-react';
+import { supabase, isSupabaseConfigured } from '../../lib/supabase';
+import { Order, OrderItem, OrderStatusHistory, DeliveryLocation, Courier } from '../../types/database';
+import { useAuth } from '../../context/AuthContext';
+import { formatGHS } from '../../lib/pricing';
+import { CourierLiveMap } from '../../components/courier/CourierLiveMap';
+
+const STATUS_STEPS = [
+  { key: 'RESTAURANT_PENDING', label: 'Order Sent', desc: 'Awaiting kitchen confirmation' },
+  { key: 'PREPARING', label: 'Cooking', desc: 'Kitchen is preparing your meal' },
+  { key: 'READY_FOR_PICKUP', label: 'Ready', desc: 'Food ready for courier pickup' },
+  { key: 'ON_THE_WAY', label: 'On The Way', desc: 'Courier traveling to your address' },
+  { key: 'DELIVERED', label: 'Delivered', desc: 'Meal received safely' },
+];
+
+export const OrderDetailPage: React.FC = () => {
+  const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
+
+  const [order, setOrder] = useState<Order | null>(null);
+  const [items, setItems] = useState<OrderItem[]>([]);
+  const [history, setHistory] = useState<OrderStatusHistory[]>([]);
+  const [courierDetails, setCourierDetails] = useState<Courier | null>(null);
+  const [lastLocation, setLastLocation] = useState<DeliveryLocation | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  // Mirrors the assigned courier id so the realtime channel filter can use it
+  const courierIdRef = useRef<string | null>(null);
+
+  // Review state
+  const [restRating, setRestRating] = useState(5);
+  const [restComment, setRestComment] = useState('');
+  const [courierRating, setCourierRating] = useState(5);
+  const [courierComment, setCourierComment] = useState('');
+  const [reviewSubmitted, setReviewSubmitted] = useState(false);
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+
+  const fetchOrderDetails = async () => {
+    if (!id || !isSupabaseConfigured) {
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      // 1. Fetch Order with joins
+      const { data: orderData, error: orderError } = await supabase
+        .from('orders')
+        .select('*, restaurant:restaurants(*), courier:profiles!orders_courier_id_fkey(*)')
+        .eq('id', id)
+        .single();
+
+      if (orderError || !orderData) {
+        setIsLoading(false);
+        return;
+      }
+
+      setOrder(orderData as Order);
+
+      // 2. Fetch Order Items
+      const { data: itemsData } = await supabase
+        .from('order_items')
+        .select('*')
+        .eq('order_id', id);
+
+      if (itemsData) setItems(itemsData as OrderItem[]);
+
+      // 3. Fetch Status History
+      const { data: historyData } = await supabase
+        .from('order_status_history')
+        .select('*')
+        .eq('order_id', id)
+        .order('created_at', { ascending: true });
+
+      if (historyData) setHistory(historyData as OrderStatusHistory[]);
+
+      // 4. Fetch Courier Details if assigned
+      if (orderData.courier_id) {
+        const { data: cData } = await supabase
+          .from('couriers')
+          .select(
+            'id, vehicle_type, vehicle_plate, verification_status, created_at, updated_at, is_approved, is_online, availability_status, total_deliveries, rating, current_latitude, current_longitude, current_location_updated_at, profile:profiles(id, full_name, avatar_url, phone)'
+          )
+          .eq('id', orderData.courier_id)
+          .single();
+
+        if (cData) {
+          setCourierDetails(cData as unknown as Courier);
+          courierIdRef.current = (cData as { id?: string }).id ?? null;
+        }
+
+        // Fetch latest courier GPS location for this order
+        const { data: locData } = await supabase
+          .from('delivery_locations')
+          .select('*')
+          .eq('order_id', id)
+          .order('recorded_at', { ascending: false })
+          .limit(1)
+          .single();
+
+        if (locData) setLastLocation(locData as DeliveryLocation);
+      }
+
+      // 5. Check if user already reviewed
+      const { data: revData } = await supabase
+        .from('reviews')
+        .select('*')
+        .eq('order_id', id)
+        .limit(1);
+
+      if (revData && revData.length > 0) {
+        setReviewSubmitted(true);
+      }
+    } catch {
+      // Handled
+    } finally {
+      setIsLoading(false);
+    }
+  };  useEffect(() => {
+    fetchOrderDetails();
+
+    if (!id || !isSupabaseConfigured) return;
+
+    // Realtime subscription for order updates
+    const orderChannel = supabase
+      .channel(`order-live-${id}`)      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'orders',
+          filter: `id=eq.${id}`,
+        },
+        () => {
+          fetchOrderDetails();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'delivery_locations',
+          filter: `order_id=eq.${id}`,
+        },
+        (payload) => {
+          setLastLocation(payload.new as DeliveryLocation);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'couriers',
+          // Live courier GPS pings: filtered to this order's courier once known.
+          // courierIdRef is updated by fetchOrderDetails when the assignment loads.
+          filter: `id=eq.${courierIdRef.current ?? '00000000-0000-0000-0000-000000000000'}`,
+        },
+        (payload) => {
+          // Live courier GPS ping from the couriers row — moves the map marker
+          // even when no delivery breadcrumb has been written yet.
+          const next = payload.new as {
+            current_latitude?: number | null;
+            current_longitude?: number | null;
+            current_location_updated_at?: string;
+          };
+          if (next.current_latitude != null && next.current_longitude != null) {
+            setCourierDetails((prev) =>
+              prev
+                ? ({ ...prev, ...next } as Courier)
+                : ({ current_latitude: next.current_latitude, current_longitude: next.current_longitude } as unknown as Courier)
+            );
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(orderChannel);
+    };
+  }, [id]);
+
+  const handleSubmitReview = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!order || !user) return;
+
+    setIsSubmittingReview(true);
+    try {
+      await supabase.from('reviews').insert({
+        order_id: order.id,
+        customer_id: user.id,
+        restaurant_id: order.restaurant_id,
+        courier_id: order.courier_id || null,
+        restaurant_rating: restRating,
+        restaurant_comment: restComment.trim() || null,
+        courier_rating: courierRating,
+        courier_comment: courierComment.trim() || null,
+      });
+
+      // Update restaurant rating aggregate
+      const { data: allReviews } = await supabase
+        .from('reviews')
+        .select('restaurant_rating')
+        .eq('restaurant_id', order.restaurant_id);
+
+      if (allReviews && allReviews.length > 0) {
+        const total = allReviews.reduce((sum, r) => sum + (r.restaurant_rating || 0), 0);
+        const avg = total / allReviews.length;
+        await supabase
+          .from('restaurants')
+          .update({
+            rating: Number(avg.toFixed(2)),
+            total_reviews: allReviews.length,
+          })
+          .eq('id', order.restaurant_id);
+      }
+
+      setReviewSubmitted(true);
+    } catch {
+      // Handled
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  };
+
+  const getStepStatus = (stepKey: string) => {
+    if (!order) return 'upcoming';
+    const status = order.status;
+
+    if (stepKey === 'RESTAURANT_PENDING') return 'completed';
+
+    if (stepKey === 'PREPARING') {
+      if (['PREPARING', 'READY_FOR_PICKUP', 'COURIER_ASSIGNED', 'COURIER_ACCEPTED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED', 'DELIVERED', 'COMPLETED'].includes(status)) {
+        return status === 'PREPARING' ? 'active' : 'completed';
+      }
+      return 'upcoming';
+    }
+
+    if (stepKey === 'READY_FOR_PICKUP') {
+      if (['READY_FOR_PICKUP', 'COURIER_ASSIGNED', 'COURIER_ACCEPTED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED', 'DELIVERED', 'COMPLETED'].includes(status)) {
+        return status === 'READY_FOR_PICKUP' ? 'active' : 'completed';
+      }
+      return 'upcoming';
+    }
+
+    if (stepKey === 'ON_THE_WAY') {
+      if (['PICKED_UP', 'ON_THE_WAY', 'ARRIVED', 'DELIVERED', 'COMPLETED'].includes(status)) {
+        return ['PICKED_UP', 'ON_THE_WAY', 'ARRIVED'].includes(status) ? 'active' : 'completed';
+      }
+      return 'upcoming';
+    }
+
+    if (stepKey === 'DELIVERED') {
+      return ['DELIVERED', 'COMPLETED'].includes(status) ? 'completed' : 'upcoming';
+    }
+
+    return 'upcoming';
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 py-12 px-4 max-w-3xl mx-auto space-y-6">
+        <div className="h-8 bg-slate-200 rounded w-1/3 animate-pulse" />
+        <div className="h-40 bg-slate-200 rounded-2xl animate-pulse" />
+      </div>
+    );
+  }
+
+  if (!order) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-3xl p-8 max-w-md w-full text-center border border-slate-200">
+          <h2 className="text-lg font-bold text-slate-900">Order not found</h2>
+          <Link
+            to="/orders"
+            className="mt-4 inline-block px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold"
+          >
+            Back to Orders
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  const isDelivered = ['DELIVERED', 'COMPLETED'].includes(order.status);
+  const isCancelled = ['CANCELLED', 'REJECTED', 'FAILED'].includes(order.status);
+
+  return (
+    <div className="min-h-screen pb-28 md:pb-12 bg-slate-50">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+        
+        {/* Back Link & Header */}
+        <div className="flex items-center justify-between">
+          <Link
+            to="/orders"
+            className="flex items-center gap-1.5 text-xs font-bold text-slate-600 hover:text-slate-900"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>My Orders</span>
+          </Link>
+
+          <span
+            className={`text-xs font-black uppercase tracking-wider px-3 py-1 rounded-xl shadow-xs ${
+              isDelivered
+                ? 'bg-emerald-600 text-white'
+                : isCancelled
+                ? 'bg-rose-600 text-white'
+                : 'bg-amber-500 text-white animate-pulse'
+            }`}
+          >
+            {order.status.replace(/_/g, ' ')}
+          </span>
+        </div>
+
+        {/* Live Order Banner */}
+        <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-xs space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+            <div>
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                Order Tracking
+              </span>
+              <h1 className="text-xl sm:text-2xl font-black text-slate-900">
+                Order #{order.order_number}
+              </h1>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Kitchen: <span className="font-bold text-emerald-700">{order.restaurant?.name}</span>
+              </p>
+            </div>
+
+            <div className="text-left sm:text-right">
+              <span className="text-xs text-slate-400 block">Total Paid</span>
+              <span className="text-xl font-black text-emerald-700">
+                {formatGHS(order.total_amount)}
+              </span>
+              <span className="text-[10px] text-slate-400 block mt-0.5">
+                Method: {order.payment_method}
+              </span>
+            </div>
+          </div>
+
+          {/* Stepper Progress */}
+          <div className="py-2">
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">
+              Realtime Order Progress
+            </h3>
+
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              {STATUS_STEPS.map((step) => {
+                const statusState = getStepStatus(step.key);
+                return (
+                  <div
+                    key={step.key}
+                    className={`p-3 rounded-2xl border transition-all ${
+                      statusState === 'completed'
+                        ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                        : statusState === 'active'
+                        ? 'bg-amber-50 border-amber-400 text-amber-900 shadow-sm ring-2 ring-amber-400/30'
+                        : 'bg-slate-50 border-slate-200 text-slate-400'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 mb-1">
+                      {statusState === 'completed' ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                      ) : (
+                        <div
+                          className={`w-3 h-3 rounded-full flex-shrink-0 ${
+                            statusState === 'active' ? 'bg-amber-500 animate-ping' : 'bg-slate-300'
+                          }`}
+                        />
+                      )}
+                      <span className="text-xs font-bold truncate">{step.label}</span>
+                    </div>
+                    <p className="text-[10px] leading-tight line-clamp-2">{step.desc}</p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Real GPS Courier Live Breadcrumb & Courier Details */}
+          {order.courier_id && (
+            <div className="bg-slate-50 rounded-2xl p-4 sm:p-5 border border-slate-200/80 space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-md">
+                    <Bike className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider block">
+                      Assigned SamleyGo Courier
+                    </span>
+                    <h4 className="font-bold text-sm text-slate-900">
+                      {order.courier?.full_name || 'Delivery Partner'}
+                    </h4>
+                    <p className="text-xs text-slate-500">
+                      Vehicle: {courierDetails?.vehicle_type || 'Motorcycle'} {courierDetails?.vehicle_plate ? `(${courierDetails.vehicle_plate})` : ''}
+                    </p>
+                  </div>
+                </div>
+
+                {order.courier?.phone && (
+                  <a
+                    href={`tel:${order.courier.phone}`}
+                    className="flex items-center gap-1 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 px-3.5 py-2 rounded-xl shadow-xs transition"
+                  >
+                    <Phone className="w-3.5 h-3.5" />
+                    <span>Call Courier</span>
+                  </a>
+                )}
+              </div>
+
+              {/* Live Tracking Map — courier position updates in realtime */}
+              {(() => {
+                const showMap =
+                  ['COURIER_ASSIGNED', 'COURIER_ACCEPTED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED'].includes(order.status) ||
+                  (['DELIVERED', 'COMPLETED'].includes(order.status) && lastLocation);
+                if (!showMap) return null;
+
+                // Prefer the freshest of breadcrumb vs live couriers-row ping
+                const breadcrumbTime = lastLocation
+                  ? new Date(lastLocation.recorded_at).getTime()
+                  : 0;
+                const courierRowTime = courierDetails?.current_location_updated_at
+                  ? new Date(courierDetails.current_location_updated_at).getTime()
+                  : 0;
+
+                const courierPosition =
+                  courierDetails?.current_latitude && courierDetails?.current_longitude && courierRowTime >= breadcrumbTime
+                    ? { lat: courierDetails.current_latitude, lng: courierDetails.current_longitude }
+                    : lastLocation
+                    ? { lat: lastLocation.latitude, lng: lastLocation.longitude }
+                    : courierDetails?.current_latitude && courierDetails?.current_longitude
+                    ? { lat: courierDetails.current_latitude, lng: courierDetails.current_longitude }
+                    : null;
+
+                const destination =
+                  order.delivery_latitude && order.delivery_longitude
+                    ? { lat: order.delivery_latitude, lng: order.delivery_longitude }
+                    : null;
+
+                const pickup =
+                  order.restaurant?.latitude && order.restaurant?.longitude
+                    ? { lat: order.restaurant.latitude, lng: order.restaurant.longitude }
+                    : null;
+
+                const hasAnyPin = courierPosition || destination || pickup;
+                const lastPingAge = lastLocation
+                  ? Math.floor((Date.now() - new Date(lastLocation.recorded_at).getTime()) / 60000)
+                  : null;
+
+                return (
+                  <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                    <div className="px-3.5 py-2.5 flex items-center justify-between gap-2 border-b border-slate-100">
+                      <div className="flex items-center gap-2 text-xs font-bold text-slate-900">
+                        <Navigation className="w-4 h-4 text-emerald-600" />
+                        <span>Live Tracking</span>
+                        {courierPosition && (
+                          <span className="flex items-center gap-1 text-[10px] font-black uppercase text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                            Live
+                          </span>
+                        )}
+                      </div>
+                      {lastPingAge !== null && (
+                        <span className="text-[10px] text-slate-400">
+                          {lastPingAge < 1 ? 'Updated just now' : `Updated ${lastPingAge} min ago`}
+                        </span>
+                      )}
+                    </div>
+
+                    {hasAnyPin ? (
+                      <CourierLiveMap
+                        courierPosition={courierPosition}
+                        destination={destination}
+                        pickup={pickup}
+                        courierName={order.courier?.full_name}
+                        className="h-64 sm:h-72"
+                      />
+                    ) : (
+                      <div className="p-6 text-center text-xs text-slate-500">
+                        Waiting for the first GPS ping from your courier…
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+        </div>
+
+        {/* Order Details & Summary Breakdown */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          
+          {/* Dishes Ordered */}
+          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs space-y-3">
+            <h3 className="font-bold text-sm text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-2">
+              <Receipt className="w-4 h-4 text-emerald-600" />
+              <span>Items Ordered</span>
+            </h3>
+
+            <div className="divide-y divide-slate-100">
+              {items.map((item) => (
+                <div key={item.id} className="py-2.5 flex items-center justify-between text-xs">
+                  <div>
+                    <span className="font-bold text-slate-900">{item.quantity}x </span>
+                    <span className="text-slate-800">{item.item_name}</span>
+                    {item.notes && (
+                      <p className="text-[11px] text-slate-400 italic">Note: {item.notes}</p>
+                    )}
+                  </div>
+                  <span className="font-bold text-slate-800">{formatGHS(item.subtotal)}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="pt-3 border-t border-slate-100 space-y-1.5 text-xs text-slate-600">
+              <div className="flex justify-between">
+                <span>Subtotal</span>
+                <span>{formatGHS(order.subtotal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Delivery Fee</span>
+                <span>{formatGHS(order.delivery_fee)}</span>
+              </div>
+              {order.tip > 0 && (
+                <div className="flex justify-between">
+                  <span>Courier Tip</span>
+                  <span>{formatGHS(order.tip)}</span>
+                </div>
+              )}
+              <div className="flex justify-between font-black text-sm text-slate-900 pt-1.5 border-t border-slate-100">
+                <span>Total</span>
+                <span className="text-emerald-700">{formatGHS(order.total_amount)}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Delivery Address & Status History */}
+          <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs space-y-4">
+            <div>
+              <h3 className="font-bold text-sm text-slate-900 flex items-center gap-2 mb-2">
+                <MapPin className="w-4 h-4 text-emerald-600" />
+                <span>Delivery Destination</span>
+              </h3>
+              <p className="text-xs font-medium text-slate-700 bg-slate-50 p-2.5 rounded-xl border border-slate-100">
+                {order.delivery_address}
+              </p>
+              {order.delivery_notes && (
+                <p className="text-[11px] text-slate-500 mt-1.5">
+                  <strong className="text-slate-700">Gate Notes:</strong> {order.delivery_notes}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <h3 className="font-bold text-sm text-slate-900 flex items-center gap-2 mb-2">
+                <Clock className="w-4 h-4 text-emerald-600" />
+                <span>Status Log</span>
+              </h3>
+              <div className="space-y-2 max-h-40 overflow-y-auto">
+                {history.map((h) => (
+                  <div key={h.id} className="text-[11px] bg-slate-50 p-2 rounded-lg flex items-center justify-between">
+                    <div>
+                      <span className="font-bold text-slate-800">{h.status.replace(/_/g, ' ')}</span>
+                      {h.note && <p className="text-slate-500">{h.note}</p>}
+                    </div>
+                    <span className="text-[10px] text-slate-400">
+                      {new Date(h.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Real Review & Rating Section (When Order is Delivered) */}
+        {isDelivered && (
+          <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-xs space-y-4">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-5 h-5 text-amber-500" />
+              <h3 className="text-base font-bold text-slate-900">
+                Rate Your SamleyGo Experience
+              </h3>
+            </div>
+
+            {reviewSubmitted ? (
+              <div className="p-4 rounded-2xl bg-emerald-50 text-emerald-900 text-xs font-semibold flex items-center gap-2">
+                <Check className="w-4 h-4 text-emerald-600" />
+                <span>Thank you! Your verified review has been recorded in the database.</span>
+              </div>
+            ) : (
+              <form onSubmit={handleSubmitReview} className="space-y-5">
+                {/* Restaurant Rating */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-800 mb-1">
+                    How was the food from {order.restaurant?.name}?
+                  </label>
+                  <div className="flex items-center gap-2">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <button
+                        key={star}
+                        type="button"
+                        onClick={() => setRestRating(star)}
+                        className="p-1 text-amber-400 hover:scale-110 transition"
+                      >
+                        <Star
+                          className={`w-6 h-6 ${
+                            star <= restRating ? 'fill-amber-400 text-amber-400' : 'text-slate-300'
+                          }`}
+                        />
+                      </button>
+                    ))}
+                    <span className="text-xs font-bold text-slate-600 ml-2">{restRating}/5</span>
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Comments about the taste, packaging, freshness..."
+                    value={restComment}
+                    onChange={(e) => setRestComment(e.target.value)}
+                    className="mt-2 w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
+
+                {/* Courier Rating */}
+                {order.courier_id && (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-800 mb-1">
+                      How was the delivery by {order.courier?.full_name}?
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <button
+                          key={star}
+                          type="button"
+                          onClick={() => setCourierRating(star)}
+                          className="p-1 text-amber-400 hover:scale-110 transition"
+                        >
+                          <Star
+                            className={`w-6 h-6 ${
+                              star <= courierRating ? 'fill-amber-400 text-amber-400' : 'text-slate-300'
+                            }`}
+                          />
+                        </button>
+                      ))}
+                      <span className="text-xs font-bold text-slate-600 ml-2">{courierRating}/5</span>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Delivery speed, courier politeness..."
+                      value={courierComment}
+                      onChange={(e) => setCourierComment(e.target.value)}
+                      className="mt-2 w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isSubmittingReview}
+                  className="py-2.5 px-5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs transition disabled:opacity-50"
+                >
+                  {isSubmittingReview ? 'Submitting Review...' : 'Submit Verified Review'}
+                </button>
+              </form>
+            )}
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+};

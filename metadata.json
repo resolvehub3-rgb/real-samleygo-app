@@ -1,0 +1,10 @@
+{
+  "name": "SamleyGo",
+  "description": "Ghana-focused food delivery web SaaS & installable mobile PWA connecting customers, restaurants, couriers, and super admin.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
