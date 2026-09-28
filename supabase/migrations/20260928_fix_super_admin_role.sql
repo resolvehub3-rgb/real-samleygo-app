@@ -54,10 +54,10 @@ where u.id = p.id
 update auth.users u
 set raw_user_meta_data = jsonb_set(
         coalesce(u.raw_user_meta_data, '{}'::jsonb),
-        '{role}', 'SUPER_ADMIN'::jsonb, true),
+        '{role}', to_jsonb('SUPER_ADMIN'::text), true),
     raw_app_meta_data = jsonb_set(
         coalesce(u.raw_app_meta_data, '{}'::jsonb),
-        '{role}', 'SUPER_ADMIN'::jsonb, true)
+        '{role}', to_jsonb('SUPER_ADMIN'::text), true)
 from public.profiles p
 where p.id = u.id
   and p.role = 'SUPER_ADMIN'
