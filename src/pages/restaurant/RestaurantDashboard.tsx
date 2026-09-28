@@ -57,7 +57,7 @@ function statusChipClass(status: string) {
 }
 
 export const RestaurantDashboard: React.FC = () => {
-  const { user } = useAuth();
+  const { user, role, isLoading: isAuthLoading } = useAuth();
 
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -88,6 +88,13 @@ export const RestaurantDashboard: React.FC = () => {
   const [isRegistering, setIsRegistering] = useState(false);
 
   const fetchRestaurantAndOrders = async () => {
+    // SUPER_ADMIN has no restaurant of their own — skip the owner query so the
+    // admin hand-off screen below is shown immediately instead of a register form.
+    if (role === 'SUPER_ADMIN') {
+      setIsLoading(false);
+      return;
+    }
+
     if (!user || !isSupabaseConfigured) {
       setIsLoading(false);
       return;
@@ -162,7 +169,7 @@ export const RestaurantDashboard: React.FC = () => {
   useEffect(() => {
     fetchRestaurantAndOrders();
 
-    if (!user || !isSupabaseConfigured) return;
+    if (!user || !isSupabaseConfigured || role === 'SUPER_ADMIN') return;
 
     // Realtime subscription for incoming orders + live courier GPS
     const channel = supabase
@@ -233,7 +240,7 @@ export const RestaurantDashboard: React.FC = () => {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [user]);
+  }, [user, role]);
 
   // Open / Close Toggle (optimistic UI, shared via RestaurantShell sidebar)
   const toggleOpen = async () => {
@@ -402,7 +409,7 @@ export const RestaurantDashboard: React.FC = () => {
     } finally {
       setIsRegistering(false);
     }
-  };  if (isLoading) {
+  };  if (isLoading || isAuthLoading) {
     return (
       <RestaurantShell restaurant={null}>
         <div className="p-4 sm:px-6 lg:px-8 py-6 max-w-7xl mx-auto space-y-5 sm:space-y-6">
@@ -418,6 +425,33 @@ export const RestaurantDashboard: React.FC = () => {
           <div className="rounded-3xl bg-white border border-slate-200 p-5 sm:p-6">
             <div className="h-10 w-64 max-w-full rounded-full bg-slate-200 animate-pulse" />
             <div className="mt-5 h-32 rounded-2xl bg-slate-100 animate-pulse" />
+          </div>
+        </div>
+      </RestaurantShell>
+    );
+  }
+
+  // SUPER_ADMIN landed here (e.g. via a stale role or a shared link): offer the
+  // correct console instead of the restaurant registration form.
+  if (role === 'SUPER_ADMIN' && !restaurant) {
+    return (
+      <RestaurantShell restaurant={null}>
+        <div className="flex items-center justify-center p-4 py-10">
+          <div className="bg-white rounded-3xl p-8 max-w-md w-full text-center border border-slate-200 shadow-sm space-y-4">
+            <div className="w-14 h-14 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto">
+              <Sparkles className="w-7 h-7" />
+            </div>
+            <h2 className="text-lg font-bold text-slate-900">Super Admin Console</h2>
+            <p className="text-xs text-slate-500 leading-relaxed">
+              You are signed in as a platform super admin, so there is no kitchen to
+              register here. Manage restaurants, couriers and orders from the admin console.
+            </p>
+            <Link
+              to="/admin/dashboard"
+              className="inline-block px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md transition"
+            >
+              Go to Admin Dashboard
+            </Link>
           </div>
         </div>
       </RestaurantShell>

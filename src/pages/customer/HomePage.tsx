@@ -103,6 +103,10 @@ export const HomePage: React.FC = () => {
   const [restaurantsMap, setRestaurantsMap] = useState<Record<string, Restaurant>>({});
   const [activeOrders, setActiveOrders] = useState<Order[]>([]);
 
+  // Realtime fresh-dishes feed shown on the default homepage (no search needed)
+  const [freshDishes, setFreshDishes] = useState<SearchMenuItem[]>([]);
+  const [isLoadingDishes, setIsLoadingDishes] = useState(true);
+
   // Realtime search results
   const [foodResults, setFoodResults] = useState<SearchMenuItem[]>([]);
   const [restaurantResults, setRestaurantResults] = useState<Restaurant[]>([]);
@@ -180,10 +184,48 @@ export const HomePage: React.FC = () => {
     }
   }, [user]);
 
+  // 1b. Load the latest dishes from approved restaurants for the default homepage feed
+  const loadFreshDishes = useCallback(async () => {
+    if (!isSupabaseConfigured) {
+      setIsLoadingDishes(false);
+      return;
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('menu_items')
+        .select('*, restaurant:restaurants(*)')
+        .order('is_available', { ascending: false })
+        .order('created_at', { ascending: false })
+        .limit(12);
+
+      if (error) throw error;
+
+      const processed: SearchMenuItem[] = [];
+      for (const item of (data || []) as SearchMenuItem[]) {
+        const rest = item.restaurant || restaurantsMap[item.restaurant_id];
+        // Only surface dishes that belong to an approved kitchen
+        if (rest && rest.is_approved) {
+          processed.push({ ...item, restaurant: rest });
+        }
+      }
+      setFreshDishes(processed);
+    } catch {
+      // Keep previous dishes on transient errors
+    } finally {
+      setIsLoadingDishes(false);
+    }
+  }, [restaurantsMap]);
+
   // Initial load
   useEffect(() => {
     loadApprovedRestaurants();
   }, [loadApprovedRestaurants]);
+
+  // Initial dish feed load (re-runs when the approved-restaurants map is ready)
+  useEffect(() => {
+    loadFreshDishes();
+  }, [loadFreshDishes]);
 
   // 2. Realtime Food & Restaurant Search Core Function
   const executeRealtimeSearch = useCallback(
@@ -319,8 +361,9 @@ export const HomePage: React.FC = () => {
           }
           setTimeout(() => setRealtimeNotice(null), 3500);
 
-          // Re-execute current search in realtime
+          // Re-execute current search AND refresh the homepage dish feed in realtime
           executeRealtimeSearch(latestSearchTermRef.current, latestCuisineRef.current);
+          loadFreshDishes();
         }
       )
       .on(
@@ -337,6 +380,7 @@ export const HomePage: React.FC = () => {
 
           loadApprovedRestaurants();
           executeRealtimeSearch(latestSearchTermRef.current, latestCuisineRef.current);
+          loadFreshDishes();
         }
       )
       .subscribe();
@@ -344,7 +388,7 @@ export const HomePage: React.FC = () => {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [executeRealtimeSearch, loadApprovedRestaurants]);
+  }, [executeRealtimeSearch, loadApprovedRestaurants, loadFreshDishes]);
 
   // 4. Quick Add Food Item to Cart
   const handleAddDishToCart = (e: React.MouseEvent, dish: SearchMenuItem) => {
@@ -926,6 +970,121 @@ export const HomePage: React.FC = () => {
             NORMAL DEFAULT HOME VIEW (Browsing Approved Kitchens)
            ========================================================================= */
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
+          {/* =======================================================================
+              FRESH DISHES FEED (Realtime products from partner kitchens)
+             ======================================================================= */}
+          <section className="mb-8">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h2 className="text-base sm:text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
+                  <Utensils className="w-5 h-5 text-emerald-600" />
+                  <span>Fresh Dishes Near You</span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Live menu items added by partner kitchens — updated in realtime
+                </p>
+              </div>
+              <span className="hidden sm:inline text-xs font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-xl border border-emerald-100">
+                {freshDishes.length} Dishes
+              </span>
+            </div>
+
+            {isLoadingDishes ? (
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+                {[1, 2, 3, 4].map((n) => (
+                  <div
+                    key={n}
+                    className="bg-white rounded-2xl p-3 border border-slate-200/80 shadow-xs space-y-2 animate-pulse"
+                  >
+                    <div className="h-24 sm:h-28 bg-slate-200 rounded-xl" />
+                    <div className="h-3.5 bg-slate-200 rounded w-3/4" />
+                    <div className="h-3 bg-slate-100 rounded w-1/2" />
+                  </div>
+                ))}
+              </div>
+            ) : freshDishes.length === 0 ? (
+              <div className="bg-white rounded-2xl p-6 text-center border border-slate-200 text-slate-500 text-xs">
+                No dishes published by partner kitchens yet. New menu items will appear here the moment restaurants add them.
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+                {freshDishes.map((dish) => {
+                  const rest = dish.restaurant || restaurantsMap[dish.restaurant_id];
+                  return (
+                    <div
+                      key={dish.id}
+                      className="bg-white rounded-2xl border border-slate-200/90 shadow-xs hover:shadow-md transition overflow-hidden flex flex-col group"
+                    >
+                      {/* Dish image / emoji fallback — links to the restaurant */}
+                      <Link
+                        to={`/restaurant/${dish.restaurant_id}`}
+                        className="relative block h-24 sm:h-28 bg-slate-100 overflow-hidden"
+                      >
+                        {dish.image_url ? (
+                          <img
+                            src={dish.image_url}
+                            alt={dish.name}
+                            className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+                            loading="lazy"
+                          />
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-br from-amber-500/10 via-emerald-500/10 to-teal-500/20 flex items-center justify-center">
+                            <span className="text-4xl select-none">
+                              {getCuisineEmoji(dish.name, dish.description)}
+                            </span>
+                          </div>
+                        )}
+
+                        {!dish.is_available && (
+                          <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center">
+                            <span className="text-[9px] font-black text-white px-1.5 py-0.5 rounded bg-rose-600">
+                              SOLD OUT
+                            </span>
+                          </div>
+                        )}
+                      </Link>
+
+                      {/* Dish info */}
+                      <div className="p-2.5 sm:p-3 flex-1 flex flex-col">
+                        <h4 className="font-extrabold text-slate-900 text-xs sm:text-sm line-clamp-1">
+                          {dish.name}
+                        </h4>
+                        {rest && (
+                          <Link
+                            to={`/restaurant/${rest.id}`}
+                            className="text-[10px] font-bold text-emerald-700 hover:underline flex items-center gap-1 mt-0.5"
+                          >
+                            <Store className="w-2.5 h-2.5 flex-shrink-0" />
+                            <span className="truncate">{rest.name}</span>
+                          </Link>
+                        )}
+
+                        <div className="flex items-center justify-between mt-2 pt-1.5 border-t border-slate-100">
+                          <span className="text-xs sm:text-sm font-black text-emerald-700">
+                            {formatGHS(dish.price)}
+                          </span>
+                          <button
+                            onClick={(e) => handleAddDishToCart(e, dish)}
+                            disabled={!dish.is_available}
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-black flex items-center gap-0.5 transition shadow-xs active:scale-95 ${
+                              dish.is_available
+                                ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                            }`}
+                          >
+                            <Plus className="w-3 h-3 stroke-[3]" />
+                            <span>Add</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
           <div className="flex items-center justify-between mb-4">
             <div>
               <h2 className="text-base sm:text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
