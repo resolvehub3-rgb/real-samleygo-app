@@ -327,12 +327,15 @@ Run these SQL scripts, **in order**, inside the **Supabase SQL Editor**:
 2. `supabase/migrations/20260925_courier_verification.sql` — courier identity verification (Ghana Card, licence, number plate). Fully idempotent: safe to run on an already-bootstrapped or live database, and required if your project predates the two-section courier sign-up.
 3. `supabase/migrations/20260925_super_admin_protection.sql` — role-change guard so only a super admin can grant the `SUPER_ADMIN` role (the profiles update policy alone did not prevent self-promotion).
 4. `supabase/migrations/20260927_signup_repair.sql` — **signup repair**: replaces `handle_new_user()` with a version that pins its `search_path`, schema-qualifies every object, is null-safe on the `NOT NULL` profile columns, and can never block a registration (failures are logged to `public.signup_debug` instead of aborting the `auth.users` insert). Also records a before/after probe of the trigger so the original error is captured verbatim.
+5. `supabase/migrations/20260929_courier_avatar.sql` — **profile photos**: public `avatars` Storage bucket (each user can only write inside their own folder) plus a `supabase_realtime` publication entry for `public.profiles`, so a courier uploading a rider photo reaches the customer's live order card and the restaurant's dispatch board immediately.
 
 All scripts are idempotent and create:
 
 - `courier-documents` — a **private** Storage bucket for Ghana Card front/back photos (accessible only through signed URLs minted by the owning courier or a super admin),
+- `avatars` — a **public** Storage bucket for profile photos (courier rider photos are rendered with a plain `<img src>` by customers and restaurants during a delivery),
 - RLS policies on `public.courier_documents` (owner + super admin only),
-- realtime publication entries for `public.couriers` and `public.courier_documents` so verification status changes push live to the courier and admin dashboards.
+- realtime publication entries for `public.couriers` and `public.courier_documents` so verification status changes push live to the courier and admin dashboards,
+- a realtime publication entry for `public.profiles` so avatar/name/phone changes push live to the customer's order screen and the restaurant's dispatch board.
 
 ### 4. Install Dependencies & Launch
 ```bash

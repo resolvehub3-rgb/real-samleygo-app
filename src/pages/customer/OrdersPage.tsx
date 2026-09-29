@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ShoppingBag, ChevronRight, Clock, MapPin, AlertCircle, Navigation } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
-import { Order } from '../../types/database';
+import { Order, Profile } from '../../types/database';
 import { useAuth } from '../../context/AuthContext';
 import { formatGHS } from '../../lib/pricing';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
@@ -72,7 +72,27 @@ export const OrdersPage: React.FC = () => {
           }
         }
       )
-      .subscribe();
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'profiles',
+          filter: `id=eq.${mapOrder.courier_id}`,
+        },
+        (payload) => {
+          // Rider updated their photo/name — refresh the open modal live
+          const next = payload.new as Partial<Profile>;
+          if (!isMounted || !next?.id) return;
+          setMapOrder((prev) => {
+            if (!prev || !prev.courier || prev.courier_id !== next.id) return prev;
+            return { ...prev, courier: { ...prev.courier, ...next } as Profile };
+          });
+        }
+      )
+      .subscribe(() => {
+        // Quiet: profiles realtime is a bonus; the order list refresh covers it
+      });
 
     return () => {
       isMounted = false;
@@ -323,6 +343,7 @@ export const OrdersPage: React.FC = () => {
             destinationName={mapOrder.customer?.full_name || 'Delivery Address'}
             destinationAddress={mapOrder.delivery_address}
             courierName={mapOrder.courier?.full_name || 'Assigned Courier'}
+            courierPhoto={mapOrder.courier?.avatar_url || null}
             customerPhone={mapOrder.customer_phone}
             role="CUSTOMER"
           />

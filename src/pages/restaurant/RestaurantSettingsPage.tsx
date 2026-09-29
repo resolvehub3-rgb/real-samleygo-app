@@ -19,6 +19,7 @@ import { Restaurant } from '../../types/database';
 import { RestaurantShell } from '../../components/restaurant/RestaurantShell';
 import { uploadRestaurantImage, describeUploadError } from '../../lib/restaurantMedia';
 import { getCurrentPositionSafe, describeGeoError } from '../../lib/geolocation';
+import { usePlaceLabel } from '../../hooks/usePlaceLabel';
 
 type PhotoKind = 'logo' | 'cover';
 
@@ -45,6 +46,10 @@ export const RestaurantSettingsPage: React.FC = () => {
   const [pin, setPin] = useState<{ lat: number; lng: number } | null>(null);
   const [isLocating, setIsLocating] = useState(false);
   const [locationNote, setLocationNote] = useState<string | null>(null);
+  // Readable area for the saved pin ("East Legon, Accra" instead of raw
+  // coordinates) — the coordinate pair stays the saved value, only the text
+  // shown to the owner changes.
+  const pinPlaceLabel = usePlaceLabel(pin);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -495,7 +500,10 @@ export const RestaurantSettingsPage: React.FC = () => {
                 </button>
                 <span className="text-[11px] text-slate-500">
                   {pin
-                    ? `Pin saved · ${pin.lat.toFixed(5)}, ${pin.lng.toFixed(5)}`
+                    ? `Pin saved · ${
+                        pinPlaceLabel ||
+                        `${pin.lat.toFixed(4)}°, ${pin.lng.toFixed(4)}°`
+                      }`
                     : 'No pin yet — the live map will match your address text.'}
                 </span>
               </div>

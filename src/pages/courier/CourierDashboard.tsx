@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Bike,
   Power,
@@ -17,6 +18,7 @@ import {
   Eye,
   Bell,
   X,
+  Plus,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
@@ -29,7 +31,9 @@ import {
   maskLicenseNumber,
 } from '../../lib/verification';
 import { watchPositionSafe, GeoError, describeGeoError } from '../../lib/geolocation';
+import { usePlaceLabel } from '../../hooks/usePlaceLabel';
 import { CourierLiveMap, MapRestaurantPin } from '../../components/courier/CourierLiveMap';
+import { UserAvatar } from '../../components/common/UserAvatar';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { playCourierAssignedAlert, initAudioUnlock } from '../../lib/soundAlerts';
 
@@ -43,6 +47,9 @@ export const CourierDashboard: React.FC = () => {
   const [isUpdatingOnline, setIsUpdatingOnline] = useState(false);
   const [gpsActive, setGpsActive] = useState(false);
   const [currentCoords, setCurrentCoords] = useState<{ lat: number; lng: number } | null>(null);
+  // Human-readable area for the telemetry bar — replaces a raw "Lat/Lon"
+  // readout with e.g. "East Legon, Accra", refreshed live as the rider moves.
+  const currentPlaceLabel = usePlaceLabel(currentCoords);
   const [locationStatus, setLocationStatus] = useState<string>('GPS Standby');
   const [isLoading, setIsLoading] = useState(true);
   const [verificationNotice, setVerificationNotice] = useState<string | null>(null);
@@ -96,7 +103,9 @@ export const CourierDashboard: React.FC = () => {
       // for a courier with no delivery is *every* load and every 45 s poll.
       const { data: cData } = await supabase
         .from('couriers')
-        .select('*')
+        // profile join: the header shows the courier's name AND photo (the
+        // photo is what customers/restaurants see during a delivery)
+        .select('*, profile:profiles(id, full_name, avatar_url, phone)')
         .eq('id', user.id)
         .maybeSingle();
 
@@ -596,9 +605,25 @@ export const CourierDashboard: React.FC = () => {
         <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-xs">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-100">
             <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-emerald-600 to-teal-700 text-white flex items-center justify-center shadow-md">
-                <Bike className="w-6 h-6" />
-              </div>
+              <Link
+                to="/profile"
+                title="Add or change your profile photo"
+                className="relative group"
+              >
+                <UserAvatar
+                  src={courier?.profile?.avatar_url}
+                  name={courier?.profile?.full_name || user?.email?.split('@')[0]}
+                  sizeClassName="w-12 h-12"
+                  shapeClassName="rounded-2xl"
+                  className="shadow-md ring-2 ring-emerald-100 group-hover:ring-emerald-300 transition"
+                  fallback={<Bike className="w-6 h-6" />}
+                />
+                {!courier?.profile?.avatar_url && (
+                  <span className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-emerald-600 text-white border-2 border-white flex items-center justify-center">
+                    <Plus className="w-3 h-3" />
+                  </span>
+                )}
+              </Link>
               <div>
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                   Courier Hub · Ghana
@@ -752,8 +777,14 @@ export const CourierDashboard: React.FC = () => {
                 <span>Test Alert Sound</span>
               </button>
               {currentCoords && (
-                <span className="font-mono text-[11px] text-slate-500">
-                  Lat: {currentCoords.lat.toFixed(4)} | Lon: {currentCoords.lng.toFixed(4)}
+                <span
+                  className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-600 bg-slate-50 border border-slate-200 px-2 py-1 rounded-lg"
+                  title="Live GPS position"
+                >
+                  <MapPin className="w-3 h-3 text-emerald-600" />
+                  <span className="truncate max-w-[220px]">
+                    {currentPlaceLabel || 'Locating your area…'}
+                  </span>
                 </span>
               )}
             </div>

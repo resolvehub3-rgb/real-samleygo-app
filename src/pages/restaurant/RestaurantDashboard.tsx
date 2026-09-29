@@ -19,12 +19,13 @@ import {
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
-import { Restaurant, Order } from '../../types/database';
+import { Restaurant, Order, Profile } from '../../types/database';
 import { formatGHS } from '../../lib/pricing';
 import { RestaurantShell } from '../../components/restaurant/RestaurantShell';
 import { CourierLiveMap, LatLng } from '../../components/courier/CourierLiveMap';
 import { haversineKm } from '../../lib/routing';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
+import { UserAvatar } from '../../components/common/UserAvatar';
 import { playRestaurantOrderAlert } from '../../lib/soundAlerts';
 
 // "3 min ago" style helper for order cards
@@ -237,6 +238,39 @@ export const RestaurantDashboard: React.FC = () => {
         }
       )
       .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user, role]);
+
+  // Realtime courier identity: when a rider changes their photo (or name)
+  // their new picture must appear on every open order card instantly.
+  // Own channel so a realtime hiccup here can never disturb the order
+  // pipeline above; the 45 s background refresh below covers it anyway.
+  useEffect(() => {
+    if (!user || !isSupabaseConfigured || role === 'SUPER_ADMIN') return;
+
+    const channel = supabase
+      .channel(`restaurant-courier-profiles-${user.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'profiles' },
+        (payload) => {
+          const next = payload.new as Partial<Profile>;
+          if (!next?.id) return;
+          setOrders((prev) =>
+            prev.map((o) =>
+              o.courier_id === next.id && o.courier
+                ? ({ ...o, courier: { ...o.courier, ...next } } as Order)
+                : o
+            )
+          );
+        }
+      )
+      .subscribe(() => {
+        // Quiet: this channel is a bonus, not a dependency
+      });
 
     return () => {
       supabase.removeChannel(channel);
@@ -823,8 +857,18 @@ export const RestaurantDashboard: React.FC = () => {
                           {dispatch.status.replace(/_/g, ' ')}
                         </span>
                       </div>
-                      <p className="text-emerald-100 font-semibold truncate text-[11px]">
-                        🛵 {dispatch.courier?.full_name || 'Courier'} &rarr; {dispatch.customer?.full_name || 'Customer'}
+                      <p className="text-emerald-100 font-semibold text-[11px] flex items-center gap-1.5 min-w-0">
+                        <UserAvatar
+                          src={dispatch.courier?.avatar_url}
+                          name={dispatch.courier?.full_name}
+                          sizeClassName="w-5 h-5"
+                          className="ring-1 ring-emerald-400/60"
+                          fallback={<Bike className="w-3 h-3" />}
+                        />
+                        <span className="truncate">
+                          {dispatch.courier?.full_name || 'Courier'} &rarr;{' '}
+                          {dispatch.customer?.full_name || 'Customer'}
+                        </span>
                       </p>
                       <p className="text-[10px] text-emerald-300/90 font-medium">
                         {isHeadingToKitchen
@@ -1047,9 +1091,14 @@ export const RestaurantDashboard: React.FC = () => {
                       className="p-3 sm:p-3.5 rounded-2xl border border-slate-200/90 hover:border-emerald-400 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50 hover:bg-white transition"
                     >
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-700 text-white flex items-center justify-center shadow-xs flex-shrink-0">
-                          <Bike className="w-5 h-5" />
-                        </div>
+                        <UserAvatar
+                          src={c.profile?.avatar_url}
+                          name={driverName}
+                          sizeClassName="w-10 h-10"
+                          shapeClassName="rounded-xl"
+                          className="shadow-xs"
+                          fallback={<Bike className="w-5 h-5" />}
+                        />
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="font-bold text-xs sm:text-sm text-slate-900 truncate">
@@ -1112,6 +1161,7 @@ export const RestaurantDashboard: React.FC = () => {
           destinationName={selectedMapOrder.customer?.full_name || 'Customer'}
           destinationAddress={selectedMapOrder.delivery_address}
           courierName={selectedMapOrder.courier?.full_name || 'Assigned Courier'}
+          courierPhoto={selectedMapOrder.courier?.avatar_url || null}
           courierPhone={
             selectedMapOrder.courier_id
               ? courierPositions[selectedMapOrder.courier_id]?.phone
@@ -1244,7 +1294,13 @@ const RestaurantOrderCard: React.FC<OrderCardProps> = ({
           <div className="space-y-3">
             <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2 text-xs flex-wrap">
               <div className="flex items-center gap-2 min-w-0">
-                <Bike className="w-4 h-4 text-emerald-700 flex-shrink-0" />
+                <UserAvatar
+                  src={order.courier.avatar_url}
+                  name={order.courier.full_name}
+                  sizeClassName="w-7 h-7"
+                  className="ring-2 ring-white shadow-sm"
+                  fallback={<Bike className="w-3.5 h-3.5" />}
+                />
                 <span className="font-bold text-emerald-900 truncate">
                   Courier: {order.courier.full_name}
                 </span>

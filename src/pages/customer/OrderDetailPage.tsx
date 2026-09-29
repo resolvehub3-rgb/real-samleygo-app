@@ -19,11 +19,19 @@ import {
   X,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
-import { Order, OrderItem, OrderStatusHistory, DeliveryLocation, Courier } from '../../types/database';
+import {
+  Order,
+  OrderItem,
+  OrderStatusHistory,
+  DeliveryLocation,
+  Courier,
+  Profile,
+} from '../../types/database';
 import { useAuth } from '../../context/AuthContext';
 import { formatGHS } from '../../lib/pricing';
 import { CourierLiveMap } from '../../components/courier/CourierLiveMap';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
+import { UserAvatar } from '../../components/common/UserAvatar';
 import { playCustomerPickupAlert, playCustomerDeliveredAlert } from '../../lib/soundAlerts';
 
 const STATUS_STEPS = [
@@ -277,6 +285,46 @@ export const OrderDetailPage: React.FC = () => {
     };
   }, [order?.courier_id, order?.id]);
 
+  // Realtime courier identity — the rider changes their photo/name/phone on
+  // their profile screen and it must appear HERE (customer's live delivery
+  // card) without a refresh. Dedicated channel so a failure can never disturb
+  // the GPS/order listeners above; the status callback swallows any error and
+  // the 30 s safety-net poll below still picks the change up.
+  useEffect(() => {
+    const courierId = order?.courier_id;
+    if (!courierId || !isSupabaseConfigured) return;
+
+    const photoChannel = supabase
+      .channel(`order-courier-photo-${order?.id}-${courierId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'profiles',
+          filter: `id=eq.${courierId}`,
+        },
+        (payload) => {
+          const next = payload.new as Partial<Profile>;
+          if (!next?.id) return;
+
+          setCourierDetails((prev) =>
+            prev ? { ...prev, profile: { ...(prev.profile as Profile | undefined), ...next } as Profile } : prev
+          );
+          setOrder((prev) =>
+            prev?.courier ? { ...prev, courier: { ...prev.courier, ...next } } : prev
+          );
+        }
+      )
+      .subscribe(() => {
+        // Intentionally quiet: realtime is a bonus channel, the poll covers it.
+      });
+
+    return () => {
+      supabase.removeChannel(photoChannel);
+    };
+  }, [order?.id, order?.courier_id]);
+
   // ── Realtime safety net ───────────────────────────────────────────────
   // Order/GPS updates arrive over websockets; if the socket drops (network
   // switch, backgrounded tab) the map would silently freeze. While the
@@ -302,7 +350,9 @@ export const OrderDetailPage: React.FC = () => {
         const [courierResult, locationResult] = await Promise.all([
           supabase
             .from('couriers')
-            .select('current_latitude, current_longitude, current_location_updated_at')
+            // profile rides along so a courier who changed their photo is
+            // re-surfaced here even if the realtime channel is unavailable
+            .select('current_latitude, current_longitude, current_location_updated_at, profile:profiles(id, full_name, avatar_url, phone)')
             .eq('id', pollCourierId)
             .maybeSingle(),
           supabase
@@ -319,8 +369,18 @@ export const OrderDetailPage: React.FC = () => {
               current_latitude?: number | null;
               current_longitude?: number | null;
               current_location_updated_at?: string | null;
+              profile?: Profile | null;
             }
           | null;
+
+        // Fresh copy of the rider's photo/name, even on a tick with no GPS fix
+        if (ping?.profile) {
+          setCourierDetails((prev) =>
+            prev
+              ? ({ ...prev, profile: { ...(prev.profile ?? undefined), ...ping.profile } } as Courier)
+              : prev
+          );
+        }
 
         if (ping?.current_latitude != null && ping.current_longitude != null) {
           setCourierDetails((prev) => {
@@ -332,7 +392,7 @@ export const OrderDetailPage: React.FC = () => {
               ? new Date(ping.current_location_updated_at).getTime()
               : 0;
             if (prevTime && nextTime && nextTime < prevTime) return prev;
-            return { ...prev, ...ping } as Courier;
+            return { ...prev, ...ping } as unknown as Courier;
           });
         }
 
@@ -610,9 +670,14 @@ export const OrderDetailPage: React.FC = () => {
             <div className="bg-slate-50 rounded-2xl p-4 sm:p-5 border border-slate-200/80 space-y-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-md">
-                    <Bike className="w-5 h-5" />
-                  </div>
+                  <UserAvatar
+                    src={courierDetails?.profile?.avatar_url || order.courier?.avatar_url}
+                    name={order.courier?.full_name || courierDetails?.profile?.full_name}
+                    sizeClassName="w-10 h-10"
+                    shapeClassName="rounded-xl"
+                    className="shadow-md ring-2 ring-white"
+                    fallback={<Bike className="w-5 h-5" />}
+                  />
                   <div>
                     <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider block">
                       Assigned SamleyGo Courier
@@ -987,6 +1052,9 @@ export const OrderDetailPage: React.FC = () => {
           destinationName={order?.customer?.full_name || 'Your Address'}
           destinationAddress={order?.delivery_address}
           courierName={order?.courier?.full_name || 'Assigned Courier'}
+          courierPhoto={
+            courierDetails?.profile?.avatar_url || order?.courier?.avatar_url || null
+          }
           courierPhone={order?.courier?.phone}
           customerPhone={order?.customer_phone}
           lastPingAgeMinutes={

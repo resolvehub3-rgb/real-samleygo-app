@@ -74,7 +74,12 @@ export async function prepareImage(
 // HTTP 520 (and other 5xx) from Supabase Storage is a transient Cloudflare
 // gateway error — Supabase's own troubleshooting guide recommends retrying.
 // Fails fast on real permission/config errors (403/404/400).
-async function uploadWithRetry(path: string, blob: Blob, attempts = 3): Promise<void> {
+export async function uploadToBucketWithRetry(
+  bucketId: string,
+  path: string,
+  blob: Blob,
+  attempts = 3
+): Promise<void> {
   let lastError: unknown = null;
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -83,7 +88,7 @@ async function uploadWithRetry(path: string, blob: Blob, attempts = 3): Promise<
       await new Promise((resolve) => setTimeout(resolve, 800 * attempt * attempt));
     }
 
-    const { error } = await supabase.storage.from(RESTAURANT_MEDIA_BUCKET).upload(path, blob, {
+    const { error } = await supabase.storage.from(bucketId).upload(path, blob, {
       contentType: 'image/jpeg',
       cacheControl: '3600',
       upsert: true,
@@ -123,7 +128,7 @@ export async function uploadRestaurantImage(
   const storagePath = `${userId}/${pathPrefix}-${Date.now()}.jpg`;
 
   try {
-    await uploadWithRetry(storagePath, blob);
+    await uploadToBucketWithRetry(RESTAURANT_MEDIA_BUCKET, storagePath, blob);
 
     const { data: urlData } = supabase.storage
       .from(RESTAURANT_MEDIA_BUCKET)

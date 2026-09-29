@@ -15,6 +15,8 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
 import { SubmittedDocsModal } from '../../components/courier/SubmittedDocsModal';
+import { UserAvatar } from '../../components/common/UserAvatar';
+import { ProfilePhotoUploader } from '../../components/common/ProfilePhotoUploader';
 
 export const ProfilePage: React.FC = () => {
   const { user, profile, role, signOut, updateProfile } = useAuth();
@@ -25,6 +27,10 @@ export const ProfilePage: React.FC = () => {
   const [isUpdating, setIsUpdating] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [showDocsModal, setShowDocsModal] = useState(false);
+  // Committed locally right after an upload so the new photo shows instantly,
+  // before refreshProfile() round-trips back with the updated row.
+  const [photoOverride, setPhotoOverride] = useState<string | null>(null);
+  const photoUrl = photoOverride ?? profile?.avatar_url ?? null;
 
   if (!user) {
     return (
@@ -61,9 +67,13 @@ export const ProfilePage: React.FC = () => {
         {/* Profile Card */}
         <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-xs space-y-6">
           <div className="flex items-center gap-4 pb-6 border-b border-slate-100">
-            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-600 to-teal-700 text-white flex items-center justify-center text-xl font-black shadow-md">
-              {profile?.full_name ? profile.full_name.charAt(0).toUpperCase() : 'U'}
-            </div>
+            <UserAvatar
+              src={photoUrl}
+              name={profile?.full_name}
+              sizeClassName="w-16 h-16"
+              shapeClassName="rounded-2xl"
+              className="shadow-md"
+            />
             <div>
               <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md">
                 {role.replace(/_/g, ' ')}
@@ -73,6 +83,30 @@ export const ProfilePage: React.FC = () => {
               </h1>
               <p className="text-xs text-slate-500">{user.email}</p>
             </div>
+          </div>
+
+          {/* Profile picture (courier rider photo is shown live to customers
+              and restaurants on every active delivery) */}
+          <div className="pb-6 border-b border-slate-100">
+            <span className="block text-xs font-bold text-slate-700 mb-3">
+              Profile Picture
+            </span>
+            <ProfilePhotoUploader
+              userId={user.id}
+              name={profile?.full_name || fullName}
+              photoUrl={photoUrl}
+              onUploaded={async (url) => {
+                setPhotoOverride(url);
+                // The uploader shows its own confirmation copy; just persist
+                // the new URL so every screen picks it up in realtime.
+                await updateProfile({ avatar_url: url });
+              }}
+              hint={
+                role === 'COURIER'
+                  ? 'Customers and restaurants see this photo while you are on a delivery.'
+                  : 'JPG, PNG or WebP · shown next to your name across the app.'
+              }
+            />
           </div>
 
           {savedSuccess && (

@@ -26,7 +26,8 @@ import { Restaurant, Order, MenuItem } from '../../types/database';
 import { useAuth } from '../../context/AuthContext';
 import { useCart } from '../../context/CartContext';
 import { formatGHS } from '../../lib/pricing';
-import { getCurrentPositionSafe, isGeolocationAvailable, describeGeoError } from '../../lib/geolocation';
+import { isGeolocationAvailable } from '../../lib/geolocation';
+import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
 
 export interface SearchMenuItem extends MenuItem {
@@ -123,6 +124,15 @@ export const HomePage: React.FC = () => {
   const [showLocationModal, setShowLocationModal] = useState(false);
   const [isDetectingLocation, setIsDetectingLocation] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+
+  // Live device position: resolves to a place NAME (never "GPS: 5.5, -0.2")
+  // and keeps refreshing it in realtime while the customer moves.
+  const liveLocation = useLiveLocationLabel();
+  const [isUsingDeviceLocation, setIsUsingDeviceLocation] = useState(false);
+  /** True only between pressing "Use Current Device Location" and the first fix. */
+  const awaitingFixRef = useRef(false);
+  /** Dedupes the location error alert (the same message never repeats). */
+  const geoErrorSeenRef = useRef<string | null>(null);
 
   // Ref to trigger latest search without stale closures in realtime listener
   const latestSearchTermRef = useRef(searchQuery);
@@ -413,7 +423,9 @@ export const HomePage: React.FC = () => {
     }
   };
 
-  // Real browser geolocation detection (robust helper with clear errors)
+  // Real browser geolocation detection (robust helper with clear errors).
+  // Starts a LIVE watch: the "Deliver To" pill then keeps following the
+  // device and shows a place name, never raw coordinates.
   const handleDetectLocation = async () => {
     if (!isGeolocationAvailable()) {
       alert(
@@ -422,16 +434,37 @@ export const HomePage: React.FC = () => {
       return;
     }
     setIsDetectingLocation(true);
-    try {
-      const point = await getCurrentPositionSafe({ highAccuracyFirst: true, timeoutMs: 12000 });
-      setLocationName(`📍 GPS: ${point.lat.toFixed(4)}, ${point.lng.toFixed(4)}`);
-      setShowLocationModal(false);
-    } catch (err) {
-      alert(describeGeoError(err));
-    } finally {
-      setIsDetectingLocation(false);
-    }
+    setIsUsingDeviceLocation(true);
+    awaitingFixRef.current = true;
+    await liveLocation.start();
+    setIsDetectingLocation(false);
   };
+
+  // Follow the live fix in realtime while device location is enabled.
+  useEffect(() => {
+    if (!isUsingDeviceLocation || !liveLocation.point) return;
+    setLocationName(
+      liveLocation.label ? `📍 ${liveLocation.label}` : '📍 Your current location'
+    );
+    // Dismiss the picker for the press that asked for it — later fixes keep
+    // updating the pill without yanking a picker the customer reopened.
+    if (awaitingFixRef.current) {
+      awaitingFixRef.current = false;
+      setShowLocationModal(false);
+    }
+  }, [isUsingDeviceLocation, liveLocation.point, liveLocation.label]);
+
+  // Surface a location failure once (friendly text, never coordinates) and
+  // leave the previously chosen address untouched.
+  useEffect(() => {
+    const err = liveLocation.error;
+    if (!err || geoErrorSeenRef.current === err) return;
+    geoErrorSeenRef.current = err;
+    awaitingFixRef.current = false;
+    setIsUsingDeviceLocation(false);
+    setIsDetectingLocation(false);
+    alert(err);
+  }, [liveLocation.error]);
 
   // Determine active search state
   const isSearchActive = Boolean(searchQuery.trim() || selectedCuisine !== 'All');
@@ -484,6 +517,12 @@ export const HomePage: React.FC = () => {
               <span className="text-xs font-extrabold text-slate-800 truncate block">
                 {locationName}
               </span>
+              {isUsingDeviceLocation && liveLocation.isWatching && (
+                <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-wider text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded mt-0.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Live location
+                </span>
+              )}
             </div>
           </button>
 
@@ -1251,7 +1290,13 @@ export const HomePage: React.FC = () => {
               className="w-full py-3 px-4 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-extrabold text-xs flex items-center justify-center gap-2 transition"
             >
               <Navigation className="w-4 h-4" />
-              <span>{isDetectingLocation ? 'Acquiring GPS...' : 'Use Current Device Location'}</span>
+              <span>
+                {isDetectingLocation
+                  ? 'Acquiring GPS...'
+                  : isUsingDeviceLocation
+                  ? 'Tracking your location live…'
+                  : 'Use Current Device Location'}
+              </span>
             </button>
 
             {/* Popular Ghana Locations */}
@@ -1264,6 +1309,8 @@ export const HomePage: React.FC = () => {
                   <button
                     key={loc}
                     onClick={() => {
+                      // A hand-picked area wins over the live device follow
+                      setIsUsingDeviceLocation(false);
                       setLocationName(loc);
                       setShowLocationModal(false);
                     }}

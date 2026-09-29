@@ -18,6 +18,7 @@ import {
   MapRestaurantPin,
 } from '../courier/CourierLiveMap';
 import { formatRouteDistance, formatRouteDuration, haversineKm } from '../../lib/routing';
+import { UserAvatar } from './UserAvatar';
 
 export interface LiveDeliveryMapModalProps {
   isOpen: boolean;
@@ -34,6 +35,8 @@ export interface LiveDeliveryMapModalProps {
   /** All other restaurants, shown as secondary pins. */
   restaurants?: MapRestaurantPin[];
   courierName?: string;
+  /** The assigned rider's profile photo (live — see profiles.avatar_url) */
+  courierPhoto?: string | null;
   courierPhone?: string;
   customerPhone?: string;
   lastPingAgeMinutes?: number | null;
@@ -54,6 +57,7 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
   destinationAddress,
   restaurants,
   courierName = 'Courier',
+  courierPhoto,
   courierPhone,
   customerPhone,
   lastPingAgeMinutes,
@@ -186,7 +190,16 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
               )}
             </div>
             <div className="flex items-center justify-between gap-2">
-              <p className="font-extrabold text-slate-900 truncate text-xs">{courierName}</p>
+              <span className="flex items-center gap-2 min-w-0">
+                <UserAvatar
+                  src={courierPhoto}
+                  name={courierName}
+                  sizeClassName="w-7 h-7"
+                  className="ring-2 ring-white shadow-sm"
+                  fallback={<Bike className="w-3.5 h-3.5" />}
+                />
+                <p className="font-extrabold text-slate-900 truncate text-xs">{courierName}</p>
+              </span>
               {courierPhone && (
                 <a
                   href={`tel:${courierPhone}`}

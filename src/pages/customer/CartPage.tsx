@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ShoppingBag,
@@ -18,7 +18,8 @@ import { useCart } from '../../context/CartContext';
 import { useAuth } from '../../context/AuthContext';
 import { calculateDistanceKm, calculateDeliveryFee, formatGHS } from '../../lib/pricing';
 import { supabase } from '../../lib/supabase';
-import { getCurrentPositionSafe, isGeolocationAvailable, describeGeoError } from '../../lib/geolocation';
+import { isGeolocationAvailable } from '../../lib/geolocation';
+import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
 
 const PAYMENT_METHODS = [
   { id: 'MTN_MOMO', name: 'MTN Mobile Money (*170#)', color: 'border-yellow-400 bg-yellow-50/50' },
@@ -37,12 +38,36 @@ export const CartPage: React.FC = () => {
   const [phone, setPhone] = useState(profile?.phone || '');
   const [customerLat, setCustomerLat] = useState<number | null>(null);
   const [customerLng, setCustomerLng] = useState<number | null>(null);
-  const [isLocating, setIsLocating] = useState(false);
   const [tip, setTip] = useState(5.0);
   const [paymentMethod, setPaymentMethod] = useState('MTN_MOMO');
   const [momoNumber, setMomoNumber] = useState(profile?.phone || '');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+
+  // Live device position resolved to a place NAME — the address box must read
+  // "East Legon, Accra", never "GPS ±12m: 5.63500, -0.15500".
+  const liveLocation = useLiveLocationLabel();
+  const isLocating = liveLocation.isLocating;
+  /** Once the customer types their own landmark we stop overwriting it. */
+  const addressEditedRef = useRef(false);
+
+  useEffect(() => {
+    if (!liveLocation.point) return;
+    setCustomerLat(liveLocation.point.lat);
+    setCustomerLng(liveLocation.point.lng);
+    if (!addressEditedRef.current && liveLocation.label) {
+      setAddress(liveLocation.label);
+    }
+  }, [liveLocation.point, liveLocation.label]);
+
+  // Friendly, one-shot location error (coordinates are never shown).
+  const geoErrorSeenRef = useRef<string | null>(null);
+  useEffect(() => {
+    const err = liveLocation.error;
+    if (!err || geoErrorSeenRef.current === err) return;
+    geoErrorSeenRef.current = err;
+    setErrorMsg(`${err} You can also type your delivery landmark manually.`);
+  }, [liveLocation.error]);
 
   // Calculate real distance if GPS coordinates available
   const restLat = restaurant?.latitude || 5.6037; // Accra default
@@ -54,7 +79,8 @@ export const CartPage: React.FC = () => {
   const deliveryFee = restaurant ? calculateDeliveryFee(distanceKm) : 12.0;
   const grandTotal = subtotal + deliveryFee + tip;
 
-  // Use Browser Geolocation API (robust helper: secure-context check, accuracy fallback, clear errors)
+  // Use the browser Geolocation API: a live watch that keeps the delivery
+  // coordinates (and the readable address) fresh while the customer checks out.
   const handleUseCurrentLocation = async () => {
     if (!isGeolocationAvailable()) {
       setErrorMsg(
@@ -62,21 +88,9 @@ export const CartPage: React.FC = () => {
       );
       return;
     }
-    setIsLocating(true);
     setErrorMsg('');
-    try {
-      const point = await getCurrentPositionSafe({ highAccuracyFirst: true, timeoutMs: 12000 });
-      setCustomerLat(point.lat);
-      setCustomerLng(point.lng);
-      const label = point.accuracy
-        ? `GPS ±${Math.round(point.accuracy)}m`
-        : 'GPS';
-      setAddress(`${label}: ${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`);
-    } catch (err) {
-      setErrorMsg(`${describeGeoError(err)} You can also type your delivery landmark manually.`);
-    } finally {
-      setIsLocating(false);
-    }
+    geoErrorSeenRef.current = null;
+    await liveLocation.start();
   };
 
   const handlePlaceOrder = async (e: React.FormEvent) => {
@@ -318,7 +332,13 @@ export const CartPage: React.FC = () => {
                   className="flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1.5 rounded-lg hover:bg-emerald-100 transition"
                 >
                   <Navigation className="w-3 h-3" />
-                  <span>{isLocating ? 'Acquiring GPS...' : 'Use Current Location'}</span>
+                  <span>
+                    {isLocating
+                      ? 'Acquiring GPS...'
+                      : liveLocation.isWatching
+                      ? 'Location live'
+                      : 'Use Current Location'}
+                  </span>
                 </button>
               </div>
 
@@ -328,11 +348,16 @@ export const CartPage: React.FC = () => {
                   required
                   placeholder="e.g. House No. 24, Boundary Road, East Legon, Accra"
                   value={address}
-                  onChange={(e) => setAddress(e.target.value)}
+                  onChange={(e) => {
+                    addressEditedRef.current = true;
+                    setAddress(e.target.value);
+                  }}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white"
                 />
                 <p className="mt-1 text-[10px] text-slate-400">
-                  Accurate landmarks ensure rapid delivery by our motorcycle couriers.
+                  {liveLocation.isWatching && !addressEditedRef.current
+                    ? 'Live GPS area name — add your house or gate number for rapid delivery.'
+                    : 'Accurate landmarks ensure rapid delivery by our motorcycle couriers.'}
                 </p>
               </div>
 
