@@ -603,7 +603,7 @@ export const AdminDashboard: React.FC = () => {
       if (count !== null) setUsersCount(count);
 
       // 5. Fetch Platform Settings
-      const { data: settsData } = await supabase.from('platform_settings').select('*').eq('key', 'delivery_pricing').single();
+      const { data: settsData } = await supabase.from('platform_settings').select('*').eq('key', 'delivery_pricing').maybeSingle();
       if (settsData && settsData.value) setPricingSettings(settsData.value as PlatformPricingSettings);
 
       // 6. Fetch Audit Logs

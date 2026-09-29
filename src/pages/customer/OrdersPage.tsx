@@ -29,7 +29,7 @@ export const OrdersPage: React.FC = () => {
       .from('couriers')
       .select('current_latitude, current_longitude')
       .eq('id', mapOrder.courier_id)
-      .single()
+      .maybeSingle() // no courier row yet → null, not HTTP 406
       .then(({ data }) => {
         if (isMounted && data?.current_latitude && data?.current_longitude) {
           setMapCourierPos({ lat: data.current_latitude, lng: data.current_longitude });

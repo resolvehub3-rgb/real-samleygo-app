@@ -91,13 +91,16 @@ export const CourierDashboard: React.FC = () => {
 
     try {
       // 1. Fetch Courier row
-      const { data: cData, error: cErr } = await supabase
+      // `.maybeSingle()` all the way down: `.single()` sends an object Accept
+      // header, and PostgREST answers 406 whenever zero rows come back — which
+      // for a courier with no delivery is *every* load and every 45 s poll.
+      const { data: cData } = await supabase
         .from('couriers')
         .select('*')
         .eq('id', user.id)
-        .single();
+        .maybeSingle();
 
-      if (cErr && !cData) {
+      if (!cData) {
         // Create courier record if missing (identity verification still required)
         await supabase.from('couriers').upsert({
           id: user.id,
@@ -107,7 +110,7 @@ export const CourierDashboard: React.FC = () => {
           availability_status: 'OFFLINE',
           verification_status: 'UNSUBMITTED',
         });
-      } else if (cData) {
+      } else {
         setCourier(cData as Courier);
       }
 
@@ -123,13 +126,16 @@ export const CourierDashboard: React.FC = () => {
       }
 
       // 2. Fetch current active delivery (if any)
+      // `maybeSingle()` + `limit(1)`: an idle courier matches zero rows, and
+      // `.single()`'s object Accept header made PostgREST answer HTTP 406 for
+      // that every load and every 45 s refresh. This resolves to null instead.
       const { data: activeOrder } = await supabase
         .from('orders')
         .select('*, restaurant:restaurants(*), customer:profiles!orders_customer_id_fkey(*)')
         .eq('courier_id', user.id)
         .in('status', ['COURIER_ASSIGNED', 'COURIER_ACCEPTED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED'])
         .limit(1)
-        .single();
+        .maybeSingle();
 
       if (activeOrder) {
         setActiveDelivery(activeOrder as Order);

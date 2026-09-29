@@ -108,7 +108,7 @@ export const RestaurantDashboard: React.FC = () => {
         .select('*')
         .eq('owner_id', user.id)
         .limit(1)
-        .single();
+        .maybeSingle(); // zero rows → null (an owner without a restaurant is normal)
 
       if (restData) {
         setRestaurant(restData as Restaurant);
@@ -417,7 +417,7 @@ export const RestaurantDashboard: React.FC = () => {
           total_reviews: 0,
         })
         .select()
-        .single();
+        .maybeSingle();
 
       if (!error && data) {
         setRestaurant(data as Restaurant);

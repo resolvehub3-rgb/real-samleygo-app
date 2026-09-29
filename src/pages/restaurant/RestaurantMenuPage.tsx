@@ -58,7 +58,8 @@ export const RestaurantMenuPage: React.FC = () => {
         .from('restaurants')
         .select('*')
         .eq('owner_id', user.id)
-        .single();
+        // maybeSingle: zero rows must not become a console-visible 406
+        .maybeSingle();
 
       if (!rData) {
         setIsLoading(false);

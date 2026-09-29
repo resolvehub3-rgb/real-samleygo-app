@@ -62,13 +62,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
    * can act on the authoritative role instead of a stale render closure. */
   const fetchProfile = useCallback(async (userId: string): Promise<Profile | null> => {
     try {
+      // `.maybeSingle()`, never `.single()`: requesting an object makes
+      // PostgREST answer 406 when zero rows come back (profile row still being
+      // written by the signup trigger, or hidden by RLS) and the browser logs
+      // that as a failed resource on every load. `maybeSingle` fetches as a
+      // list and resolves `null` instead, so "no row" joins "read failed" below.
       const { data, error } = await supabase
         .from('profiles')
         .select('*')
         .eq('id', userId)
-        .single();
+        .maybeSingle();
 
-      if (error) {
+      if (error || !data) {
         // The profiles row can lag behind account creation (trigger delay) or be
         // hidden by RLS, so build a placeholder from the auth record. Crucially
         // this must NEVER overwrite a profile we already loaded: doing so

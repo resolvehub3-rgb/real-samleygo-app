@@ -50,7 +50,8 @@ export const RestaurantDetailPage: React.FC = () => {
           .from('restaurants')
           .select('*')
           .eq('id', id)
-          .single();
+          // maybeSingle: a missing/unauthorised id returns null, not HTTP 406
+          .maybeSingle();
 
         if (restError || !restData) {
           setIsLoading(false);

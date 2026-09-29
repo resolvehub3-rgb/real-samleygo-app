@@ -75,7 +75,7 @@ export const OrderDetailPage: React.FC = () => {
         .from('orders')
         .select('*, restaurant:restaurants(*), courier:profiles!orders_courier_id_fkey(*)')
         .eq('id', id)
-        .single();
+        .maybeSingle(); // unknown/hidden order → null instead of an HTTP 406
 
       if (orderError || !orderData) {
         setIsLoading(false);
@@ -110,7 +110,7 @@ export const OrderDetailPage: React.FC = () => {
             'id, vehicle_type, vehicle_plate, verification_status, created_at, updated_at, is_approved, is_online, availability_status, total_deliveries, rating, current_latitude, current_longitude, current_location_updated_at, profile:profiles(id, full_name, avatar_url, phone)'
           )
           .eq('id', orderData.courier_id)
-          .single();
+          .maybeSingle(); // courier row missing → null, not HTTP 406
 
         if (cData) {
           setCourierDetails(cData as unknown as Courier);
@@ -124,7 +124,9 @@ export const OrderDetailPage: React.FC = () => {
           .eq('order_id', id)
           .order('recorded_at', { ascending: false })
           .limit(1)
-          .single();
+          // maybeSingle: no location row logged yet is the normal case — `.single()`
+          // turned it into an HTTP 406 on every order page load
+          .maybeSingle();
 
         if (locData) setLastLocation(locData as DeliveryLocation);
       }

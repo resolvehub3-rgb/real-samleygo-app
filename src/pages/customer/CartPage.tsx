@@ -130,7 +130,8 @@ export const CartPage: React.FC = () => {
           payment_reference: paymentRef,
         })
         .select()
-        .single();
+        // maybeSingle: an empty returning set must not surface as HTTP 406
+        .maybeSingle();
 
       if (orderError || !orderData) {
         throw new Error(orderError?.message || 'Failed to create order');
