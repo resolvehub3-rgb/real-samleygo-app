@@ -23,6 +23,14 @@ export interface ActiveRouteInfo {
   durationSeconds: number;
 }
 
+/** A secondary restaurant pin drawn alongside the active trip. */
+export interface MapRestaurantPin {
+  id: string;
+  lat: number;
+  lng: number;
+  name?: string;
+}
+
 interface CourierLiveMapProps {
   /** Courier's live position (updates in realtime) */
   courierPosition: LatLng | null;
@@ -45,29 +53,47 @@ interface CourierLiveMapProps {
    */
   pickupAddress?: string;
   destinationAddress?: string;
+  /**
+   * Every other restaurant on the platform, drawn as smaller secondary pins so
+   * the courier always sees the full kitchen network around them. Filter out
+   * the active pickup yourself if you don't want it drawn twice.
+   */
+  restaurants?: MapRestaurantPin[];
   /** Reports the active leg's road route whenever it changes (or clears). */
   onRouteUpdate?: (route: ActiveRouteInfo | null) => void;
 }
 
 // Small inline SVG pin icons so we don't depend on Leaflet's image assets
-const makeIcon = (emoji: string, bg: string) =>
+const makeIcon = (emoji: string, bg: string, size = 34) =>
   L.divIcon({
     className: '',
     html: `<div style="
       display:flex;align-items:center;justify-content:center;
-      width:34px;height:34px;border-radius:50% 50% 50% 0;
+      width:${size}px;height:${size}px;border-radius:50% 50% 50% 0;
       transform:rotate(-45deg);
       background:${bg};box-shadow:0 2px 8px rgba(0,0,0,.35);
       border:2px solid white;">
-      <span style="transform:rotate(45deg);font-size:15px;line-height:1;">${emoji}</span>
+      <span style="transform:rotate(45deg);font-size:${Math.round(size * 0.44)}px;line-height:1;">${emoji}</span>
     </div>`,
-    iconSize: [34, 34],
-    iconAnchor: [17, 32],
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size - 2],
   });
 
 const courierIcon = makeIcon('🛵', '#059669'); // emerald-600
 const destinationIcon = makeIcon('🏠', '#0f172a'); // slate-900
 const pickupIcon = makeIcon('🍳', '#f59e0b'); // amber-500
+const restaurantIcon = makeIcon('🏪', '#475569', 26); // slate-600, deliberately smaller
+
+/**
+ * A coordinate is only drawn if it is finite, in range and not "null island"
+ * (0,0) — the classic artifact of a column that was never really filled in.
+ */
+const isUsablePin = (lat: number, lng: number): boolean =>
+  Number.isFinite(lat) &&
+  Number.isFinite(lng) &&
+  Math.abs(lat) <= 90 &&
+  Math.abs(lng) <= 180 &&
+  !(Math.abs(lat) < 0.01 && Math.abs(lng) < 0.01);
 
 /** Statuses where the rider is still driving toward the kitchen. */
 const TO_PICKUP_STATUSES = new Set([
@@ -112,6 +138,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   status,
   pickupAddress,
   destinationAddress,
+  restaurants,
   onRouteUpdate,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -121,6 +148,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const pickupMarkerRef = useRef<L.Marker | null>(null);
   const corridorPolylineRef = useRef<L.Polyline | null>(null);
   const roadPolylineRef = useRef<L.Polyline | null>(null);
+  /** Secondary restaurant pins, keyed by restaurant id so updates are cheap. */
+  const restaurantMarkersRef = useRef<Map<string, L.Marker>>(new Map());
   /** Fit-once guard: pin/courier presence signature the viewport was framed for. */
   const fitSigRef = useRef('');
   /** The marker's current *animated* position (may lag behind the latest ping). */
@@ -164,6 +193,14 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const pickupLng = pickup?.lng ?? null;
   const destinationLat = destination?.lat ?? null;
   const destinationLng = destination?.lng ?? null;
+
+  // Content key for the restaurant list. Consumers routinely pass a freshly
+  // filtered array (new identity every render), so this effect keys off the
+  // contents instead of the reference — otherwise each render would cancel and
+  // restart the marker's glide.
+  const restaurantKey = restaurants?.length
+    ? restaurants.map((r) => `${r.id}|${r.lat}|${r.lng}|${r.name ?? ''}`).join(';')
+    : '';
 
   // ── Geocode pins whose coordinates are missing ────────────────────────
   useEffect(() => {
@@ -354,6 +391,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       pickupMarkerRef.current = null;
       corridorPolylineRef.current = null;
       roadPolylineRef.current = null;
+      restaurantMarkersRef.current.clear(); // map.remove() already dropped the layers
       currentLatLngRef.current = null;
       fitSigRef.current = '';
     };
@@ -398,6 +436,34 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     } else if (pickupMarkerRef.current) {
       map.removeLayer(pickupMarkerRef.current);
       pickupMarkerRef.current = null;
+    }
+
+    // All other restaurants — created once, repositioned in place, and removed
+    // again the moment they leave the list (bad rows are skipped, never thrown).
+    const nextRestaurantIds = new Set<string>();
+    if (restaurants) {
+      for (const spot of restaurants) {
+        if (!spot?.id || !isUsablePin(spot.lat, spot.lng)) continue;
+        if (nextRestaurantIds.has(spot.id)) continue;
+        nextRestaurantIds.add(spot.id);
+
+        const position: L.LatLngExpression = [spot.lat, spot.lng];
+        const existing = restaurantMarkersRef.current.get(spot.id);
+        if (existing) {
+          existing.setLatLng(position);
+        } else {
+          const marker = L.marker(position, { icon: restaurantIcon, keyboard: false })
+            .addTo(map)
+            .bindPopup(spot.name?.trim() || 'Restaurant');
+          restaurantMarkersRef.current.set(spot.id, marker);
+        }
+      }
+    }
+    for (const [id, marker] of Array.from(restaurantMarkersRef.current.entries())) {
+      if (!nextRestaurantIds.has(id)) {
+        map.removeLayer(marker);
+        restaurantMarkersRef.current.delete(id);
+      }
     }
 
     /** Straight dashed corridor: pickup → courier → destination (always drawn). */
@@ -534,14 +600,20 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       drawRoadRoute(null);
     }
 
-    // Frame the viewport whenever the set of visible pins changes (never on
-    // subsequent GPS pings, so the user's pan/zoom is respected).
-    const fitSig = `${courierPosition ? 1 : 0}${pickupPt ? 1 : 0}${destinationPt ? 1 : 0}`;
-    if (fitSig !== fitSigRef.current && fitSig !== '000') {
+    // Frame the viewport whenever the set of visible pins changes — courier
+    // fix, trip pins and the restaurant network all count, but GPS pings never
+    // do, so the courier's pan/zoom is respected afterwards.
+    const restaurantPins = restaurants?.filter((r) => isUsablePin(r.lat, r.lng)) ?? [];
+    const fitSig = `${courierPosition ? 1 : 0}${pickupPt ? 1 : 0}${destinationPt ? 1 : 0}${
+      restaurantPins.length > 0 ? 1 : 0
+    }`;
+    if (fitSig !== fitSigRef.current && fitSig !== '0000') {
       const points: L.LatLngExpression[] = [];
       if (courierPosition) points.push([courierPosition.lat, courierPosition.lng]);
       if (pickupPt) points.push([pickupPt.lat, pickupPt.lng]);
       if (destinationPt) points.push([destinationPt.lat, destinationPt.lng]);
+      // Every kitchen too, so the full network is on screen from the first frame
+      for (const spot of restaurantPins) points.push([spot.lat, spot.lng]);
 
       if (points.length >= 2) {
         map.fitBounds(L.latLngBounds(points).pad(0.35));
@@ -551,7 +623,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       }
       fitSigRef.current = fitSig;
     }
-  }, [courierPosition, destinationPt, pickupPt, courierName, roadRoute]);
+  }, [courierPosition, destinationPt, pickupPt, courierName, roadRoute, restaurantKey]);
 
   return (
     <div

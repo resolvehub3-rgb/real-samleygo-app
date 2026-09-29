@@ -29,7 +29,7 @@ import {
   maskLicenseNumber,
 } from '../../lib/verification';
 import { watchPositionSafe, GeoError, describeGeoError } from '../../lib/geolocation';
-import { CourierLiveMap } from '../../components/courier/CourierLiveMap';
+import { CourierLiveMap, MapRestaurantPin } from '../../components/courier/CourierLiveMap';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { playCourierAssignedAlert, initAudioUnlock } from '../../lib/soundAlerts';
 
@@ -48,11 +48,19 @@ export const CourierDashboard: React.FC = () => {
   const [verificationNotice, setVerificationNotice] = useState<string | null>(null);
   const [showLiveMapModal, setShowLiveMapModal] = useState(false);
   const [isInlineMapHidden, setIsInlineMapHidden] = useState(false);
+  /** Every restaurant on the platform, drawn as secondary pins on the live map. */
+  const [mapRestaurants, setMapRestaurants] = useState<MapRestaurantPin[]>([]);
   const [incomingAssignedAlert, setIncomingAssignedAlert] = useState<{
     orderNumber: string | number;
     orderId: string;
     deliveryAddress?: string;
   } | null>(null);
+
+  // Restaurants to draw as secondary pins: the whole platform except the active
+  // pickup, which already owns the amber 🍳 pin and the route target.
+  const otherRestaurants = activeDelivery?.restaurant_id
+    ? mapRestaurants.filter((r) => r.id !== activeDelivery.restaurant_id)
+    : mapRestaurants;
 
   // Holds the geolocation watcher's cleanup function (typed as number for ref compatibility)
   const watchIdRef = useRef<number | null>(null);
@@ -147,6 +155,43 @@ export const CourierDashboard: React.FC = () => {
     }
   };
 
+  /**
+   * All restaurants for the live map. Only the columns the map needs, rows
+   * without usable coordinates skipped, and every failure swallowed so a bad
+   * response can never take the dashboard (or its map) down.
+   */
+  const fetchMapRestaurants = async () => {
+    if (!isSupabaseConfigured) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('restaurants')
+        .select('id, name, latitude, longitude')
+        .order('name', { ascending: true });
+
+      if (error || !Array.isArray(data)) return;
+
+      const pins: MapRestaurantPin[] = [];
+      for (const row of data as Array<{
+        id?: string | null;
+        name?: string | null;
+        latitude?: number | null;
+        longitude?: number | null;
+      }>) {
+        if (!row?.id) continue;
+        if (row.latitude == null || row.longitude == null) continue;
+        if (!Number.isFinite(row.latitude) || !Number.isFinite(row.longitude)) continue;
+        if (Math.abs(row.latitude) > 90 || Math.abs(row.longitude) > 180) continue;
+        // Skip "null island" (0,0) — the artifact of a never-filled coordinate
+        if (Math.abs(row.latitude) < 0.01 && Math.abs(row.longitude) < 0.01) continue;
+        pins.push({ id: row.id, name: row.name ?? undefined, lat: row.latitude, lng: row.longitude });
+      }
+      setMapRestaurants(pins);
+    } catch {
+      // Offline / RLS surprise — keep whatever pins are already on screen.
+    }
+  };
+
   useEffect(() => {
     fetchCourierData();
 
@@ -199,8 +244,10 @@ export const CourierDashboard: React.FC = () => {
   // queue and status chips would go stale. Re-read every 45 s while the tab is
   // visible (each action also refetches right after its own write).
   const fetchCourierDataRef = useRef(fetchCourierData);
+  const fetchMapRestaurantsRef = useRef(fetchMapRestaurants);
   useEffect(() => {
     fetchCourierDataRef.current = fetchCourierData;
+    fetchMapRestaurantsRef.current = fetchMapRestaurants;
   });
 
   useEffect(() => {
@@ -208,8 +255,40 @@ export const CourierDashboard: React.FC = () => {
     const timer = window.setInterval(() => {
       if (document.hidden) return;
       fetchCourierDataRef.current();
+      fetchMapRestaurantsRef.current();
     }, 45_000);
     return () => window.clearInterval(timer);
+  }, [user?.id]);
+
+  // Realtime: keep every restaurant pin live (new partner kitchens, moved pins,
+  // closures). The event only *schedules* a debounced refetch, so a partial or
+  // malformed websocket payload can never corrupt what's drawn — and the 45 s
+  // poll above heals the whole list if this socket ever drops.
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+
+    fetchMapRestaurants();
+
+    let refetchTimer: number | null = null;
+    const channel = supabase
+      .channel(`courier-restaurant-pins-${user?.id ?? 'public'}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'restaurants' },
+        () => {
+          if (refetchTimer !== null) window.clearTimeout(refetchTimer);
+          refetchTimer = window.setTimeout(() => {
+            refetchTimer = null;
+            fetchMapRestaurants();
+          }, 1200);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      if (refetchTimer !== null) window.clearTimeout(refetchTimer);
+      supabase.removeChannel(channel);
+    };
   }, [user?.id]);
 
   // Keep the GPS watcher's view of the active delivery fresh
@@ -743,6 +822,7 @@ export const CourierDashboard: React.FC = () => {
                       ? `${activeDelivery.restaurant.address}, ${activeDelivery.restaurant.city}`
                       : undefined
                   }
+                  restaurants={otherRestaurants}
                   className="h-56 sm:h-64"
                 />
 
@@ -1025,6 +1105,7 @@ export const CourierDashboard: React.FC = () => {
           }
           destinationName={activeDelivery?.customer?.full_name}
           destinationAddress={activeDelivery?.delivery_address}
+          restaurants={otherRestaurants}
           courierName={courier?.profile?.full_name || 'You (Courier)'}
           courierPhone={courier?.profile?.phone}
           customerPhone={activeDelivery?.customer_phone}

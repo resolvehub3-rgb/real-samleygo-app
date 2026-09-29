@@ -11,7 +11,12 @@ import {
   CheckCircle2,
   AlertCircle,
 } from 'lucide-react';
-import { CourierLiveMap, LatLng, ActiveRouteInfo } from '../courier/CourierLiveMap';
+import {
+  CourierLiveMap,
+  LatLng,
+  ActiveRouteInfo,
+  MapRestaurantPin,
+} from '../courier/CourierLiveMap';
 import { formatRouteDistance, formatRouteDuration, haversineKm } from '../../lib/routing';
 
 export interface LiveDeliveryMapModalProps {
@@ -26,6 +31,8 @@ export interface LiveDeliveryMapModalProps {
   destination: LatLng | null;
   destinationName?: string;
   destinationAddress?: string;
+  /** All other restaurants, shown as secondary pins. */
+  restaurants?: MapRestaurantPin[];
   courierName?: string;
   courierPhone?: string;
   customerPhone?: string;
@@ -45,6 +52,7 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
   destination,
   destinationName = 'Customer',
   destinationAddress,
+  restaurants,
   courierName = 'Courier',
   courierPhone,
   customerPhone,
@@ -261,6 +269,7 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
             status={status}
             pickupAddress={pickupAddress}
             destinationAddress={destinationAddress}
+            restaurants={restaurants}
             onRouteUpdate={setRouteInfo}
             className="w-full h-full min-h-[360px] sm:min-h-[440px] md:min-h-[480px] rounded-none border-0"
           />
