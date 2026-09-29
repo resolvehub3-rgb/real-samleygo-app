@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   X,
   Navigation,
@@ -11,7 +11,8 @@ import {
   CheckCircle2,
   AlertCircle,
 } from 'lucide-react';
-import { CourierLiveMap, LatLng, haversineKm } from '../courier/CourierLiveMap';
+import { CourierLiveMap, LatLng, ActiveRouteInfo } from '../courier/CourierLiveMap';
+import { formatRouteDistance, formatRouteDuration, haversineKm } from '../../lib/routing';
 
 export interface LiveDeliveryMapModalProps {
   isOpen: boolean;
@@ -61,6 +62,11 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
+
+  // Road-route summary (distance + ETA) reported by the map for the leg the
+  // courier is actually driving. Must live above the `isOpen` guard so the
+  // hook count never changes between renders.
+  const [routeInfo, setRouteInfo] = useState<ActiveRouteInfo | null>(null);
 
   if (!isOpen) return null;
 
@@ -252,6 +258,10 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
             destination={destination}
             pickup={pickup}
             courierName={courierName}
+            status={status}
+            pickupAddress={pickupAddress}
+            destinationAddress={destinationAddress}
+            onRouteUpdate={setRouteInfo}
             className="w-full h-full min-h-[360px] sm:min-h-[440px] md:min-h-[480px] rounded-none border-0"
           />
 
@@ -281,6 +291,17 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
                   : 'Pins and live movement are synchronized in realtime.'
                 : 'Connecting to courier GPS device. Pins for restaurant and customer are active.'}
             </p>
+            {routeInfo && (
+              <div className="flex items-center gap-2 pt-1 border-t border-slate-200/80 text-[11px]">
+                <Navigation className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+                <span className="font-bold text-slate-700">
+                  {routeInfo.leg === 'TO_PICKUP' ? 'Road route to kitchen' : 'Road route to customer'}
+                </span>
+                <span className="ml-auto font-black text-emerald-700 whitespace-nowrap">
+                  {formatRouteDistance(routeInfo.distanceMeters)} · {formatRouteDuration(routeInfo.durationSeconds)}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 

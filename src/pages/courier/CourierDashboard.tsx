@@ -195,6 +195,23 @@ export const CourierDashboard: React.FC = () => {
     };
   }, [user]);
 
+  // Background refresh — realtime is push-only, so if the websocket drops the
+  // queue and status chips would go stale. Re-read every 45 s while the tab is
+  // visible (each action also refetches right after its own write).
+  const fetchCourierDataRef = useRef(fetchCourierData);
+  useEffect(() => {
+    fetchCourierDataRef.current = fetchCourierData;
+  });
+
+  useEffect(() => {
+    if (!user || !isSupabaseConfigured) return;
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      fetchCourierDataRef.current();
+    }, 45_000);
+    return () => window.clearInterval(timer);
+  }, [user?.id]);
+
   // Keep the GPS watcher's view of the active delivery fresh
   useEffect(() => {
     activeDeliveryRef.current = activeDelivery;
@@ -709,15 +726,22 @@ export const CourierDashboard: React.FC = () => {
               <>
                 <CourierLiveMap
                   courierPosition={currentCoords}
+                  status={activeDelivery?.status}
                   destination={
                     activeDelivery?.delivery_latitude && activeDelivery?.delivery_longitude
                       ? { lat: activeDelivery.delivery_latitude, lng: activeDelivery.delivery_longitude }
                       : null
                   }
+                  destinationAddress={activeDelivery?.delivery_address}
                   pickup={
                     activeDelivery?.restaurant?.latitude && activeDelivery?.restaurant?.longitude
                       ? { lat: activeDelivery.restaurant.latitude, lng: activeDelivery.restaurant.longitude }
                       : null
+                  }
+                  pickupAddress={
+                    activeDelivery?.restaurant
+                      ? `${activeDelivery.restaurant.address}, ${activeDelivery.restaurant.city}`
+                      : undefined
                   }
                   className="h-56 sm:h-64"
                 />

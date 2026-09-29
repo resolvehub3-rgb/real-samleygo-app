@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ChefHat,
@@ -22,7 +22,8 @@ import { useAuth } from '../../context/AuthContext';
 import { Restaurant, Order } from '../../types/database';
 import { formatGHS } from '../../lib/pricing';
 import { RestaurantShell } from '../../components/restaurant/RestaurantShell';
-import { CourierLiveMap, LatLng, haversineKm } from '../../components/courier/CourierLiveMap';
+import { CourierLiveMap, LatLng } from '../../components/courier/CourierLiveMap';
+import { haversineKm } from '../../lib/routing';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { playRestaurantOrderAlert } from '../../lib/soundAlerts';
 
@@ -241,6 +242,23 @@ export const RestaurantDashboard: React.FC = () => {
       supabase.removeChannel(channel);
     };
   }, [user, role]);
+
+  // Background refresh — realtime is push-only, so if the websocket drops the
+  // pipeline and live courier positions would freeze. Re-read every 45 s while
+  // the dashboard tab is visible; silently skipped while hidden.
+  const fetchRestaurantAndOrdersRef = useRef(fetchRestaurantAndOrders);
+  useEffect(() => {
+    fetchRestaurantAndOrdersRef.current = fetchRestaurantAndOrders;
+  });
+
+  useEffect(() => {
+    if (!user || !isSupabaseConfigured || role === 'SUPER_ADMIN') return;
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      fetchRestaurantAndOrdersRef.current();
+    }, 45_000);
+    return () => window.clearInterval(timer);
+  }, [user?.id, role]);
 
   // Open / Close Toggle (optimistic UI, shared via RestaurantShell sidebar)
   const toggleOpen = async () => {
@@ -903,6 +921,9 @@ export const RestaurantDashboard: React.FC = () => {
                         ? { lat: restaurant.latitude, lng: restaurant.longitude }
                         : null
                     }
+                    pickupAddress={
+                      restaurant ? `${restaurant.address}, ${restaurant.city}` : undefined
+                    }
                     onOpenLiveMap={() => setSelectedMapOrder(order)}
                   />
                 ))
@@ -931,6 +952,9 @@ export const RestaurantDashboard: React.FC = () => {
                       restaurant?.latitude && restaurant?.longitude
                         ? { lat: restaurant.latitude, lng: restaurant.longitude }
                         : null
+                    }
+                    pickupAddress={
+                      restaurant ? `${restaurant.address}, ${restaurant.city}` : undefined
                     }
                     onOpenLiveMap={() => setSelectedMapOrder(order)}
                   />
@@ -1131,6 +1155,8 @@ interface OrderCardProps {
   courierName?: string;
   /** Restaurant pickup coordinates for the map pin */
   pickup?: LatLng | null;
+  /** Restaurant address — geocoded for the pin when coordinates are missing */
+  pickupAddress?: string;
 }
 
 const ACCENT: Record<OrderCardProps['actionType'], string> = {
@@ -1151,6 +1177,7 @@ const RestaurantOrderCard: React.FC<OrderCardProps> = ({
   courierPosition,
   courierName,
   pickup,
+  pickupAddress,
 }) => {
   const [isCardMapHidden, setIsCardMapHidden] = useState(false);
 
@@ -1323,12 +1350,15 @@ const RestaurantOrderCard: React.FC<OrderCardProps> = ({
                 {!isCardMapHidden ? (
                   <CourierLiveMap
                     courierPosition={courierPosition ?? null}
+                    status={order.status}
                     destination={
                       order.delivery_latitude && order.delivery_longitude
                         ? { lat: order.delivery_latitude, lng: order.delivery_longitude }
                         : null
                     }
+                    destinationAddress={order.delivery_address}
                     pickup={pickup ?? null}
+                    pickupAddress={pickupAddress}
                     courierName={courierName ?? order.courier.full_name}
                     className="h-56 sm:h-64"
                   />

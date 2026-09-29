@@ -11,12 +11,14 @@ import {
   Eye,
   RefreshCw,
   TriangleAlert,
+  LocateFixed,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { Restaurant } from '../../types/database';
 import { RestaurantShell } from '../../components/restaurant/RestaurantShell';
 import { uploadRestaurantImage, describeUploadError } from '../../lib/restaurantMedia';
+import { getCurrentPositionSafe, describeGeoError } from '../../lib/geolocation';
 
 type PhotoKind = 'logo' | 'cover';
 
@@ -35,6 +37,14 @@ export const RestaurantSettingsPage: React.FC = () => {
   const [city, setCity] = useState('');
   const [openingTime, setOpeningTime] = useState('');
   const [closingTime, setClosingTime] = useState('');
+  /**
+   * Kitchen GPS pin. Every live map in the platform (courier, customer,
+   * restaurant) needs a restaurant coordinate — without it the pickup marker
+   * has to be guessed from the address text.
+   */
+  const [pin, setPin] = useState<{ lat: number; lng: number } | null>(null);
+  const [isLocating, setIsLocating] = useState(false);
+  const [locationNote, setLocationNote] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -104,6 +114,11 @@ export const RestaurantSettingsPage: React.FC = () => {
     setCity(restaurant.city || '');
     setOpeningTime(restaurant.opening_time || '');
     setClosingTime(restaurant.closing_time || '');
+    setPin(
+      restaurant.latitude != null && restaurant.longitude != null
+        ? { lat: restaurant.latitude, lng: restaurant.longitude }
+        : null
+    );
   }, [restaurant]);
 
   const refresh = async () => {
@@ -115,6 +130,21 @@ export const RestaurantSettingsPage: React.FC = () => {
       .limit(1)
       .maybeSingle();
     if (data) setRestaurant(data as Restaurant);
+  };
+
+  // Capture the kitchen's exact GPS point so pickup pins on every live map
+  // land on the real door instead of an address-text approximation.
+  const handleUseMyLocation = async () => {
+    setIsLocating(true);
+    setLocationNote(null);
+    try {
+      const point = await getCurrentPositionSafe({ highAccuracyFirst: true, timeoutMs: 12000 });
+      setPin({ lat: point.lat, lng: point.lng });
+    } catch (err) {
+      setLocationNote(describeGeoError(err));
+    } finally {
+      setIsLocating(false);
+    }
   };
 
   const toggleOpen = async () => {
@@ -198,6 +228,9 @@ export const RestaurantSettingsPage: React.FC = () => {
           city: city.trim(),
           opening_time: openingTime || null,
           closing_time: closingTime || null,
+          // Keep any previously saved pin unless the owner re-captures it.
+          latitude: pin?.lat ?? restaurant.latitude ?? null,
+          longitude: pin?.lng ?? restaurant.longitude ?? null,
         })
         .eq('id', restaurant.id);
 
@@ -448,6 +481,30 @@ export const RestaurantSettingsPage: React.FC = () => {
                   className="w-full pl-10 pr-3.5 py-3 rounded-xl border border-slate-200 bg-slate-50 text-xs sm:text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 transition"
                 />
               </div>
+
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleUseMyLocation}
+                  disabled={isLocating}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[11px] font-black text-emerald-700 transition hover:bg-emerald-100 active:scale-95 disabled:opacity-60"
+                  title="Use this device's GPS to pin your kitchen"
+                >
+                  <LocateFixed className={`w-3.5 h-3.5 ${isLocating ? 'animate-pulse' : ''}`} />
+                  <span>{isLocating ? 'Locating…' : 'Set exact map location'}</span>
+                </button>
+                <span className="text-[11px] text-slate-500">
+                  {pin
+                    ? `Pin saved · ${pin.lat.toFixed(5)}, ${pin.lng.toFixed(5)}`
+                    : 'No pin yet — the live map will match your address text.'}
+                </span>
+              </div>
+              {locationNote && (
+                <p className="mt-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-rose-600">
+                  <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span>{locationNote}</span>
+                </p>
+              )}
             </div>
 
             <div>

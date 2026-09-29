@@ -275,6 +275,84 @@ export const OrderDetailPage: React.FC = () => {
     };
   }, [order?.courier_id, order?.id]);
 
+  // ── Realtime safety net ───────────────────────────────────────────────
+  // Order/GPS updates arrive over websockets; if the socket drops (network
+  // switch, backgrounded tab) the map would silently freeze. While the
+  // delivery is live, re-read the courier's GPS every 30 s so the marker
+  // keeps moving until realtime reconnects. Newer pings never regress to
+  // older ones, and a failed poll is simply skipped until the next tick.
+  const pollCourierId = order?.courier_id ?? null;
+  const pollStatus = order?.status ?? '';
+  useEffect(() => {
+    if (!pollCourierId || !id || !isSupabaseConfigured) return;
+    if (
+      !['COURIER_ASSIGNED', 'COURIER_ACCEPTED', 'PICKED_UP', 'ON_THE_WAY', 'ARRIVED'].includes(
+        pollStatus
+      )
+    ) {
+      return;
+    }
+
+    const refresh = async () => {
+      if (document.hidden) return;
+
+      try {
+        const [courierResult, locationResult] = await Promise.all([
+          supabase
+            .from('couriers')
+            .select('current_latitude, current_longitude, current_location_updated_at')
+            .eq('id', pollCourierId)
+            .maybeSingle(),
+          supabase
+            .from('delivery_locations')
+            .select('*')
+            .eq('order_id', id)
+            .order('recorded_at', { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+        ]);
+
+        const ping = courierResult.data as
+          | {
+              current_latitude?: number | null;
+              current_longitude?: number | null;
+              current_location_updated_at?: string | null;
+            }
+          | null;
+
+        if (ping?.current_latitude != null && ping.current_longitude != null) {
+          setCourierDetails((prev) => {
+            if (!prev) return ping as unknown as Courier;
+            const prevTime = prev.current_location_updated_at
+              ? new Date(prev.current_location_updated_at).getTime()
+              : 0;
+            const nextTime = ping.current_location_updated_at
+              ? new Date(ping.current_location_updated_at).getTime()
+              : 0;
+            if (prevTime && nextTime && nextTime < prevTime) return prev;
+            return { ...prev, ...ping } as Courier;
+          });
+        }
+
+        const breadcrumb = locationResult.data as DeliveryLocation | null;
+        if (breadcrumb) {
+          setLastLocation((prev) => {
+            if (!prev) return breadcrumb;
+            return new Date(breadcrumb.recorded_at).getTime() >
+              new Date(prev.recorded_at).getTime()
+              ? breadcrumb
+              : prev;
+          });
+        }
+      } catch {
+        // Network hiccup — realtime or the next tick recovers on its own.
+      }
+    };
+
+    const timer = window.setInterval(refresh, 30_000);
+    return () => window.clearInterval(timer);
+  }, [pollCourierId, pollStatus, id]);
+
   const handleSubmitReview = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!order || !user) return;
@@ -648,8 +726,15 @@ export const OrderDetailPage: React.FC = () => {
                       hasAnyPin ? (
                         <CourierLiveMap
                           courierPosition={courierPosition}
+                          status={order.status}
                           destination={destination}
+                          destinationAddress={order.delivery_address}
                           pickup={pickup}
+                          pickupAddress={
+                            order.restaurant
+                              ? `${order.restaurant.address}, ${order.restaurant.city}`
+                              : undefined
+                          }
                           courierName={order.courier?.full_name}
                           className="h-64 sm:h-72"
                         />
