@@ -261,7 +261,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // and hands the caller an authoritative role for role-based routing —
       // the closure value it holds is still the pre-login default.
       const resolved = data?.user ? await fetchProfile(data.user.id) : null;
-      return { error: null, role: resolved?.role ?? 'CUSTOMER' };
+
+      // If the profiles row could not be read at all, fall back to the auth
+      // record's metadata so routing still uses the real role instead of the
+      // 'CUSTOMER' default (which would bounce a courier to the storefront).
+      let resolvedRole = resolved?.role;
+      if (!resolvedRole && data?.user) {
+        const appRole = (data.user.app_metadata as { role?: UserRole } | undefined)?.role;
+        const metaRole = (data.user.user_metadata as { role?: UserRole } | undefined)?.role;
+        resolvedRole = appRole || metaRole;
+      }
+
+      return { error: null, role: resolvedRole ?? 'CUSTOMER' };
     } catch (err) {
       // Rejections (network failure, blocked request) must surface as an
       // error result instead of escaping the handler and stranding the

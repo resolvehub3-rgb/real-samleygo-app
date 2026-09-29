@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { isSupabaseConfigured } from '../../lib/supabase';
+import { landingPathFor } from '../../lib/roleRoutes';
 import { SupabaseConnectModal } from '../../components/common/SupabaseConnectModal';
 import {
   AuthShell,
@@ -21,26 +22,6 @@ import {
   INPUT_CLASS,
   INPUT_ACTION_CLASS,
 } from '../../components/auth/AuthShell';
-
-/**
- * Where a freshly signed-in user lands. An explicit `?redirect=` target always
- * wins (the visitor was sent to /login to reach that specific page); otherwise
- * each role goes to its own workspace — a super admin must never be dropped on
- * the customer storefront after signing in.
- */
-const landingPathFor = (role: string | undefined, redirect: string): string => {
-  if (redirect && redirect !== '/') return redirect;
-  switch (role) {
-    case 'SUPER_ADMIN':
-      return '/admin/dashboard';
-    case 'COURIER':
-      return '/courier/dashboard';
-    case 'RESTAURANT_OWNER':
-      return '/restaurant/dashboard';
-    default:
-      return '/';
-  }
-};
 
 const LOGIN_FEATURES = [
   {

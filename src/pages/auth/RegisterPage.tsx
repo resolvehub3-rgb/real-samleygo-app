@@ -26,6 +26,7 @@ import { UserRole } from '../../types/database';
 import { isSupabaseConfigured } from '../../lib/supabase';
 import { SupabaseConnectModal } from '../../components/common/SupabaseConnectModal';
 import { prepareDocumentImage, PreparedDocument } from '../../lib/documents';
+import { homePathForRole } from '../../lib/roleRoutes';
 import {
   isValidGhanaCardNumber,
   isValidLicenseNumber,
@@ -372,13 +373,7 @@ export const RegisterPage: React.FC = () => {
         }
       }
 
-      if (role === 'RESTAURANT_OWNER') {
-        navigate('/restaurant/dashboard');
-      } else if (role === 'COURIER') {
-        navigate('/courier/dashboard');
-      } else {
-        navigate('/');
-      }
+      navigate(homePathForRole(role));
     } catch (err) {
       setIsSubmitting(false);
       setErrorMsg(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
