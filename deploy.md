@@ -312,7 +312,7 @@ Review typically takes **1 to 3 business days** for new developer accounts.
 1. **Zero Downtime Web Updates**:
    When you update prices, menus, or features on Vercel, the changes appear immediately inside the Google Play app without having to release a new version on Google Play!
 2. **Sound Engine Compatibility**:
-   The Bolt/Yango driver chimes and restaurant counter bells (`restaurant-bell.mp3` and `courier-sound.mp3`) play smoothly inside the Android TWA shell.
+   The Bolt/Yango driver chimes, restaurant counter bells and the courier-arrival alert (`restaurant-bell.mp3`, `courier-sound.mp3` and `customer-sound.mp3`) play smoothly inside the Android TWA shell.
 3. **Low Storage Footprint**:
    The downloaded `.aab` / APK is only **1–3 MB**, making it extremely fast to download over mobile data across Ghana.
 4. **Unified Codebase**:

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ShoppingBag, ChevronRight, Clock, MapPin, AlertCircle, Navigation } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
@@ -6,7 +6,7 @@ import { Order, Profile } from '../../types/database';
 import { useAuth } from '../../context/AuthContext';
 import { formatGHS } from '../../lib/pricing';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
-import { playCustomerPickupAlert, playCustomerDeliveredAlert } from '../../lib/soundAlerts';
+import { playCustomerPickupAlert, playCustomerArrivedAlert, playCustomerDeliveredAlert } from '../../lib/soundAlerts';
 
 export const OrdersPage: React.FC = () => {
   const { user } = useAuth();
@@ -14,6 +14,10 @@ export const OrdersPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [mapOrder, setMapOrder] = useState<Order | null>(null);
   const [mapCourierPos, setMapCourierPos] = useState<{ lat: number; lng: number } | null>(null);
+  // Last status we alerted about per order, so a chime fires exactly once per
+  // transition. payload.old is unreliable (REPLICA IDENTITY default only ships
+  // the primary key), so the realtime handler compares against this instead.
+  const lastAlertedStatusRef = useRef<Record<string, string>>({});
 
   // Live GPS courier tracking for the opened map modal on Orders list
   useEffect(() => {
@@ -115,6 +119,15 @@ export const OrdersPage: React.FC = () => {
 
       if (!error && data) {
         setOrders(data as Order[]);
+
+        // Remember the statuses already on screen (so an order that is
+        // mid-flight when the page opens never replays a chime), while
+        // keeping anything alerted since the previous fetch.
+        const known: Record<string, string> = {};
+        data.forEach((row) => {
+          if (row.status) known[row.id] = row.status;
+        });
+        lastAlertedStatusRef.current = { ...known, ...lastAlertedStatusRef.current };
       }
     } catch {
       // Handled
@@ -140,17 +153,26 @@ export const OrdersPage: React.FC = () => {
           },
           (payload) => {
             const newOrder = payload.new as Order | undefined;
-            const oldOrder = payload.old as Partial<Order> | undefined;
 
-            if (payload.eventType === 'UPDATE' && newOrder?.status) {
-              if (newOrder.status === 'PICKED_UP' && oldOrder?.status !== 'PICKED_UP') {
-                playCustomerPickupAlert();
-              } else if (
-                (newOrder.status === 'DELIVERED' || newOrder.status === 'COMPLETED') &&
-                oldOrder?.status !== 'DELIVERED' &&
-                oldOrder?.status !== 'COMPLETED'
-              ) {
-                playCustomerDeliveredAlert();
+            if (payload.eventType === 'UPDATE' && newOrder?.id && newOrder.status) {
+              const previous = lastAlertedStatusRef.current[newOrder.id];
+
+              if (previous !== newOrder.status) {
+                // Record first so a refetch landing mid-flight cannot replay it.
+                lastAlertedStatusRef.current[newOrder.id] = newOrder.status;
+
+                if (newOrder.status === 'PICKED_UP') {
+                  playCustomerPickupAlert();
+                } else if (newOrder.status === 'ARRIVED') {
+                  // Courier tapped "I have Arrived at Customer Location".
+                  playCustomerArrivedAlert();
+                } else if (
+                  (newOrder.status === 'DELIVERED' || newOrder.status === 'COMPLETED') &&
+                  previous !== 'DELIVERED' &&
+                  previous !== 'COMPLETED'
+                ) {
+                  playCustomerDeliveredAlert();
+                }
               }
             }
 

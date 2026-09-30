@@ -32,7 +32,11 @@ import { formatGHS } from '../../lib/pricing';
 import { CourierLiveMap } from '../../components/courier/CourierLiveMap';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { UserAvatar } from '../../components/common/UserAvatar';
-import { playCustomerPickupAlert, playCustomerDeliveredAlert } from '../../lib/soundAlerts';
+import {
+  playCustomerPickupAlert,
+  playCustomerArrivedAlert,
+  playCustomerDeliveredAlert,
+} from '../../lib/soundAlerts';
 
 const STATUS_STEPS = [
   { key: 'RESTAURANT_PENDING', label: 'Order Sent', desc: 'Awaiting kitchen confirmation' },
@@ -55,7 +59,7 @@ export const OrderDetailPage: React.FC = () => {
   const [showLiveMapModal, setShowLiveMapModal] = useState(false);
   const [isInlineMapHidden, setIsInlineMapHidden] = useState(false);
   const [soundAlertBanner, setSoundAlertBanner] = useState<{
-    type: 'PICKED_UP' | 'DELIVERED';
+    type: 'PICKED_UP' | 'ARRIVED' | 'DELIVERED';
     title: string;
     message: string;
   } | null>(null);
@@ -182,6 +186,17 @@ export const OrderDetailPage: React.FC = () => {
                 message: 'Your courier has collected your food from the kitchen and is driving towards you.',
               });
               setTimeout(() => setSoundAlertBanner(null), 9000);
+            } else if (newOrder.status === 'ARRIVED' && oldStatus !== 'ARRIVED') {
+              // Courier tapped "I have Arrived at Customer Location" — the meal
+              // is waiting at the drop-off. Custom customer sound + banner.
+              playCustomerArrivedAlert();
+              setSoundAlertBanner({
+                type: 'ARRIVED',
+                title: '🛵 Courier Has Arrived!',
+                message:
+                  'Your courier is at your destination. Meet them at the drop-off point to collect your meal.',
+              });
+              setTimeout(() => setSoundAlertBanner(null), 15000);
             } else if (
               (newOrder.status === 'DELIVERED' || newOrder.status === 'COMPLETED') &&
               oldStatus !== 'DELIVERED' &&
@@ -553,6 +568,8 @@ export const OrderDetailPage: React.FC = () => {
             className={`p-4 sm:p-5 rounded-3xl text-white shadow-xl flex items-center justify-between gap-4 border animate-in fade-in slide-in-from-top-4 ${
               soundAlertBanner.type === 'DELIVERED'
                 ? 'bg-gradient-to-r from-emerald-600 to-teal-800 border-emerald-400'
+                : soundAlertBanner.type === 'ARRIVED'
+                ? 'bg-gradient-to-r from-amber-500 via-orange-600 to-slate-900 border-amber-400'
                 : 'bg-gradient-to-r from-sky-600 via-indigo-600 to-slate-900 border-sky-400'
             }`}
           >

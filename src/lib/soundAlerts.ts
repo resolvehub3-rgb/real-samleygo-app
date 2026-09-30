@@ -3,10 +3,12 @@
  * Professional ringing bell and notification sounds for:
  * 1. Restaurant: Ringing bell when customer places a new order.
  * 2. Courier: Bolt/Yango driver-style ringing alert when assigned an order by a restaurant.
- * 3. Customer: Alert chime when order is picked up by courier and when delivered.
+ * 3. Customer: Alert when order is picked up by courier, when the courier
+ *    arrives at the drop-off, and when the order is delivered.
  *
  * Includes:
- * - HTML5 Audio playback using real bundled audio assets (/restaurant-bell.mp3, /courier-sound.mp3)
+ * - HTML5 Audio playback using real bundled audio assets
+ *   (/restaurant-bell.mp3, /courier-sound.mp3, /customer-sound.mp3)
  * - Studio-quality Web Audio API synthesized fallbacks (modeled after Bolt/Yango driver chimes)
  * - User gesture audio unlock for mobile Safari & Chrome autoplay restrictions
  * - User preference mute toggle support
@@ -333,4 +335,55 @@ export function playCustomerDeliveredAlert(): void {
   } catch (e) {
     console.error('[AudioEngine] Error synthesizing delivered alert:', e);
   }
+}
+
+// ============================================================================
+// 4. CUSTOMER ALERT: Courier Arrived at the Customer's Destination
+// ============================================================================
+
+/**
+ * Synthesized fallback for the courier-arrived alert: a bright three-note
+ * "your courier is at the door" chime (G5 -> C6 -> E6).
+ * Only used if /customer-sound.mp3 cannot be fetched or autoplay is blocked.
+ */
+export function synthesizeCustomerArrivedChime(): void {
+  if (isSoundMuted()) return;
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  try {
+    const now = ctx.currentTime;
+
+    // Arrival chime: G5 (784Hz), C6 (1046Hz), E6 (1318Hz)
+    const notes = [
+      { time: now, freq: 783.99, dur: 0.22, vol: 0.4 },
+      { time: now + 0.14, freq: 1046.5, dur: 0.28, vol: 0.5 },
+      { time: now + 0.3, freq: 1318.51, dur: 0.6, vol: 0.6 },
+    ];
+
+    notes.forEach(({ time, freq, dur, vol }) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, time);
+      gain.gain.setValueAtTime(0, time);
+      gain.gain.linearRampToValueAtTime(vol, time + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, time + dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(time);
+      osc.stop(time + dur + 0.05);
+    });
+  } catch (e) {
+    console.error('[AudioEngine] Error synthesizing courier-arrived chime:', e);
+  }
+}
+
+/**
+ * Customer Alert: the courier tapped "I have Arrived at Customer Location",
+ * so the meal is waiting at the drop-off.
+ * Plays the custom customer sound shipped in /public/customer-sound.mp3.
+ */
+export function playCustomerArrivedAlert(): void {
+  playAudioWithFallback('/customer-sound.mp3', synthesizeCustomerArrivedChime, 1.0);
 }

@@ -34,6 +34,7 @@ import {
   readLiveTracking,
 } from '../../lib/deliverTo';
 import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
+import { playCustomerArrivedAlert } from '../../lib/soundAlerts';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
 
 export interface SearchMenuItem extends MenuItem {
@@ -147,6 +148,8 @@ export const HomePage: React.FC = () => {
   const hadSavedPlaceRef = useRef(readDeliverTo() !== '');
   /** The "use your current location" prompt fires at most once per visit. */
   const autoPromptedRef = useRef(false);
+  /** Last order status we alerted about, so the arrival chime plays once. */
+  const lastAlertedStatusRef = useRef<Record<string, string>>({});
 
   // Ref to trigger latest search without stale closures in realtime listener
   const latestSearchTermRef = useRef(searchQuery);
@@ -199,6 +202,11 @@ export const HomePage: React.FC = () => {
 
         if (ordersData && ordersData.length > 0) {
           setActiveOrders(ordersData as Order[]);
+          // Seed the alert ledger with what is already on screen so a status
+          // that was reached before this page loaded never replays a chime.
+          ordersData.forEach((row: Order) => {
+            lastAlertedStatusRef.current[row.id] = row.status;
+          });
         }
       }
     } catch {
@@ -413,6 +421,47 @@ export const HomePage: React.FC = () => {
       supabase.removeChannel(channel);
     };
   }, [executeRealtimeSearch, loadApprovedRestaurants, loadFreshDishes]);
+
+  // 3b. Courier-arrival alert for signed-in customers. When the courier taps
+  // "I have Arrived at Customer Location", the custom customer sound plays and
+  // a toast appears — even if the customer is still browsing the home screen.
+  useEffect(() => {
+    if (!user || !isSupabaseConfigured) return;
+
+    const channel = supabase
+      .channel(`home-arrival-alerts-${user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'orders',
+          filter: `customer_id=eq.${user.id}`,
+        },
+        (payload) => {
+          const next = payload.new as Order | undefined;
+          if (!next?.id || !next.status) return;
+
+          // One chime per status, no matter how many fields update per status.
+          const previous = lastAlertedStatusRef.current[next.id];
+          if (previous === next.status) return;
+          lastAlertedStatusRef.current[next.id] = next.status;
+
+          if (next.status !== 'ARRIVED') return;
+
+          playCustomerArrivedAlert();
+          setRealtimeNotice('🛵 Realtime: Your courier has arrived at your destination!');
+          setTimeout(() => setRealtimeNotice(null), 6000);
+          // Refresh the active-delivery card so it reflects the new state.
+          void loadApprovedRestaurants();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user, loadApprovedRestaurants]);
 
   // 4. Quick Add Food Item to Cart
   const handleAddDishToCart = (e: React.MouseEvent, dish: SearchMenuItem) => {
