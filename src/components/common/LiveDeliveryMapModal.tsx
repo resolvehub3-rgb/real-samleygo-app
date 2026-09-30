@@ -72,7 +72,16 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
       }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+
+    // Lock the page behind the modal: on a phone a background scroll would
+    // otherwise leak through while the map is being panned.
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
   }, [isOpen, onClose]);
 
   // Road-route summary (distance + ETA) reported by the map for the leg the
@@ -100,9 +109,11 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 backdrop-blur-xs p-2 sm:p-4 md:p-6 overflow-y-auto animate-fade-in"
+      className="fixed inset-0 z-50 flex bg-slate-950/75 backdrop-blur-xs p-2 sm:p-4 md:p-6 overflow-y-auto animate-fade-in"
     >
-      <div className="relative w-full max-w-4xl bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[94vh]">
+      {/* `m-auto` (not items-center) so an over-tall dialog scrolls from the
+          top instead of clipping its header off-screen on a short phone. */}
+      <div className="relative w-full max-w-4xl m-auto bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[94vh]">
         {/* Header */}
         <div className="px-4 sm:px-6 py-3.5 bg-slate-900 text-white flex items-center justify-between gap-3 flex-shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -119,21 +130,22 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
                   Realtime
                 </span>
               </div>
-              <p className="text-[11px] text-slate-400 truncate">
+              <p className="hidden sm:block text-[11px] text-slate-400 truncate">
                 Live moves between kitchen, courier, and customer
               </p>
             </div>
           </div>
 
           {/* Prominent Hide Map Button */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-shrink-0">
             <button
               onClick={onClose}
-              className="px-3.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-white font-bold text-xs flex items-center gap-1.5 border border-white/10 transition shadow-xs"
+              className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-white font-bold text-xs flex items-center gap-1.5 border border-white/10 transition shadow-xs"
               title="Hide live map"
+              aria-label="Hide live map"
             >
               <EyeOff className="w-3.5 h-3.5" />
-              <span>Hide Map</span>
+              <span className="hidden sm:inline">Hide Map</span>
             </button>
             <button
               onClick={onClose}
@@ -146,17 +158,23 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
           </div>
         </div>
 
-        {/* Real-time 3-Point Location Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 p-3 sm:p-4 bg-slate-50 border-b border-slate-200 flex-shrink-0 text-xs">
+        {/* Real-time 3-Point Location Cards
+            Phones: kitchen + customer side by side with the courier full
+            width underneath (order-3), so names stay readable at ~170px.
+            sm+: the original three-across strip. */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 p-2.5 sm:p-4 bg-slate-50 border-b border-slate-200 flex-shrink-0 text-xs">
           {/* Point 1: Restaurant (Where food is) */}
-          <div className="bg-white rounded-2xl p-3 border border-slate-200/80 shadow-2xs space-y-1">
+          <div className="min-w-0 bg-white rounded-2xl p-2.5 sm:p-3 border border-slate-200/80 shadow-2xs space-y-1">
             <div className="flex items-center justify-between gap-1 text-[10px] font-bold text-amber-600 uppercase tracking-wide">
-              <span className="flex items-center gap-1">
-                <Store className="w-3.5 h-3.5" />
-                Food Location (Kitchen)
+              <span className="flex items-center gap-1 min-w-0">
+                <Store className="w-3.5 h-3.5 flex-shrink-0" />
+                <span className="truncate">
+                  <span className="lg:hidden">Kitchen</span>
+                  <span className="hidden lg:inline">Food Location (Kitchen)</span>
+                </span>
               </span>
               {distCourierToPickup !== null && (
-                <span className="text-slate-600 font-black">
+                <span className="text-slate-600 font-black flex-shrink-0">
                   {distCourierToPickup.toFixed(1)} km
                 </span>
               )}
@@ -165,9 +183,9 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
             {pickupAddress && (
               <p className="text-[11px] text-slate-500 truncate">{pickupAddress}</p>
             )}
-            <div className="pt-0.5 text-[10px] font-semibold text-amber-700 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-              <span>
+            <div className="pt-0.5 text-[10px] font-semibold text-amber-700 flex items-center gap-1 min-w-0">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 flex-shrink-0" />
+              <span className="truncate">
                 {isMovingToRestaurant
                   ? 'Courier traveling here for pickup'
                   : 'Food packed & ready'}
@@ -176,16 +194,19 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
           </div>
 
           {/* Point 2: Courier in Motion */}
-          <div className="bg-emerald-50/60 rounded-2xl p-3 border border-emerald-200 shadow-2xs space-y-1">
+          <div className="col-span-2 sm:col-span-1 order-3 sm:order-none min-w-0 bg-emerald-50/60 rounded-2xl p-2.5 sm:p-3 border border-emerald-200 shadow-2xs space-y-1">
             <div className="flex items-center justify-between gap-1 text-[10px] font-bold text-emerald-700 uppercase tracking-wide">
-              <span className="flex items-center gap-1">
-                <Bike className="w-3.5 h-3.5" />
-                Live Courier Move
+              <span className="flex items-center gap-1 min-w-0">
+                <Bike className="w-3.5 h-3.5 flex-shrink-0" />
+                <span className="truncate">
+                  <span className="lg:hidden">Live Courier</span>
+                  <span className="hidden lg:inline">Live Courier Move</span>
+                </span>
               </span>
               {courierPosition && (
-                <span className="flex items-center gap-1 text-emerald-800 font-black">
+                <span className="flex items-center gap-1 text-emerald-800 font-black flex-shrink-0">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  Moving Live
+                  <span className="hidden lg:inline">Moving Live</span>
                 </span>
               )}
             </div>
@@ -203,7 +224,7 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
               {courierPhone && (
                 <a
                   href={`tel:${courierPhone}`}
-                  className="text-[11px] text-emerald-700 hover:underline font-bold flex items-center gap-1"
+                  className="flex-shrink-0 text-[11px] text-emerald-700 hover:underline font-bold flex items-center gap-1"
                 >
                   <Phone className="w-3 h-3" />
                   Call
@@ -217,9 +238,9 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
                 ? '🛵 Moving to customer address'
                 : '🛵 Courier dispatched'}
             </p>
-            <div className="text-[10px] text-slate-500 flex items-center gap-1">
-              <Clock className="w-3 h-3 text-slate-400" />
-              <span>
+            <div className="text-[10px] text-slate-500 flex items-center gap-1 min-w-0">
+              <Clock className="w-3 h-3 text-slate-400 flex-shrink-0" />
+              <span className="truncate">
                 {courierPosition
                   ? lastPingAgeMinutes != null
                     ? lastPingAgeMinutes < 1
@@ -232,24 +253,28 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
           </div>
 
           {/* Point 3: Customer Destination */}
-          <div className="bg-white rounded-2xl p-3 border border-slate-200/80 shadow-2xs space-y-1">
+          <div className="min-w-0 bg-white rounded-2xl p-2.5 sm:p-3 border border-slate-200/80 shadow-2xs space-y-1">
             <div className="flex items-center justify-between gap-1 text-[10px] font-bold text-slate-700 uppercase tracking-wide">
-              <span className="flex items-center gap-1">
-                <Home className="w-3.5 h-3.5 text-slate-600" />
-                Customer Drop-off
+              <span className="flex items-center gap-1 min-w-0">
+                <Home className="w-3.5 h-3.5 text-slate-600 flex-shrink-0" />
+                <span className="truncate">
+                  <span className="lg:hidden">Drop-off</span>
+                  <span className="hidden lg:inline">Customer Drop-off</span>
+                </span>
               </span>
               {distCourierToDest !== null && (
-                <span className="text-emerald-700 font-black">
-                  {distCourierToDest.toFixed(1)} km away
+                <span className="text-emerald-700 font-black flex-shrink-0">
+                  {distCourierToDest.toFixed(1)} km
+                  <span className="hidden sm:inline"> away</span>
                 </span>
               )}
             </div>
             <div className="flex items-center justify-between gap-2">
-              <p className="font-extrabold text-slate-900 truncate text-xs">{destinationName}</p>
+              <p className="font-extrabold text-slate-900 truncate text-xs min-w-0">{destinationName}</p>
               {customerPhone && (
                 <a
                   href={`tel:${customerPhone}`}
-                  className="text-[11px] text-slate-600 hover:underline font-bold flex items-center gap-1"
+                  className="flex-shrink-0 text-[11px] text-slate-600 hover:underline font-bold flex items-center gap-1"
                 >
                   <Phone className="w-3 h-3" />
                   Call
@@ -259,9 +284,9 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
             {destinationAddress && (
               <p className="text-[11px] text-slate-500 truncate">{destinationAddress}</p>
             )}
-            <div className="pt-0.5 text-[10px] font-semibold text-slate-700 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-slate-800" />
-              <span>
+            <div className="pt-0.5 text-[10px] font-semibold text-slate-700 flex items-center gap-1 min-w-0">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-800 flex-shrink-0" />
+              <span className="truncate">
                 {status === 'ARRIVED'
                   ? 'Courier arrived at gate'
                   : isMovingToCustomer
@@ -273,7 +298,7 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
         </div>
 
         {/* Live Map Area */}
-        <div className="relative flex-1 min-h-[360px] sm:min-h-[440px] md:min-h-[480px] bg-slate-100">
+        <div className="relative flex-1 min-h-[300px] sm:min-h-[440px] md:min-h-[480px] bg-slate-100">
           <CourierLiveMap
             courierPosition={courierPosition}
             destination={destination}
@@ -284,7 +309,7 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
             destinationAddress={destinationAddress}
             restaurants={restaurants}
             onRouteUpdate={setRouteInfo}
-            className="w-full h-full min-h-[360px] sm:min-h-[440px] md:min-h-[480px] rounded-none border-0"
+            className="w-full h-full min-h-[300px] sm:min-h-[440px] md:min-h-[480px] rounded-none border-0"
           />
 
           {/* Floating Live Guidance Overlay */}
