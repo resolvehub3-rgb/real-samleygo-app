@@ -6,7 +6,7 @@
  * 3. Customer: Alert chime when order is picked up by courier and when delivered.
  *
  * Includes:
- * - HTML5 Audio playback using real bundled audio assets (/restaurant-bell.mp3, /Courier_Incoming_Request.wav)
+ * - HTML5 Audio playback using real bundled audio assets (/restaurant-bell.mp3, /courier-sound.mp3)
  * - Studio-quality Web Audio API synthesized fallbacks (modeled after Bolt/Yango driver chimes)
  * - User gesture audio unlock for mobile Safari & Chrome autoplay restrictions
  * - User preference mute toggle support
@@ -250,10 +250,11 @@ export function synthesizeCourierRequestSound(): void {
 
 /**
  * Triggers the ringing alert for couriers when an order is assigned to them by a restaurant.
- * Matches Bolt / Yango driver trip alert sound.
+ * Plays the custom courier sound shipped in /public; if the asset cannot be
+ * fetched or autoplay is blocked, it degrades to the synthesized driver chime.
  */
 export function playCourierAssignedAlert(): void {
-  playAudioWithFallback('/Courier_Incoming_Request.wav', synthesizeCourierRequestSound, 1.0);
+  playAudioWithFallback('/courier-sound.mp3', synthesizeCourierRequestSound, 1.0);
 }
 
 // ============================================================================
