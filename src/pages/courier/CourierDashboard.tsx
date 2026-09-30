@@ -923,53 +923,62 @@ export const CourierDashboard: React.FC = () => {
               </div>
             </div>
 
-            {/* Restaurant Pickup Info */}
-            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                  Pickup From Kitchen
-                </span>
-                <span className="text-xs font-bold text-slate-700">
-                  {activeDelivery.restaurant?.phone}
-                </span>
+            {/* Pickup + drop-off sit side by side (stacked on small screens) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+              {/* Restaurant Pickup Info */}
+              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                    Pickup From Kitchen
+                  </span>
+                  {activeDelivery.restaurant?.phone && (
+                    <a
+                      href={`tel:${activeDelivery.restaurant.phone}`}
+                      className="flex items-center gap-1 text-xs font-bold text-slate-700 bg-slate-200/80 px-2.5 py-1 rounded-lg"
+                    >
+                      <Phone className="w-3 h-3" />
+                      <span>{activeDelivery.restaurant.phone}</span>
+                    </a>
+                  )}
+                </div>
+                <h3 className="font-bold text-sm text-slate-900 truncate">
+                  {activeDelivery.restaurant?.name}
+                </h3>
+                <p className="text-xs text-slate-600 flex items-center gap-1.5">
+                  <MapPin className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+                  <span>{activeDelivery.restaurant?.address}, {activeDelivery.restaurant?.city}</span>
+                </p>
               </div>
-              <h3 className="font-bold text-sm text-slate-900">
-                {activeDelivery.restaurant?.name}
-              </h3>
-              <p className="text-xs text-slate-600 flex items-center gap-1.5">
-                <MapPin className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
-                <span>{activeDelivery.restaurant?.address}, {activeDelivery.restaurant?.city}</span>
-              </p>
-            </div>
 
-            {/* Customer Drop-off Info */}
-            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                  Deliver To Customer
-                </span>
-                {activeDelivery.customer_phone && (
-                  <a
-                    href={`tel:${activeDelivery.customer_phone}`}
-                    className="flex items-center gap-1 text-xs font-bold text-emerald-700 bg-emerald-100/80 px-2.5 py-1 rounded-lg"
-                  >
-                    <Phone className="w-3 h-3" />
-                    <span>Call Customer</span>
-                  </a>
+              {/* Customer Drop-off Info */}
+              <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                    Deliver To Customer
+                  </span>
+                  {activeDelivery.customer_phone && (
+                    <a
+                      href={`tel:${activeDelivery.customer_phone}`}
+                      className="flex items-center gap-1 text-xs font-bold text-emerald-700 bg-emerald-100/80 px-2.5 py-1 rounded-lg"
+                    >
+                      <Phone className="w-3 h-3" />
+                      <span>Call Customer</span>
+                    </a>
+                  )}
+                </div>
+                <h3 className="font-bold text-sm text-slate-900 truncate">
+                  {activeDelivery.customer?.full_name || 'Customer'}
+                </h3>
+                <p className="text-xs text-slate-600 flex items-center gap-1.5">
+                  <MapPin className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
+                  <span>{activeDelivery.delivery_address}</span>
+                </p>
+                {activeDelivery.delivery_notes && (
+                  <p className="text-[11px] text-amber-800 bg-amber-50 p-2 rounded-lg border border-amber-200">
+                    <strong>Notes:</strong> {activeDelivery.delivery_notes}
+                  </p>
                 )}
               </div>
-              <h3 className="font-bold text-sm text-slate-900">
-                {activeDelivery.customer?.full_name || 'Customer'}
-              </h3>
-              <p className="text-xs text-slate-600 flex items-center gap-1.5">
-                <MapPin className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" />
-                <span>{activeDelivery.delivery_address}</span>
-              </p>
-              {activeDelivery.delivery_notes && (
-                <p className="text-[11px] text-amber-800 bg-amber-50 p-2 rounded-lg border border-amber-200">
-                  <strong>Notes:</strong> {activeDelivery.delivery_notes}
-                </p>
-              )}
             </div>
 
             {/* Courier Step Actions */}
