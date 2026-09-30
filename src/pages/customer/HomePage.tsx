@@ -27,6 +27,12 @@ import { useAuth } from '../../context/AuthContext';
 import { useCart } from '../../context/CartContext';
 import { formatGHS } from '../../lib/pricing';
 import { isGeolocationAvailable } from '../../lib/geolocation';
+import {
+  persistDeliverTo,
+  persistLiveTracking,
+  readDeliverTo,
+  readLiveTracking,
+} from '../../lib/deliverTo';
 import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
 
@@ -119,10 +125,14 @@ export const HomePage: React.FC = () => {
   const [realtimePulse, setRealtimePulse] = useState(false);
   const [addedToast, setAddedToast] = useState<string | null>(null);
 
-  // Location selector state
-  const [locationName, setLocationName] = useState('East Legon, Accra');
+  // Location selector state — seeded from the customer's own last choice (or
+  // from nothing at all): a refresh must never fall back to a fabricated
+  // default address such as "East Legon, Accra".
+  const [locationName, setLocationName] = useState<string>(readDeliverTo);
   const [showLocationModal, setShowLocationModal] = useState(false);
   const [isDetectingLocation, setIsDetectingLocation] = useState(false);
+  /** Friendly, inline copy for a failed fix — never an alert, never coords. */
+  const [locationError, setLocationError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   // Live device position: resolves to a place NAME (never "GPS: 5.5, -0.2")
@@ -131,8 +141,12 @@ export const HomePage: React.FC = () => {
   const [isUsingDeviceLocation, setIsUsingDeviceLocation] = useState(false);
   /** True only between pressing "Use Current Device Location" and the first fix. */
   const awaitingFixRef = useRef(false);
-  /** Dedupes the location error alert (the same message never repeats). */
+  /** Dedupes the inline location error (the same message never repeats). */
   const geoErrorSeenRef = useRef<string | null>(null);
+  /** Did this device already have a saved delivery place on first paint? */
+  const hadSavedPlaceRef = useRef(readDeliverTo() !== '');
+  /** The "use your current location" prompt fires at most once per visit. */
+  const autoPromptedRef = useRef(false);
 
   // Ref to trigger latest search without stale closures in realtime listener
   const latestSearchTermRef = useRef(searchQuery);
@@ -425,27 +439,47 @@ export const HomePage: React.FC = () => {
 
   // Real browser geolocation detection (robust helper with clear errors).
   // Starts a LIVE watch: the "Deliver To" pill then keeps following the
-  // device and shows a place name, never raw coordinates.
-  const handleDetectLocation = async () => {
+  // device and shows a place name, never raw coordinates. Failures are shown
+  // inline inside the picker — never a blocking alert, never coordinates.
+  const startLiveLocation = useCallback(async () => {
     if (!isGeolocationAvailable()) {
-      alert(
+      setLocationError(
         'Location is unavailable on this page. If you opened the app via a LAN/cable address (http://), open it via https:// or localhost instead.'
       );
+      setShowLocationModal(true);
       return;
     }
+
+    setLocationError(null);
+    geoErrorSeenRef.current = null;
+    awaitingFixRef.current = true;
     setIsDetectingLocation(true);
     setIsUsingDeviceLocation(true);
-    awaitingFixRef.current = true;
+    persistLiveTracking(true);
+
     await liveLocation.start();
+
     setIsDetectingLocation(false);
+  }, [liveLocation.start]);
+
+  const handleDetectLocation = () => {
+    void startLiveLocation();
   };
 
   // Follow the live fix in realtime while device location is enabled.
   useEffect(() => {
     if (!isUsingDeviceLocation || !liveLocation.point) return;
-    setLocationName(
-      liveLocation.label ? `📍 ${liveLocation.label}` : '📍 Your current location'
-    );
+
+    if (liveLocation.label) {
+      // Remembered across refreshes, so the pill never falls back to a
+      // fabricated default address.
+      setLocationName(`📍 ${liveLocation.label}`);
+      persistDeliverTo(liveLocation.label);
+      setLocationError(null);
+    } else {
+      setLocationName('📍 Your current location');
+    }
+
     // Dismiss the picker for the press that asked for it — later fixes keep
     // updating the pill without yanking a picker the customer reopened.
     if (awaitingFixRef.current) {
@@ -454,17 +488,43 @@ export const HomePage: React.FC = () => {
     }
   }, [isUsingDeviceLocation, liveLocation.point, liveLocation.label]);
 
-  // Surface a location failure once (friendly text, never coordinates) and
-  // leave the previously chosen address untouched.
+  // Surface a location failure as friendly inline copy inside the picker
+  // (deduped, never coordinates, never a blocking alert) and keep whatever
+  // address the customer already had.
   useEffect(() => {
     const err = liveLocation.error;
     if (!err || geoErrorSeenRef.current === err) return;
     geoErrorSeenRef.current = err;
     awaitingFixRef.current = false;
-    setIsUsingDeviceLocation(false);
     setIsDetectingLocation(false);
-    alert(err);
+    setIsUsingDeviceLocation(false);
+    persistLiveTracking(false);
+    setLocationError(err);
+    setShowLocationModal(true);
   }, [liveLocation.error]);
+
+  // First visit (nothing saved yet): offer the device location right away —
+  // registered or not, the picker opens and the fix starts on its own. A
+  // returning customer keeps their own place; if they had live tracking on,
+  // it resumes silently without re-nagging them.
+  useEffect(() => {
+    if (autoPromptedRef.current || isLoading) return;
+    autoPromptedRef.current = true;
+
+    if (hadSavedPlaceRef.current) {
+      if (readLiveTracking() && isGeolocationAvailable()) void startLiveLocation();
+      return;
+    }
+
+    setShowLocationModal(true);
+    if (isGeolocationAvailable()) {
+      void startLiveLocation();
+    } else {
+      setLocationError(
+        'Location is unavailable on this page. If you opened the app via a LAN/cable address (http://), open it via https:// or localhost instead.'
+      );
+    }
+  }, [isLoading, startLiveLocation]);
 
   // Determine active search state
   const isSearchActive = Boolean(searchQuery.trim() || selectedCuisine !== 'All');
@@ -514,8 +574,12 @@ export const HomePage: React.FC = () => {
                 </span>
                 <span className="text-[9px] text-slate-400">▼</span>
               </div>
-              <span className="text-xs font-extrabold text-slate-800 truncate block">
-                {locationName}
+              <span
+                className={`text-xs font-extrabold truncate block ${
+                  locationName ? 'text-slate-800' : 'text-slate-400'
+                }`}
+              >
+                {locationName || 'Choose your location'}
               </span>
               {isUsingDeviceLocation && liveLocation.isWatching && (
                 <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-wider text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded mt-0.5">
@@ -1131,7 +1195,7 @@ export const HomePage: React.FC = () => {
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Available near {locationName}
+                Available near {locationName || 'your area'}
               </p>
             </div>
             <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-xl border border-emerald-100">
@@ -1283,6 +1347,13 @@ export const HomePage: React.FC = () => {
               </button>
             </div>
 
+            {/* Why we are asking (shown once, no nagging afterwards) */}
+            <p className="text-[11px] text-slate-500 leading-snug">
+              {locationName
+                ? `Delivering to ${locationName}.`
+                : 'Pick your area or use your current location so we only show kitchens that deliver to you.'}
+            </p>
+
             {/* GPS Auto Detect */}
             <button
               onClick={handleDetectLocation}
@@ -1299,6 +1370,15 @@ export const HomePage: React.FC = () => {
               </span>
             </button>
 
+            {/* Inline failure copy — friendly words, never coordinates and
+                never a blocking browser alert */}
+            {locationError && (
+              <div className="flex items-start gap-2 text-[11px] font-semibold text-rose-600 bg-rose-50 border border-rose-200 rounded-xl p-3">
+                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                <span className="leading-snug">{locationError}</span>
+              </div>
+            )}
+
             {/* Popular Ghana Locations */}
             <div>
               <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">
@@ -1311,7 +1391,10 @@ export const HomePage: React.FC = () => {
                     onClick={() => {
                       // A hand-picked area wins over the live device follow
                       setIsUsingDeviceLocation(false);
+                      persistLiveTracking(false);
                       setLocationName(loc);
+                      persistDeliverTo(loc);
+                      setLocationError(null);
                       setShowLocationModal(false);
                     }}
                     className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs flex items-center justify-between transition ${

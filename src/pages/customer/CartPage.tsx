@@ -19,6 +19,7 @@ import { useAuth } from '../../context/AuthContext';
 import { calculateDistanceKm, calculateDeliveryFee, formatGHS } from '../../lib/pricing';
 import { supabase } from '../../lib/supabase';
 import { isGeolocationAvailable } from '../../lib/geolocation';
+import { readDeliverTo } from '../../lib/deliverTo';
 import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
 
 const PAYMENT_METHODS = [
@@ -34,7 +35,9 @@ export const CartPage: React.FC = () => {
   const { user, profile } = useAuth();
   const navigate = useNavigate();
 
-  const [address, setAddress] = useState(profile?.phone ? 'East Legon, Accra' : '');
+  // Seeded from the customer's saved "Deliver To" place — never a fabricated
+  // default address (an empty box simply asks them to choose one).
+  const [address, setAddress] = useState(() => readDeliverTo());
   const [phone, setPhone] = useState(profile?.phone || '');
   const [customerLat, setCustomerLat] = useState<number | null>(null);
   const [customerLng, setCustomerLng] = useState<number | null>(null);
