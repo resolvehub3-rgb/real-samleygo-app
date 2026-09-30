@@ -3,8 +3,9 @@
  * Professional ringing bell and notification sounds for:
  * 1. Restaurant: Ringing bell when customer places a new order.
  * 2. Courier: Bolt/Yango driver-style ringing alert when assigned an order by a restaurant.
- * 3. Customer: Alert when order is picked up by courier, when the courier
- *    arrives at the drop-off, and when the order is delivered.
+ * 3. Customer: customer-sound.mp3 on every order milestone — kitchen intake
+ *    ("New Incoming"), "In Cooking", "Ready / Dispatched", courier arrival,
+ *    plus trip start and completion which ring three times each.
  *
  * Includes:
  * - HTML5 Audio playback using real bundled audio assets
@@ -338,7 +339,7 @@ export function playCustomerDeliveredAlert(): void {
 }
 
 // ============================================================================
-// 4. CUSTOMER ALERT: Courier Arrived at the Customer's Destination
+// 4. CUSTOMER MILESTONE ALERTS (customer-sound.mp3)
 // ============================================================================
 
 /**
@@ -380,10 +381,93 @@ export function synthesizeCustomerArrivedChime(): void {
 }
 
 /**
+ * How many times the customer sound plays for each order milestone.
+ * Courier trip start and completion ring three times; the rest play once.
+ */
+const CUSTOMER_STATUS_REPEATS: Record<string, number> = {
+  RESTAURANT_PENDING: 1, // order landed in the kitchen's "New Incoming" tab
+  PREPARING: 1, // restaurant accepted it — "In Cooking"
+  READY_FOR_PICKUP: 1, // "Ready / Dispatched"
+  PICKED_UP: 3, // courier started the trip
+  ARRIVED: 1, // courier reached the drop-off
+  DELIVERED: 3, // completed
+  COMPLETED: 3, // completed
+};
+
+/**
+ * Plays /customer-sound.mp3 one, two or three times back to back.
+ * Clips never overlap — each repeat starts when the previous one ends — and a
+ * stalled, blocked or missing clip falls back to the synthesized chime, so the
+ * sequence and the page can never get stuck.
+ */
+export function playCustomerSound(repeats = 1): void {
+  if (isSoundMuted()) return;
+
+  const total = Math.max(1, Math.min(3, Math.round(repeats)));
+  let played = 0;
+
+  const playNext = () => {
+    if (played >= total) return;
+    played += 1;
+
+    let advanced = false;
+    const advance = () => {
+      if (advanced) return;
+      advanced = true;
+      playNext();
+    };
+
+    try {
+      const audio = new Audio('/customer-sound.mp3');
+      audio.volume = 1.0;
+
+      audio.addEventListener('ended', advance, { once: true });
+      audio.addEventListener(
+        'error',
+        () => {
+          synthesizeCustomerArrivedChime();
+          advance();
+        },
+        { once: true }
+      );
+
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => {
+          // Autoplay policy or asset issue -> synthesized chime, keep going.
+          synthesizeCustomerArrivedChime();
+          advance();
+        });
+      }
+
+      // Safety net: a clip that never fires "ended" must not swallow the rest.
+      window.setTimeout(advance, 15000);
+    } catch {
+      synthesizeCustomerArrivedChime();
+      advance();
+    }
+  };
+
+  playNext();
+}
+
+/**
+ * Plays the milestone alert for an order status, when that status has one.
+ * Returns true when something actually played, so callers can pair the sound
+ * with their own banner/toast without duplicating the status map.
+ */
+export function playCustomerStatusAlert(status: string | null | undefined): boolean {
+  const repeats = status ? CUSTOMER_STATUS_REPEATS[status] : undefined;
+  if (!repeats) return false;
+  playCustomerSound(repeats);
+  return true;
+}
+
+/**
  * Customer Alert: the courier tapped "I have Arrived at Customer Location",
  * so the meal is waiting at the drop-off.
- * Plays the custom customer sound shipped in /public/customer-sound.mp3.
+ * Plays the custom customer sound shipped in /public/customer-sound.mp3 once.
  */
 export function playCustomerArrivedAlert(): void {
-  playAudioWithFallback('/customer-sound.mp3', synthesizeCustomerArrivedChime, 1.0);
+  playCustomerSound(CUSTOMER_STATUS_REPEATS.ARRIVED);
 }

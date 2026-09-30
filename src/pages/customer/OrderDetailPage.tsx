@@ -33,9 +33,9 @@ import { CourierLiveMap } from '../../components/courier/CourierLiveMap';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { UserAvatar } from '../../components/common/UserAvatar';
 import {
-  playCustomerPickupAlert,
   playCustomerArrivedAlert,
-  playCustomerDeliveredAlert,
+  playCustomerSound,
+  playCustomerStatusAlert,
 } from '../../lib/soundAlerts';
 
 const STATUS_STEPS = [
@@ -177,40 +177,53 @@ export const OrderDetailPage: React.FC = () => {
         (payload) => {
           const newOrder = payload.new as Order | undefined;
           if (newOrder?.status) {
+            const status = newOrder.status;
             const oldStatus = prevStatusRef.current;
-            if (newOrder.status === 'PICKED_UP' && oldStatus !== 'PICKED_UP') {
-              playCustomerPickupAlert();
-              setSoundAlertBanner({
-                type: 'PICKED_UP',
-                title: '🛵 Food Picked Up by Courier!',
-                message: 'Your courier has collected your food from the kitchen and is driving towards you.',
-              });
-              setTimeout(() => setSoundAlertBanner(null), 9000);
-            } else if (newOrder.status === 'ARRIVED' && oldStatus !== 'ARRIVED') {
-              // Courier tapped "I have Arrived at Customer Location" — the meal
-              // is waiting at the drop-off. Custom customer sound + banner.
-              playCustomerArrivedAlert();
-              setSoundAlertBanner({
-                type: 'ARRIVED',
-                title: '🛵 Courier Has Arrived!',
-                message:
-                  'Your courier is at your destination. Meet them at the drop-off point to collect your meal.',
-              });
-              setTimeout(() => setSoundAlertBanner(null), 15000);
-            } else if (
-              (newOrder.status === 'DELIVERED' || newOrder.status === 'COMPLETED') &&
-              oldStatus !== 'DELIVERED' &&
-              oldStatus !== 'COMPLETED'
-            ) {
-              playCustomerDeliveredAlert();
-              setSoundAlertBanner({
-                type: 'DELIVERED',
-                title: '🎉 Order Delivered Safely!',
-                message: 'Your food has arrived at your destination. Enjoy your meal!',
-              });
-              setTimeout(() => setSoundAlertBanner(null), 12000);
+
+            // One alert per transition — a status repeated in an unrelated
+            // field update never re-rings.
+            if (status !== oldStatus) {
+              if (status === 'PICKED_UP') {
+                // Courier started the trip — customer-sound.mp3 three times.
+                playCustomerSound(3);
+                setSoundAlertBanner({
+                  type: 'PICKED_UP',
+                  title: '🛵 Food Picked Up by Courier!',
+                  message:
+                    'Your courier has collected your food from the kitchen and is driving towards you.',
+                });
+                setTimeout(() => setSoundAlertBanner(null), 9000);
+              } else if (status === 'ARRIVED') {
+                // Courier tapped "I have Arrived at Customer Location" — the
+                // meal is waiting at the drop-off. Custom sound + banner.
+                playCustomerArrivedAlert();
+                setSoundAlertBanner({
+                  type: 'ARRIVED',
+                  title: '🛵 Courier Has Arrived!',
+                  message:
+                    'Your courier is at your destination. Meet them at the drop-off point to collect your meal.',
+                });
+                setTimeout(() => setSoundAlertBanner(null), 15000);
+              } else if (status === 'DELIVERED' || status === 'COMPLETED') {
+                // Completed rings three times — but only once per order, even
+                // though DELIVERED and COMPLETED are two separate milestones.
+                if (oldStatus !== 'DELIVERED' && oldStatus !== 'COMPLETED') {
+                  playCustomerSound(3);
+                  setSoundAlertBanner({
+                    type: 'DELIVERED',
+                    title: '🎉 Order Delivered Safely!',
+                    message: 'Your food has arrived at your destination. Enjoy your meal!',
+                  });
+                  setTimeout(() => setSoundAlertBanner(null), 12000);
+                }
+              } else {
+                // Kitchen milestones: "New Incoming", "In Cooking" and
+                // "Ready / Dispatched" (anything else is a silent no-op).
+                playCustomerStatusAlert(status);
+              }
             }
-            prevStatusRef.current = newOrder.status;
+
+            prevStatusRef.current = status;
           }
           fetchOrderDetails();
         }
@@ -622,9 +635,9 @@ export const OrderDetailPage: React.FC = () => {
                 </button>
                 <button
                   type="button"
-                  onClick={() => playCustomerPickupAlert()}
+                  onClick={() => playCustomerStatusAlert('PICKED_UP')}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 font-bold text-xs transition"
-                  title="Test pickup alert sound (Bolt/Yango chime)"
+                  title="Test customer alert sound (customer-sound.mp3, rings three times)"
                 >
                   <Bell className="w-3.5 h-3.5 text-emerald-600" />
                   <span>Test Alert Sound</span>

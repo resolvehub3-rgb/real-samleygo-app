@@ -6,7 +6,7 @@ import { Order, Profile } from '../../types/database';
 import { useAuth } from '../../context/AuthContext';
 import { formatGHS } from '../../lib/pricing';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
-import { playCustomerPickupAlert, playCustomerArrivedAlert, playCustomerDeliveredAlert } from '../../lib/soundAlerts';
+import { playCustomerSound, playCustomerStatusAlert } from '../../lib/soundAlerts';
 
 export const OrdersPage: React.FC = () => {
   const { user } = useAuth();
@@ -162,16 +162,19 @@ export const OrdersPage: React.FC = () => {
                 lastAlertedStatusRef.current[newOrder.id] = newOrder.status;
 
                 if (newOrder.status === 'PICKED_UP') {
-                  playCustomerPickupAlert();
-                } else if (newOrder.status === 'ARRIVED') {
-                  // Courier tapped "I have Arrived at Customer Location".
-                  playCustomerArrivedAlert();
-                } else if (
-                  (newOrder.status === 'DELIVERED' || newOrder.status === 'COMPLETED') &&
-                  previous !== 'DELIVERED' &&
-                  previous !== 'COMPLETED'
-                ) {
-                  playCustomerDeliveredAlert();
+                  // Courier started the trip — customer-sound.mp3 three times.
+                  playCustomerSound(3);
+                } else if (newOrder.status === 'DELIVERED' || newOrder.status === 'COMPLETED') {
+                  // Completed rings three times, once per order: DELIVERED and
+                  // COMPLETED are two milestones of the same celebration.
+                  if (previous !== 'DELIVERED' && previous !== 'COMPLETED') {
+                    playCustomerSound(3);
+                  }
+                } else {
+                  // Kitchen milestones ("New Incoming", "In Cooking",
+                  // "Ready / Dispatched") and courier arrival. Statuses
+                  // without an alert are a silent no-op.
+                  playCustomerStatusAlert(newOrder.status);
                 }
               }
             }

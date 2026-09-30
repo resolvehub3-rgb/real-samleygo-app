@@ -34,7 +34,7 @@ import {
   readLiveTracking,
 } from '../../lib/deliverTo';
 import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
-import { playCustomerArrivedAlert } from '../../lib/soundAlerts';
+import { playCustomerStatusAlert } from '../../lib/soundAlerts';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
 
 export interface SearchMenuItem extends MenuItem {
@@ -53,6 +53,17 @@ const GHANA_CUISINES = [
   { name: 'Continental & Pastries', icon: '🥐', keyword: 'pastry' },
   { name: 'Fresh Juices & Drinks', icon: '🥤', keyword: 'sobolo' },
 ];
+
+/** Copy shown with the customer milestone chimes (customer-sound.mp3). */
+const HOME_STATUS_TOASTS: Record<string, string> = {
+  RESTAURANT_PENDING: '🔔 Realtime: Your order just reached the kitchen!',
+  PREPARING: '🍳 Realtime: The kitchen is cooking your order now!',
+  READY_FOR_PICKUP: '📦 Realtime: Your order is packed and ready for dispatch!',
+  PICKED_UP: '🛵 Realtime: Your courier started the trip to you!',
+  ARRIVED: '🛵 Realtime: Your courier has arrived at your destination!',
+  DELIVERED: '🎉 Realtime: Your order has been delivered safely!',
+  COMPLETED: '🎉 Realtime: Your order is complete!',
+};
 
 const POPULAR_LOCATIONS = [
   'East Legon, Accra',
@@ -202,10 +213,12 @@ export const HomePage: React.FC = () => {
 
         if (ordersData && ordersData.length > 0) {
           setActiveOrders(ordersData as Order[]);
-          // Seed the alert ledger with what is already on screen so a status
-          // that was reached before this page loaded never replays a chime.
+          // Fill in alert-ledger entries we do not know yet. Never overwrite:
+          // the realtime handler may have recorded a newer status already.
           ordersData.forEach((row: Order) => {
-            lastAlertedStatusRef.current[row.id] = row.status;
+            if (!(row.id in lastAlertedStatusRef.current)) {
+              lastAlertedStatusRef.current[row.id] = row.status;
+            }
           });
         }
       }
@@ -422,14 +435,40 @@ export const HomePage: React.FC = () => {
     };
   }, [executeRealtimeSearch, loadApprovedRestaurants, loadFreshDishes]);
 
-  // 3b. Courier-arrival alert for signed-in customers. When the courier taps
-  // "I have Arrived at Customer Location", the custom customer sound plays and
-  // a toast appears — even if the customer is still browsing the home screen.
+  // 3b. Order-milestone alerts for signed-in customers: every kitchen and
+  // courier status change rings customer-sound.mp3 (trip start and completion
+  // three times, the rest once) with a matching toast — even if the customer
+  // is still browsing the home screen instead of the tracking page.
   useEffect(() => {
     if (!user || !isSupabaseConfigured) return;
 
+    let cancelled = false;
+
+    // Seed the ledger with the statuses we already know so an order that is
+    // mid-flight — or already finished — when this page opens stays quiet.
+    const seedAlertLedger = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('orders')
+          .select('id, status')
+          .eq('customer_id', user.id)
+          .order('created_at', { ascending: false })
+          .limit(50);
+
+        if (cancelled || error || !data) return;
+        data.forEach((row: { id: string; status: string }) => {
+          if (!(row.id in lastAlertedStatusRef.current)) {
+            lastAlertedStatusRef.current[row.id] = row.status;
+          }
+        });
+      } catch {
+        // Ledger stays thin — worst case is a chime we cannot suppress.
+      }
+    };
+    void seedAlertLedger();
+
     const channel = supabase
-      .channel(`home-arrival-alerts-${user.id}`)
+      .channel(`home-order-alerts-${user.id}`)
       .on(
         'postgres_changes',
         {
@@ -442,15 +481,24 @@ export const HomePage: React.FC = () => {
           const next = payload.new as Order | undefined;
           if (!next?.id || !next.status) return;
 
-          // One chime per status, no matter how many fields update per status.
+          // One alert per transition, no matter how many fields update.
           const previous = lastAlertedStatusRef.current[next.id];
           if (previous === next.status) return;
           lastAlertedStatusRef.current[next.id] = next.status;
 
-          if (next.status !== 'ARRIVED') return;
+          // DELIVERED and COMPLETED celebrate the same moment — ring once.
+          if (
+            (next.status === 'DELIVERED' || next.status === 'COMPLETED') &&
+            (previous === 'DELIVERED' || previous === 'COMPLETED')
+          ) {
+            return;
+          }
 
-          playCustomerArrivedAlert();
-          setRealtimeNotice('🛵 Realtime: Your courier has arrived at your destination!');
+          if (!playCustomerStatusAlert(next.status)) return;
+
+          setRealtimeNotice(
+            HOME_STATUS_TOASTS[next.status] ?? '🔔 Realtime: Your order status just changed!'
+          );
           setTimeout(() => setRealtimeNotice(null), 6000);
           // Refresh the active-delivery card so it reflects the new state.
           void loadApprovedRestaurants();
@@ -459,6 +507,7 @@ export const HomePage: React.FC = () => {
       .subscribe();
 
     return () => {
+      cancelled = true;
       supabase.removeChannel(channel);
     };
   }, [user, loadApprovedRestaurants]);
