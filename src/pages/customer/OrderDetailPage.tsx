@@ -26,6 +26,7 @@ import {
   DeliveryLocation,
   Courier,
   Profile,
+  Review,
 } from '../../types/database';
 import { useAuth } from '../../context/AuthContext';
 import { formatGHS } from '../../lib/pricing';
@@ -74,6 +75,8 @@ export const OrderDetailPage: React.FC = () => {
   const [courierComment, setCourierComment] = useState('');
   const [reviewSubmitted, setReviewSubmitted] = useState(false);
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+  /** Friendly failure copy — the submit is never reported as saved when it isn't. */
+  const [reviewError, setReviewError] = useState<string | null>(null);
 
   const fetchOrderDetails = async () => {
     if (!id || !isSupabaseConfigured) {
@@ -151,7 +154,14 @@ export const OrderDetailPage: React.FC = () => {
         .limit(1);
 
       if (revData && revData.length > 0) {
+        // Hydrate from what is actually stored, so the screen shows the real
+        // restaurant and courier stars the customer gave instead of defaults.
+        const stored = revData[0] as Review;
         setReviewSubmitted(true);
+        if (stored.restaurant_rating) setRestRating(stored.restaurant_rating);
+        if (stored.courier_rating) setCourierRating(stored.courier_rating);
+        setRestComment(stored.restaurant_comment || '');
+        setCourierComment(stored.courier_comment || '');
       }
     } catch {
       // Handled
@@ -448,39 +458,40 @@ export const OrderDetailPage: React.FC = () => {
     if (!order || !user) return;
 
     setIsSubmittingReview(true);
+    setReviewError(null);
     try {
-      await supabase.from('reviews').insert({
-        order_id: order.id,
-        customer_id: user.id,
-        restaurant_id: order.restaurant_id,
-        courier_id: order.courier_id || null,
-        restaurant_rating: restRating,
-        restaurant_comment: restComment.trim() || null,
-        courier_rating: courierRating,
-        courier_comment: courierComment.trim() || null,
-      });
+      // Supabase returns { error } instead of throwing — this screen used to
+      // ignore it and claim "recorded in the database" even when row level
+      // security rejected the insert. One review per order per customer:
+      // re-submitting updates the existing row (unique order_id + customer_id).
+      const { error } = await supabase.from('reviews').upsert(
+        {
+          order_id: order.id,
+          customer_id: user.id,
+          restaurant_id: order.restaurant_id,
+          courier_id: order.courier_id || null,
+          restaurant_rating: restRating,
+          restaurant_comment: restComment.trim() || null,
+          courier_rating: courierRating,
+          courier_comment: courierComment.trim() || null,
+        },
+        { onConflict: 'order_id,customer_id' }
+      );
 
-      // Update restaurant rating aggregate
-      const { data: allReviews } = await supabase
-        .from('reviews')
-        .select('restaurant_rating')
-        .eq('restaurant_id', order.restaurant_id);
-
-      if (allReviews && allReviews.length > 0) {
-        const total = allReviews.reduce((sum, r) => sum + (r.restaurant_rating || 0), 0);
-        const avg = total / allReviews.length;
-        await supabase
-          .from('restaurants')
-          .update({
-            rating: Number(avg.toFixed(2)),
-            total_reviews: allReviews.length,
-          })
-          .eq('id', order.restaurant_id);
+      if (error) {
+        console.error('[Review] submit failed:', error.message);
+        throw new Error(error.message);
       }
 
+      // The restaurant and courier averages are recomputed by the
+      // refresh_review_ratings() database trigger (a customer session cannot
+      // update public.restaurants or public.couriers), so just re-read here.
       setReviewSubmitted(true);
+      await fetchOrderDetails();
     } catch {
-      // Handled
+      setReviewError(
+        'We could not save your review just now. Please check your connection and try again.'
+      );
     } finally {
       setIsSubmittingReview(false);
     }
@@ -715,6 +726,14 @@ export const OrderDetailPage: React.FC = () => {
                     <h4 className="font-bold text-sm text-slate-900">
                       {order.courier?.full_name || 'Delivery Partner'}
                     </h4>
+                    {/* Live courier rating — refreshed by the reviews trigger */}
+                    {Number(courierDetails?.rating || 0) > 0 && (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-extrabold text-amber-600">
+                        <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                        {Number(courierDetails?.rating).toFixed(1)}
+                        <span className="font-bold text-slate-400">· courier rating</span>
+                      </span>
+                    )}
                     <p className="text-xs text-slate-500">
                       Vehicle: {courierDetails?.vehicle_type || 'Motorcycle'} {courierDetails?.vehicle_plate ? `(${courierDetails.vehicle_plate})` : ''}
                     </p>
@@ -968,9 +987,44 @@ export const OrderDetailPage: React.FC = () => {
             </div>
 
             {reviewSubmitted ? (
-              <div className="p-4 rounded-2xl bg-emerald-50 text-emerald-900 text-xs font-semibold flex items-center gap-2">
-                <Check className="w-4 h-4 text-emerald-600" />
-                <span>Thank you! Your verified review has been recorded in the database.</span>
+              <div className="space-y-3">
+                <div className="p-4 rounded-2xl bg-emerald-50 text-emerald-900 text-xs font-semibold flex items-center gap-2">
+                  <Check className="w-4 h-4 text-emerald-600" />
+                  <span>Thank you! Your verified review has been recorded in the database.</span>
+                </div>
+
+                {/* The stored stars for the kitchen and the courier */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 block">
+                      Kitchen rating
+                    </span>
+                    <span className="text-sm font-extrabold text-slate-800 mt-1 block">
+                      {order.restaurant?.name} · {restRating}/5 ★
+                    </span>
+                    {restComment.trim() && (
+                      <p className="text-xs text-slate-500 mt-1 break-words">
+                        “{restComment.trim()}”
+                      </p>
+                    )}
+                  </div>
+
+                  {order.courier_id && (
+                    <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 block">
+                        Courier rating
+                      </span>
+                      <span className="text-sm font-extrabold text-slate-800 mt-1 block">
+                        {order.courier?.full_name || 'Your courier'} · {courierRating}/5 ★
+                      </span>
+                      {courierComment.trim() && (
+                        <p className="text-xs text-slate-500 mt-1 break-words">
+                          “{courierComment.trim()}”
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             ) : (
               <form onSubmit={handleSubmitReview} className="space-y-5">
@@ -1035,6 +1089,13 @@ export const OrderDetailPage: React.FC = () => {
                       onChange={(e) => setCourierComment(e.target.value)}
                       className="mt-2 w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
                     />
+                  </div>
+                )}
+
+                {/* Never claim success on a failed save — say so plainly. */}
+                {reviewError && (
+                  <div className="p-3 rounded-2xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold">
+                    {reviewError}
                   </div>
                 )}
 

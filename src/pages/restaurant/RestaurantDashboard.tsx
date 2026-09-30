@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
-import { Restaurant, Order, Profile } from '../../types/database';
+import { Restaurant, Order, Profile, Review } from '../../types/database';
 import { formatGHS } from '../../lib/pricing';
 import { RestaurantShell } from '../../components/restaurant/RestaurantShell';
 import { CourierLiveMap, LatLng } from '../../components/courier/CourierLiveMap';
@@ -63,6 +63,8 @@ export const RestaurantDashboard: React.FC = () => {
 
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
+  // Latest customer reviews for this kitchen (written on the order screen)
+  const [customerReviews, setCustomerReviews] = useState<Review[]>([]);
   const [activeTab, setActiveTab] = useState<'PENDING' | 'PREPARING' | 'READY' | 'COMPLETED'>('PENDING');
   const [isLoading, setIsLoading] = useState(true);
   const [isUpdatingOpenStatus, setIsUpdatingOpenStatus] = useState(false);
@@ -160,6 +162,17 @@ export const RestaurantDashboard: React.FC = () => {
         } else {
           setCourierPositions({});
         }
+
+        // 4. Latest customer reviews (RLS lets a kitchen read its own), so the
+        //    stars and comments customers just submitted show up right here.
+        const { data: reviewRows } = await supabase
+          .from('reviews')
+          .select('*, customer:profiles(id, full_name, avatar_url)')
+          .eq('restaurant_id', restData.id)
+          .order('created_at', { ascending: false })
+          .limit(6);
+
+        setCustomerReviews((reviewRows || []) as Review[]);
       }
     } catch {
       // Handled
@@ -794,7 +807,9 @@ export const RestaurantDashboard: React.FC = () => {
               Customer Rating
             </span>
             <span className="text-xl sm:text-2xl font-black text-slate-900 block mt-0.5">
-              {restaurant.rating ?? '—'}
+              {Number(restaurant.total_reviews || 0) > 0
+                ? Number(restaurant.rating || 0).toFixed(1)
+                : '—'}
               <span className="text-amber-500 text-sm"> ★</span>
             </span>
             <span className="text-[10px] text-slate-400 mt-1.5 block">
@@ -802,6 +817,45 @@ export const RestaurantDashboard: React.FC = () => {
             </span>
           </div>
         </div>
+
+        {/* What customers just said — fed by the order screen's rate form */}
+        {customerReviews.length > 0 && (
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-xs p-4 sm:p-5 space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <Star className="w-4 h-4 text-amber-500 fill-amber-400" />
+                <h3 className="text-sm font-bold text-slate-900">Recent customer reviews</h3>
+              </div>
+              <span className="text-[11px] font-bold text-slate-400">
+                {Number(restaurant.rating || 0).toFixed(2)} ★ from {restaurant.total_reviews} reviews
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              {customerReviews.map((rv) => (
+                <div
+                  key={rv.id}
+                  className="p-3 rounded-2xl bg-slate-50 border border-slate-100 space-y-1.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-slate-800 truncate">
+                      {rv.customer?.full_name || 'Customer'}
+                    </span>
+                    <span className="flex items-center gap-0.5 text-xs font-extrabold text-amber-600 flex-shrink-0">
+                      {Number(rv.restaurant_rating || 0)} ★
+                    </span>
+                  </div>
+                  {rv.restaurant_comment && (
+                    <p className="text-[11px] leading-snug text-slate-500 break-words">
+                      “{rv.restaurant_comment}”
+                    </p>
+                  )}
+                  <span className="text-[10px] text-slate-400 block">{timeAgo(rv.created_at)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Live Dispatches & Moving Couriers Tracker Banner */}
         {liveDispatches.length > 0 && (
@@ -1110,6 +1164,7 @@ export const RestaurantDashboard: React.FC = () => {
                           </div>
                           <span className="text-[11px] text-slate-500 block truncate">
                             {c.vehicle_type || 'Motorcycle'} · {driverPhone} · {c.total_deliveries || 0} trips
+                            {Number(c.rating || 0) > 0 && ` · ${Number(c.rating).toFixed(1)} ★`}
                           </span>
                         </div>
                       </div>
