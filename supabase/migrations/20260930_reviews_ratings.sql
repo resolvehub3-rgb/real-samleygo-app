@@ -13,7 +13,31 @@
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
--- 0. Guarantee the objects this script needs, in the database it lands in
+-- 0. Confirm this is the app's database (guard)
+-- ---------------------------------------------------------------------
+-- Two runs of this file died with 42P01 ("relation ... does not exist")
+-- because the query reached a database that never saw the SamleyGo schema
+-- - a different project picked in the SQL editor, a preview branch, or a
+-- local database. Say that in plain English instead.
+do $$
+declare
+    missing text;
+begin
+    select string_agg(v.t, ', ' order by v.t)
+      into missing
+      from (values ('public.orders'),
+                   ('public.profiles'),
+                   ('public.restaurants'),
+                   ('public.couriers')) v(t)
+     where to_regclass(v.t) is null;
+
+    if missing is not null then
+        raise exception E'SamleyGo schema not found - missing %.\nThis query is running in a DIFFERENT database than the app uses.\nOpen https://supabase.com/dashboard/project/xvflryuspotcmgvedxcj/sql/new\n(the project in VITE_SUPABASE_URL) - or leave any preview branch - and run it there.', missing;
+    end if;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 0b. Guarantee the objects this script needs, in the database it lands in
 -- ---------------------------------------------------------------------
 -- public.reviews is created by 20260925_samleygo_schema.sql. If it is not
 -- there (the schema script never finished, or the query ran in another
