@@ -13,6 +13,36 @@
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
+-- 0. Guarantee the objects this script needs, in the database it lands in
+-- ---------------------------------------------------------------------
+-- public.reviews is created by 20260925_samleygo_schema.sql. If it is not
+-- there (the schema script never finished, or the query ran in another
+-- project / database) every later statement dies with
+--   ERROR: 42P01: relation "public.reviews" does not exist
+-- so create it first. The statement is a no-op where the table already
+-- exists, and a failure here names the real problem (a database that never
+-- ran the base schema) instead of the symptom.
+create table if not exists public.reviews (
+    id uuid primary key default gen_random_uuid(),
+    order_id uuid not null references public.orders(id) on delete cascade,
+    customer_id uuid not null references public.profiles(id),
+    restaurant_id uuid not null references public.restaurants(id),
+    courier_id uuid references public.profiles(id),
+    restaurant_rating integer check (restaurant_rating >= 1 and restaurant_rating <= 5),
+    restaurant_comment text,
+    courier_rating integer check (courier_rating >= 1 and courier_rating <= 5),
+    courier_comment text,
+    created_at timestamptz not null default now()
+);
+
+alter table public.reviews enable row level security;
+
+-- Columns the refresh trigger writes must exist as well.
+alter table public.restaurants add column if not exists rating numeric(3,2) not null default 0.00;
+alter table public.restaurants add column if not exists total_reviews integer not null default 0;
+alter table public.couriers add column if not exists rating numeric(3,2) not null default 0.00;
+
+-- ---------------------------------------------------------------------
 -- 1. ROW LEVEL SECURITY policies for public.reviews
 -- ---------------------------------------------------------------------
 
