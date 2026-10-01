@@ -6,6 +6,7 @@ import { Order, Profile } from '../../types/database';
 import { useAuth } from '../../context/AuthContext';
 import { formatGHS } from '../../lib/pricing';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
+import { ReorderButton } from '../../components/common/ReorderButton';
 import { playCustomerSound, playCustomerStatusAlert } from '../../lib/soundAlerts';
 
 export const OrdersPage: React.FC = () => {
@@ -315,6 +316,9 @@ export const OrdersPage: React.FC = () => {
                     </div>
 
                     <div className="flex items-center gap-2 flex-shrink-0">
+                      {!isActive && (
+                        <ReorderButton order={order} className="px-2.5 py-1 text-[11px]" />
+                      )}
                       {isActive && (
                         <button
                           type="button"

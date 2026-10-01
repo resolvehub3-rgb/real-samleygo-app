@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useLocation } from 'react-router-dom';
 import {
   ArrowLeft,
   Clock,
@@ -17,6 +17,7 @@ import {
   Eye,
   Bell,
   X,
+  RotateCcw,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import {
@@ -33,6 +34,7 @@ import { formatGHS } from '../../lib/pricing';
 import { CourierLiveMap } from '../../components/courier/CourierLiveMap';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { UserAvatar } from '../../components/common/UserAvatar';
+import { ReorderButton } from '../../components/common/ReorderButton';
 import {
   playCustomerArrivedAlert,
   playCustomerSound,
@@ -49,7 +51,14 @@ const STATUS_STEPS = [
 
 export const OrderDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
+  const location = useLocation();
   const { user } = useAuth();
+
+  /** Present when the customer landed here by tapping "Reorder" on a past order. */
+  const reorderNote = (
+    location.state as { reorder?: { from: string; skipped: string[] } } | null
+  )?.reorder;
+  const [showReorderNote, setShowReorderNote] = useState(true);
 
   const [order, setOrder] = useState<Order | null>(null);
   const [items, setItems] = useState<OrderItem[]>([]);
@@ -616,6 +625,37 @@ export const OrderDetailPage: React.FC = () => {
           </div>
         )}
 
+        {/* Reorder landed here — proof the new order is live, not queued */}
+        {showReorderNote && reorderNote && (
+          <div className="p-4 sm:p-5 rounded-3xl bg-emerald-50 border border-emerald-200 shadow-xs flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-2xl bg-emerald-600 text-white flex items-center justify-center flex-shrink-0">
+                <RotateCcw className="w-5 h-5" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="text-sm font-black text-emerald-900">Your reorder is live</h3>
+                <p className="text-xs text-emerald-800/90 mt-0.5 leading-snug">
+                  Order re-placed from #{reorderNote.from}. The kitchen sees it straight away —
+                  the status below updates without refreshing.
+                </p>
+                {reorderNote.skipped.length > 0 && (
+                  <p className="text-xs font-bold text-amber-700 mt-1.5">
+                    Left out (no longer available): {reorderNote.skipped.join(', ')}
+                  </p>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowReorderNote(false)}
+              className="p-2 rounded-xl text-emerald-700/60 hover:text-emerald-900 hover:bg-emerald-100 transition flex-shrink-0"
+              title="Dismiss"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* Live Order Banner */}
         <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-xs space-y-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100">
@@ -638,6 +678,9 @@ export const OrderDetailPage: React.FC = () => {
                   <Navigation className="w-3.5 h-3.5" />
                   <span>Live Map</span>
                 </button>
+                {(isDelivered || isCancelled) && (
+                  <ReorderButton order={order} className="px-3.5 py-1.5 text-xs" />
+                )}
                 <button
                   type="button"
                   onClick={() => playCustomerStatusAlert('PICKED_UP')}

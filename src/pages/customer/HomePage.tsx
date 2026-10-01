@@ -472,7 +472,9 @@ export const HomePage: React.FC = () => {
       .on(
         'postgres_changes',
         {
-          event: 'UPDATE',
+          // '*' so a brand-new order (checkout or a one-tap reorder, possibly
+          // placed in another tab) lights up this page without a refresh.
+          event: '*',
           schema: 'public',
           table: 'orders',
           filter: `customer_id=eq.${user.id}`,
@@ -480,6 +482,16 @@ export const HomePage: React.FC = () => {
         (payload) => {
           const next = payload.new as Order | undefined;
           if (!next?.id || !next.status) return;
+
+          if (payload.eventType === 'INSERT') {
+            // Seed the ledger with the status we just learned about so the
+            // first real transition still chimes exactly once.
+            if (!(next.id in lastAlertedStatusRef.current)) {
+              lastAlertedStatusRef.current[next.id] = next.status;
+            }
+            void loadApprovedRestaurants();
+            return;
+          }
 
           // One alert per transition, no matter how many fields update.
           const previous = lastAlertedStatusRef.current[next.id];
@@ -494,14 +506,16 @@ export const HomePage: React.FC = () => {
             return;
           }
 
+          // Refresh the active-delivery card first: it must not depend on
+          // whether this particular status has a chime attached to it.
+          void loadApprovedRestaurants();
+
           if (!playCustomerStatusAlert(next.status)) return;
 
           setRealtimeNotice(
             HOME_STATUS_TOASTS[next.status] ?? '🔔 Realtime: Your order status just changed!'
           );
           setTimeout(() => setRealtimeNotice(null), 6000);
-          // Refresh the active-delivery card so it reflects the new state.
-          void loadApprovedRestaurants();
         }
       )
       .subscribe();
