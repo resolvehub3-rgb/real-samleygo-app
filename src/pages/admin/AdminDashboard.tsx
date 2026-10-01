@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  ArrowRight,
   AlertCircle,
+  Bell,
   Bike,
+  ChartColumn,
   CheckCircle,
+  ChefHat,
   ChevronDown,
   ChevronRight,
   ExternalLink,
@@ -13,17 +15,18 @@ import {
   Inbox,
   LayoutDashboard,
   LogOut,
+  Mail,
+  Map as MapIcon,
   MapPin,
   Menu,
   Phone,
   Receipt,
   RefreshCw,
   Search,
-  ShieldCheck,
-  Sliders,
+  Send,
+  Settings,
   Star,
   Store,
-  UserCheck,
   Users,
   Wallet,
   X,
@@ -47,6 +50,7 @@ import {
 } from '../../lib/pricing';
 import { VERIFICATION_META } from '../../lib/verification';
 import { DocumentImage } from '../../components/common/DocumentImage';
+import { AdminDispatchMap } from '../../components/admin/AdminDispatchMap';
 import type { LucideIcon } from 'lucide-react';
 
 /** Sections of the super-admin console. Also drives the sidebar. */
@@ -75,6 +79,23 @@ const TAB_KEYS: AdminTab[] = [
   'SETTINGS',
   'AUDIT',
 ];
+
+/**
+ * Sidebar label to restore when a section is opened from the URL (deep link,
+ * refresh, back/forward) instead of by clicking the row. "Earnings" and
+ * "Dashboard" both live on the overview, so the highlight is label-driven.
+ */
+const DEFAULT_NAV_LABEL: Record<AdminTab, string> = {
+  OVERVIEW: 'Dashboard',
+  RESTAURANTS: 'Kitchen Queue',
+  COURIERS: 'Courier Map',
+  ORDERS: 'Dispatch',
+  SETTINGS: 'Settings',
+  AUDIT: 'Analytics',
+};
+
+/** Status dropdown options offered by the live kitchen queue panel. */
+type QueueStatusFilter = 'ALL' | 'PREPARING' | 'READY_FOR_PICKUP' | 'ON_THE_WAY';
 
 /** Statuses that mean an order is no longer moving through the pipeline. */
 const TERMINAL_ORDER_STATUSES: OrderStatus[] = [
@@ -139,8 +160,89 @@ type StatTone = keyof typeof STAT_TONE;
 const INPUT_CLASS =
   'w-full px-3 py-2.5 rounded-xl border border-slate-200 bg-white text-sm font-bold text-slate-900 tabular-nums transition focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20';
 
-const TH = 'pb-3 pr-4 font-black uppercase tracking-wider';
-const TD = 'py-3 pr-4 align-middle';
+/**
+ * Row accent + stacked status badge used by the Live Kitchen Order Queue.
+ * `minutes` is how long the order has been in this state (shown as "– 14m").
+ */
+const queueBadge = (
+  status: OrderStatus,
+  minutes: number
+): { accent: string; title: string; titleClass: string; pill: string; dot: string; label: string } => {
+  switch (status) {
+    case 'READY_FOR_PICKUP':
+      return {
+        accent: 'bg-emerald-500',
+        title: 'Ready for pickup',
+        titleClass: 'text-emerald-700',
+        pill: 'bg-emerald-50 text-emerald-700 ring-emerald-500/20',
+        dot: 'bg-emerald-500',
+        label: 'Ready for Pickup',
+      };
+    case 'RESTAURANT_ACCEPTED':
+    case 'PREPARING':
+      return {
+        accent: 'bg-amber-500',
+        title: 'Preparing',
+        titleClass: 'text-amber-700',
+        pill: 'bg-amber-50 text-amber-700 ring-amber-500/25',
+        dot: 'bg-amber-500',
+        label: `Preparing – ${minutes}m`,
+      };
+    case 'PENDING_PAYMENT':
+    case 'PAID':
+    case 'RESTAURANT_PENDING':
+      return {
+        accent: 'bg-amber-400',
+        title: 'In queue',
+        titleClass: 'text-amber-700',
+        pill: 'bg-amber-50 text-amber-700 ring-amber-500/25',
+        dot: 'bg-amber-400',
+        label: 'Waiting for kitchen',
+      };
+    case 'COURIER_ASSIGNED':
+    case 'COURIER_ACCEPTED':
+    case 'PICKED_UP':
+    case 'ON_THE_WAY':
+    case 'ARRIVED':
+      return {
+        accent: 'bg-sky-500',
+        title: 'On the way',
+        titleClass: 'text-sky-700',
+        pill: 'bg-sky-50 text-sky-700 ring-sky-500/20',
+        dot: 'bg-sky-500',
+        label: 'On the Way',
+      };
+    case 'DELIVERED':
+    case 'COMPLETED':
+      return {
+        accent: 'bg-emerald-400',
+        title: 'Delivered',
+        titleClass: 'text-emerald-700',
+        pill: 'bg-emerald-50 text-emerald-700 ring-emerald-500/20',
+        dot: 'bg-emerald-400',
+        label: 'Delivered',
+      };
+    default:
+      return {
+        accent: 'bg-rose-500',
+        title: 'Cancelled',
+        titleClass: 'text-rose-700',
+        pill: 'bg-rose-50 text-rose-700 ring-rose-500/20',
+        dot: 'bg-rose-500',
+        label: 'Cancelled',
+      };
+  }
+};
+
+/** "12 mins ago" wording used by the kitchen queue (mockup phrasing). */
+const formatQueueTime = (iso: string): string => {
+  const minutes = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} mins ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+};
 
 /** "Ab Cam" style monogram used when an avatar image is not available. */
 const monogram = (name: string): string =>
@@ -301,196 +403,53 @@ const SummaryTile: React.FC<SummaryTileProps> = ({ label, value, icon: Icon, ton
   );
 };
 
-interface StatCardProps {
+interface OpsStatCardProps {
   label: string;
   value: string;
-  caption: string;
   icon: LucideIcon;
-  tone: StatTone;
-  /** Plain-language definition shown when the admin hovers the ⓘ hint. */
+  /** Hover definition — real numbers only make sense with a plain-English gloss. */
   hint?: string;
-  /** Small secondary read-out rendered under the value (e.g. "12 orders today"). */
-  meta?: string;
-  /** Optional 0–100 completion bar shown above the footer. */
-  progress?: number;
-  progressLabel?: string;
-  /** Makes the whole card a clickable shortcut to the related section. */
+  /** Makes the whole card a shortcut to the section behind the number. */
   onClick?: () => void;
 }
 
 /**
- * Platform Overview KPI card: colour-coded accent, gradient wash, hover lift,
- * an optional ⓘ definition (so a new admin never has to guess what a number
- * means) and an optional progress bar for ratio metrics.
+ * Flat KPI tile from the operations mockup: label, big value and a round teal
+ * icon. Deliberately free of progress bars and captions — the four overview
+ * numbers have to be readable in a single glance.
  */
-const StatCard: React.FC<StatCardProps> = ({
-  label,
-  value,
-  caption,
-  icon: Icon,
-  tone,
-  hint,
-  meta,
-  progress,
-  progressLabel,
-  onClick,
-}) => {
-  const t = STAT_TONE[tone];
-  const clamped = typeof progress === 'number' ? Math.min(100, Math.max(0, progress)) : null;
+const OpsStatCard: React.FC<OpsStatCardProps> = ({ label, value, icon: Icon, hint, onClick }) => {
 
   const body = (
     <>
-      {/* Gradient accent bar + ambient glow */}
-      <span aria-hidden="true" className={`absolute inset-x-0 top-0 h-1 ${t.bar}`} />
-      <span
-        aria-hidden="true"
-        className={`pointer-events-none absolute -right-10 -top-12 h-32 w-32 rounded-full blur-2xl transition duration-500 ${t.blob}`}
-      />
-
-      <span className="relative flex items-start justify-between gap-3">
-        <span className="block min-w-0">
-          <span className="flex items-center gap-1.5 text-[11px] font-black uppercase tracking-wider text-slate-400">
-            {label}
-            {hint && (
-              <span
-                tabIndex={0}
-                role="note"
-                title={hint}
-                className="grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full bg-slate-200 text-[8px] font-black not-italic leading-none text-slate-500 transition hover:bg-slate-900 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
-              >
-                i
-              </span>
-            )}
-          </span>
-          <span className="mt-2 block text-2xl font-black tabular-nums tracking-tight text-slate-900">
-            {value}
-          </span>
-          {meta && (
-            <span className="mt-1.5 block text-[11px] font-bold tabular-nums text-slate-500">
-              {meta}
-            </span>
-          )}
-        </span>
-        <span
-          className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl ring-1 transition duration-200 group-hover:scale-110 group-hover:-rotate-6 ${t.tile}`}
-        >
-          <Icon className="w-5 h-5" />
+      <span className="block min-w-0">
+        <span className="block truncate text-sm font-bold text-slate-600">{label}</span>
+        <span className="mt-2 block text-3xl font-black tabular-nums tracking-tight text-slate-900">
+          {value}
         </span>
       </span>
-
-      {clamped !== null && (
-        <span className="mt-4 block">
-          <span className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-slate-400">
-            <span>{progressLabel}</span>
-            <span className="tabular-nums text-slate-600">{Math.round(clamped)}%</span>
-          </span>
-          <span className="mt-1.5 block h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
-            <span
-              className={`block h-full rounded-full ${t.fill} transition-[width] duration-700 ease-out`}
-              style={{ width: `${clamped}%` }}
-            />
-          </span>
-        </span>
-      )}
-
-      <span className="relative mt-3 block text-[11px] leading-relaxed text-slate-500">
-        {caption}
+      <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-teal-50 text-teal-600 ring-1 ring-teal-500/15 transition duration-200 group-hover:scale-110">
+        <Icon className="h-5 w-5" />
       </span>
-
-      {onClick && (
-        <span className="relative mt-3 inline-flex items-center gap-1 text-[11px] font-black text-slate-400 transition group-hover:text-emerald-600">
-          Open section
-          <ArrowRight className="h-3 w-3 transition group-hover:translate-x-0.5" />
-        </span>
-      )}
     </>
   );
 
-  const baseClass = `group relative isolate overflow-hidden ${CARD} p-5 transition duration-200 hover:-translate-y-1 hover:shadow-xl hover:shadow-slate-900/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60`;
+  const baseClass = `group flex w-full items-start justify-between gap-3 overflow-hidden p-5 text-left ${CARD} transition duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60`;
 
   // Interactive cards are real buttons so keyboard and screen-reader users get
   // the same shortcut as mouse users.
   if (onClick) {
     return (
-      <button type="button" onClick={onClick} className={`${baseClass} block w-full text-left`}>
+      <button type="button" onClick={onClick} title={hint} className={baseClass}>
         {body}
       </button>
     );
   }
 
-  return <div className={baseClass}>{body}</div>;
-};
-
-interface QuickActionCardProps {
-  label: string;
-  caption: string;
-  count: number;
-  icon: LucideIcon;
-  tone: StatTone;
-  onClick: () => void;
-}
-
-/** Shortcut tile that jumps straight to the section that needs attention. */
-const QuickActionCard: React.FC<QuickActionCardProps> = ({
-  label,
-  caption,
-  count,
-  icon: Icon,
-  tone,
-  onClick,
-}) => {
-  const t = STAT_TONE[tone];
-  const hasWork = count > 0;
-
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`group relative isolate flex items-center gap-3.5 overflow-hidden p-4 text-left ${CARD} transition duration-200 hover:-translate-y-1 hover:shadow-xl hover:shadow-slate-900/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 ${
-        hasWork ? 'ring-2 ring-inset ring-amber-400/50' : ''
-      }`}
-    >
-      {/* Attention rail: only shown when there is something to review */}
-      {hasWork && (
-        <span aria-hidden="true" className={`absolute inset-y-0 left-0 w-1 ${t.bar}`} />
-      )}
-
-      <span
-        className={`relative grid h-11 w-11 shrink-0 place-items-center rounded-2xl ring-1 transition duration-200 group-hover:scale-110 ${t.tile}`}
-      >
-        <Icon className="h-5 w-5" />
-      </span>
-
-      <span className="relative min-w-0 flex-1">
-        <span className="flex items-center gap-1.5">
-          <span className="truncate text-xs font-black text-slate-900">{label}</span>
-          {hasWork && (
-            <span className="relative flex h-2 w-2 shrink-0">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
-            </span>
-          )}
-        </span>
-        <span className="mt-0.5 block truncate text-[11px] text-slate-500">{caption}</span>
-      </span>
-
-      <span
-        className={`relative inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-black tabular-nums transition ${
-          hasWork
-            ? 'bg-slate-900 text-white shadow-md shadow-slate-900/20 group-hover:bg-emerald-600'
-            : 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-500/20'
-        }`}
-      >
-        {hasWork ? (
-          <>
-            {count}
-            <ArrowRight className="h-3.5 w-3.5 transition group-hover:translate-x-0.5" />
-          </>
-        ) : (
-          <CheckCircle className="h-4 w-4" />
-        )}
-      </span>
-    </button>
+    <div className={baseClass} title={hint}>
+      {body}
+    </div>
   );
 };
 
@@ -539,7 +498,6 @@ export const AdminDashboard: React.FC = () => {
   const [courierDocs, setCourierDocs] = useState<CourierDocument[]>([]);
   const [expandedCourierId, setExpandedCourierId] = useState<string | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
-  const [usersCount, setUsersCount] = useState<number>(0);
   const [pricingSettings, setPricingSettings] = useState<PlatformPricingSettings>(DEFAULT_PRICING);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -565,6 +523,14 @@ export const AdminDashboard: React.FC = () => {
     'ALL' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED'
   >('ALL');
 
+  // Operations overview: the header's Global Search narrows the kitchen queue,
+  // and the queue panel has its own status dropdown.
+  const [globalQuery, setGlobalQuery] = useState('');
+  const [queueFilter, setQueueFilter] = useState<QueueStatusFilter>('ALL');
+
+  // Ticking clock for the dispatch map header (shown in Accra time).
+  const [now, setNow] = useState(() => new Date());
+
   const notify = (text: string, tone: 'success' | 'error' = 'success') =>
     setNotice({ text, tone });
 
@@ -574,6 +540,12 @@ export const AdminDashboard: React.FC = () => {
     const timer = window.setTimeout(() => setNotice(null), 4500);
     return () => window.clearTimeout(timer);
   }, [notice]);
+
+  // Keep the dispatch map's clock honest without re-rendering every second.
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const fetchAdminData = async () => {
     if (!isSupabaseConfigured) {
@@ -594,13 +566,15 @@ export const AdminDashboard: React.FC = () => {
       const { data: docData } = await supabase.from('courier_documents').select('*').order('uploaded_at', { ascending: false });
       if (docData) setCourierDocs(docData as CourierDocument[]);
 
-      // 3. Fetch Orders
-      const { data: ordData } = await supabase.from('orders').select('*, restaurant:restaurants(*), courier:profiles!orders_courier_id_fkey(*)').order('created_at', { ascending: false });
+      // 3. Fetch Orders (with line items + customer so the kitchen queue can
+      //    show "Jollof Rice (x2)" and the name on the order)
+      const { data: ordData } = await supabase
+        .from('orders')
+        .select(
+          '*, order_items(*), restaurant:restaurants(*), customer:profiles!orders_customer_id_fkey(*), courier:profiles!orders_courier_id_fkey(*)'
+        )
+        .order('created_at', { ascending: false });
       if (ordData) setOrders(ordData as Order[]);
-
-      // 4. Fetch Profiles count
-      const { count } = await supabase.from('profiles').select('*', { count: 'exact', head: true });
-      if (count !== null) setUsersCount(count);
 
       // 5. Fetch Platform Settings
       const { data: settsData } = await supabase.from('platform_settings').select('*').eq('key', 'delivery_pricing').maybeSingle();
@@ -777,6 +751,36 @@ export const AdminDashboard: React.FC = () => {
     couriers.length > 0 ? (onlineCouriers / couriers.length) * 100 : 0;
   const pendingTotal = pendingRestaurants + pendingCouriers + pendingDocs;
 
+  // ---- Operations overview: the four mockup KPI numbers ----
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const isToday = (iso: string) => new Date(iso).getTime() >= startOfToday.getTime();
+  const ordersToday = orders.filter((o) => isToday(o.created_at)).length;
+  const todayEarnings = orders
+    .filter(
+      (o) =>
+        isToday(o.created_at) &&
+        o.status !== 'CANCELLED' &&
+        o.status !== 'REJECTED' &&
+        o.status !== 'FAILED'
+    )
+    .reduce((sum, o) => sum + o.total_amount, 0);
+  // Orders parked on a kitchen that has not accepted them yet — the count
+  // behind the header's mail badge.
+  const ordersAwaitingKitchen = orders.filter((o) => o.status === 'RESTAURANT_PENDING').length;
+
+  // Dispatch map header: city comes from the data, clock runs on Accra time.
+  const mapCity = restaurants.find((r) => r.city)?.city || 'Accra';
+  const nowLabel = `${now.toLocaleString('en-US', {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: 'Africa/Accra',
+  })} (GMT)`;
+
   // Restaurant directory rollups
   const approvedRestaurants = restaurants.length - pendingRestaurants;
   const openRestaurants = restaurants.filter((r) => r.is_open).length;
@@ -873,6 +877,110 @@ export const AdminDashboard: React.FC = () => {
     });
   }, [orders, orderQuery, orderFilter]);
 
+  // Live kitchen queue: active orders only, narrowed by the header's Global
+  // Search and the panel's status dropdown.
+  const queueOrders = useMemo(() => {
+    const query = globalQuery.trim().toLowerCase();
+    return orders
+      .filter((o) => isActiveOrder(o.status))
+      .filter((o) => {
+        if (queueFilter === 'ALL') return true;
+        if (queueFilter === 'PREPARING')
+          return (
+            o.status === 'PREPARING' ||
+            o.status === 'RESTAURANT_ACCEPTED' ||
+            o.status === 'RESTAURANT_PENDING' ||
+            o.status === 'PAID' ||
+            o.status === 'PENDING_PAYMENT'
+          );
+        if (queueFilter === 'READY_FOR_PICKUP') return o.status === 'READY_FOR_PICKUP';
+        return (
+          o.status === 'COURIER_ASSIGNED' ||
+          o.status === 'COURIER_ACCEPTED' ||
+          o.status === 'PICKED_UP' ||
+          o.status === 'ON_THE_WAY' ||
+          o.status === 'ARRIVED'
+        );
+      })
+      .filter((o) => {
+        if (!query) return true;
+        return [
+          o.order_number,
+          o.customer?.full_name,
+          o.restaurant?.name,
+          o.delivery_address,
+          ...(o.order_items ?? []).map((item) => item.item_name),
+        ].some((field) => (field ?? '').toLowerCase().includes(query));
+      })
+      .slice(0, 25);
+  }, [orders, globalQuery, queueFilter]);
+
+  // Dispatch map: every rider currently on shift who has sent a GPS fix.
+  const mapCouriers = useMemo(
+    () =>
+      couriers
+        .filter(
+          (c) =>
+            c.is_online &&
+            typeof c.current_latitude === 'number' &&
+            typeof c.current_longitude === 'number'
+        )
+        .map((c) => ({
+          id: c.id,
+          label: c.profile?.full_name || 'Rider',
+          lat: c.current_latitude as number,
+          lng: c.current_longitude as number,
+        })),
+    [couriers]
+  );
+
+  // Dispatch map: kitchens that have saved coordinates.
+  const mapKitchens = useMemo(
+    () =>
+      restaurants
+        .filter((r) => typeof r.latitude === 'number' && typeof r.longitude === 'number')
+        .map((r) => ({
+          id: r.id,
+          label: r.name,
+          lat: r.latitude as number,
+          lng: r.longitude as number,
+        })),
+    [restaurants]
+  );
+
+  // One line per live order: rider → kitchen → customer (skipping any leg
+  // whose coordinates are missing — plenty of orders never saved a GPS point).
+  const mapRoutes = useMemo(() => {
+    const riderPositionByProfile = new Map<string, { lat: number; lng: number }>();
+    couriers.forEach((c) => {
+      if (
+        c.profile?.id &&
+        typeof c.current_latitude === 'number' &&
+        typeof c.current_longitude === 'number'
+      ) {
+        riderPositionByProfile.set(c.profile.id, {
+          lat: c.current_latitude,
+          lng: c.current_longitude,
+        });
+      }
+    });
+
+    const coord = (lat?: number, lng?: number) =>
+      typeof lat === 'number' && typeof lng === 'number' ? { lat, lng } : null;
+
+    return orders
+      .filter((o) => isActiveOrder(o.status))
+      .map((o) => ({
+        id: o.id,
+        points: [
+          o.courier_id ? riderPositionByProfile.get(o.courier_id) ?? null : null,
+          coord(o.restaurant?.latitude, o.restaurant?.longitude),
+          coord(o.delivery_latitude, o.delivery_longitude),
+        ].filter((point): point is { lat: number; lng: number } => point !== null),
+      }))
+      .filter((route) => route.points.length > 1);
+  }, [orders, couriers]);
+
   // Pricing preview (mirrors the exact fee the customer would be charged)
   const sampleFee = calculateDeliveryFee(SAMPLE_DISTANCE_KM, pricingSettings);
   const sampleCourierPayout =
@@ -882,23 +990,34 @@ export const AdminDashboard: React.FC = () => {
 
   // Single source of truth for the sidebar: desktop rail, mobile drawer and the
   // mobile top bar all render from this list, so a section can never drift.
+  // Labels follow the operations mockup; `key` maps each row to the console
+  // section that actually backs it ("Earnings" and "Dashboard" both open the
+  // overview, where today's earnings live).
   const navItems: AdminNavItem[] = [
-    { key: 'OVERVIEW', label: 'Overview', icon: LayoutDashboard },
-    { key: 'RESTAURANTS', label: 'Restaurants', icon: Store, count: restaurants.length },
-    { key: 'COURIERS', label: 'Couriers', icon: Bike, count: couriers.length },
-    { key: 'ORDERS', label: 'Live Orders', icon: Receipt, count: orders.length },
-    { key: 'SETTINGS', label: 'Pricing Rules', icon: Sliders },
-    { key: 'AUDIT', label: 'Audit Logs', icon: FileText },
+    { key: 'OVERVIEW', label: 'Dashboard', icon: LayoutDashboard },
+    { key: 'RESTAURANTS', label: 'Kitchen Queue', icon: ChefHat },
+    { key: 'COURIERS', label: 'Courier Map', icon: MapIcon },
+    { key: 'ORDERS', label: 'Dispatch', icon: Send },
+    { key: 'AUDIT', label: 'Analytics', icon: ChartColumn },
+    { key: 'OVERVIEW', label: 'Earnings', icon: Wallet },
+    { key: 'SETTINGS', label: 'Settings', icon: Settings },
   ];
 
-  // Grouped sidebar: operations up top, platform governance below.
-  const navGroups: { label: string; keys: AdminTab[] }[] = [
-    { label: 'Operations', keys: ['OVERVIEW', 'RESTAURANTS', 'COURIERS', 'ORDERS'] },
-    { label: 'Platform', keys: ['SETTINGS', 'AUDIT'] },
-  ];
+  // Two rows can share a tab, so the highlight is tracked by label rather than
+  // by key; the effect below re-syncs it whenever the URL changes (deep link,
+  // refresh, back/forward).
+  const [activeNav, setActiveNav] = useState<{ label: string; key: AdminTab }>(() => ({
+    label: DEFAULT_NAV_LABEL[activeTab],
+    key: activeTab,
+  }));
 
-  const activeLabel =
-    navItems.find((item) => item.key === activeTab)?.label ?? 'Overview';
+  useEffect(() => {
+    setActiveNav((prev) =>
+      prev.key === activeTab ? prev : { label: DEFAULT_NAV_LABEL[activeTab], key: activeTab }
+    );
+  }, [activeTab]);
+
+  const activeLabel = activeNav.label;
 
   const handleSelectTab = (key: AdminTab) => {
     // Push the section into the URL so back/forward and refresh keep working.
@@ -906,6 +1025,12 @@ export const AdminDashboard: React.FC = () => {
     setIsSidebarOpen(false);
     setExpandedCourierId(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  /** Sidebar click: moves the highlight first, then navigates. */
+  const handleSelectNav = (item: AdminNavItem) => {
+    setActiveNav({ label: item.label, key: item.key });
+    handleSelectTab(item.key);
   };
 
   const handleSignOut = async () => {
@@ -968,79 +1093,64 @@ export const AdminDashboard: React.FC = () => {
 
   const brand = (
     <div className="flex min-w-0 items-center gap-3">
-      <span className="flex h-10 w-10 shrink-0 overflow-hidden rounded-xl bg-white shadow-lg ring-1 ring-white/15">
+      <span className="flex h-11 w-11 shrink-0 overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200">
         <img src="/logo-mark.png" alt="" className="h-full w-full object-cover" />
       </span>
       <div className="min-w-0 flex-1 leading-tight">
-        <span className="block text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-400">
-          Protected Web Console
-        </span>
-        <h1 className="truncate text-[15px] font-black tracking-tight text-white">
-          SamleyGo Super Admin
+        <h1 className="truncate text-[17px] font-black tracking-tight text-slate-900">
+          SamleyGo
         </h1>
+        <p className="truncate text-xs font-bold text-slate-500">Dispatch</p>
       </div>
-      <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-emerald-400/10 text-emerald-300 ring-1 ring-emerald-400/25">
-        <ShieldCheck className="h-4 w-4" />
-      </span>
     </div>
   );
 
+  /** One light sidebar row; shared by the rail, the mobile drawer and pills. */
+  const renderNavItem = (item: AdminNavItem, isActive: boolean) => {
+    const Icon = item.icon;
+    return (
+      <button
+        key={item.label}
+        type="button"
+        onClick={() => handleSelectNav(item)}
+        aria-current={isActive ? 'page' : undefined}
+        className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-bold transition ${
+          isActive
+            ? 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-500/20'
+            : 'text-slate-600 ring-1 ring-transparent hover:bg-slate-100 hover:text-slate-900'
+        }`}
+      >
+        <Icon
+          className={`h-[18px] w-[18px] shrink-0 ${
+            isActive ? 'text-emerald-600' : 'text-slate-500 group-hover:text-slate-700'
+          }`}
+        />
+        <span className="flex-1 truncate text-left">{item.label}</span>
+      </button>
+    );
+  };
+
   const navList = (
-    <nav className="flex-1 space-y-6 overflow-y-auto px-3 py-4" aria-label="Admin sections">
-      {navGroups.map((group) => (
-        <div key={group.label} className="space-y-1">
-          <p className="px-3 pb-2 text-[10px] font-black uppercase tracking-[0.18em] text-white/30">
-            {group.label}
-          </p>
-          {group.keys.map((key) => {
-            const item = navItems.find((nav) => nav.key === key);
-            if (!item) return null;
-            const Icon = item.icon;
-            const isActive = activeTab === item.key;
-            return (
-              <button
-                key={item.key}
-                type="button"
-                onClick={() => handleSelectTab(item.key)}
-                aria-current={isActive ? 'page' : undefined}
-                className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-bold transition ${
-                  isActive
-                    ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 text-white shadow-lg shadow-emerald-950/40'
-                    : 'text-slate-300/90 hover:bg-white/5 hover:text-white'
-                }`}
-              >
-                <Icon className="h-4 w-4 shrink-0" />
-                <span className="flex-1 truncate text-left">{item.label}</span>
-                {typeof item.count === 'number' && (
-                  <span
-                    className={`rounded-md px-1.5 py-0.5 text-[11px] font-black tabular-nums transition ${
-                      isActive
-                        ? 'bg-white/20 text-white'
-                        : 'bg-white/10 text-slate-400 group-hover:text-slate-200'
-                    }`}
-                  >
-                    {item.count}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      ))}
+    <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4" aria-label="Admin sections">
+      {navItems.slice(0, -1).map((item) => renderNavItem(item, activeNav.label === item.label))}
+      {/* Settings is pinned to the bottom of the rail, like the mockup */}
+      <div className="mt-3 border-t border-slate-200 pt-3">
+        {renderNavItem(navItems[navItems.length - 1], activeNav.label === 'Settings')}
+      </div>
     </nav>
   );
 
   const sidebarFooter = (
-    <div className="shrink-0 space-y-3 border-t border-white/5 px-3 py-4">
+    <div className="shrink-0 space-y-3 border-t border-slate-200 px-3 py-4">
       <div className="flex min-w-0 items-center gap-3 px-2">
-        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-[11px] font-black text-white ring-1 ring-white/10">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-[11px] font-black text-white ring-1 ring-emerald-600/20">
           {initials}
         </span>
         <div className="min-w-0">
-          <p className="truncate text-xs font-bold text-white" title={user?.email ?? ''}>
+          <p className="truncate text-xs font-bold text-slate-900" title={user?.email ?? ''}>
             {profile?.full_name || user?.email || 'Administrator'}
           </p>
-          <p className="truncate text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-400">
+          <p className="truncate text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-600">
             {profile ? profile.role.replace(/_/g, ' ') : 'Loading role…'}
           </p>
         </div>
@@ -1048,14 +1158,14 @@ export const AdminDashboard: React.FC = () => {
       <div className="grid grid-cols-2 gap-2">
         <Link
           to="/"
-          className="flex items-center justify-center gap-1.5 rounded-xl px-2 py-2.5 text-[11px] font-bold text-slate-400 transition hover:bg-white/5 hover:text-white"
+          className="flex items-center justify-center gap-1.5 rounded-xl px-2 py-2.5 text-[11px] font-bold text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
         >
           Storefront
         </Link>
         <button
           type="button"
           onClick={handleSignOut}
-          className="flex items-center justify-center gap-1.5 rounded-xl bg-white/10 px-2 py-2.5 text-[11px] font-bold text-slate-200 transition hover:bg-rose-600 hover:text-white"
+          className="flex items-center justify-center gap-1.5 rounded-xl bg-slate-100 px-2 py-2.5 text-[11px] font-bold text-slate-600 transition hover:bg-rose-50 hover:text-rose-600"
         >
           <LogOut className="h-3.5 w-3.5" />
           Sign out
@@ -1067,12 +1177,8 @@ export const AdminDashboard: React.FC = () => {
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
       {/* ===== DESKTOP SIDEBAR (fixed rail) ===== */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 overflow-hidden border-r border-white/5 bg-[#04140e] lg:flex lg:flex-col">
-        <span
-          aria-hidden="true"
-          className="pointer-events-none absolute -left-20 -top-24 h-72 w-72 rounded-full bg-emerald-500/15 blur-3xl"
-        />
-        <div className="relative shrink-0 border-b border-white/5 px-4 py-5">{brand}</div>
+      <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 overflow-hidden border-r border-slate-200 bg-white lg:flex lg:flex-col">
+        <div className="shrink-0 border-b border-slate-200 px-4 py-5">{brand}</div>
         {navList}
         {sidebarFooter}
       </aside>
@@ -1085,18 +1191,14 @@ export const AdminDashboard: React.FC = () => {
             onClick={() => setIsSidebarOpen(false)}
             aria-hidden="true"
           />
-          <aside className="fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col overflow-hidden border-r border-white/5 bg-[#04140e] shadow-2xl lg:hidden">
-            <span
-              aria-hidden="true"
-              className="pointer-events-none absolute -left-20 -top-24 h-72 w-72 rounded-full bg-emerald-500/15 blur-3xl"
-            />
-            <div className="relative flex shrink-0 items-start justify-between gap-2 border-b border-white/5 px-4 py-5">
+          <aside className="fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col overflow-hidden border-r border-slate-200 bg-white shadow-2xl lg:hidden">
+            <div className="relative flex shrink-0 items-start justify-between gap-2 border-b border-slate-200 px-4 py-5">
               {brand}
               <button
                 type="button"
                 onClick={() => setIsSidebarOpen(false)}
                 aria-label="Close navigation"
-                className="shrink-0 rounded-lg p-2 text-slate-400 transition hover:bg-white/5 hover:text-white"
+                className="shrink-0 rounded-lg p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-900"
               >
                 <X className="h-5 w-5" />
               </button>
@@ -1110,48 +1212,50 @@ export const AdminDashboard: React.FC = () => {
       {/* ===== MAIN ===== */}
       <div className="lg:pl-64">
         {/* Mobile top bar + one-tap section pills */}
-        <div className="sticky top-0 z-30 border-b border-white/5 bg-[#04140e] text-white shadow-lg lg:hidden">
+        <div className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 shadow-sm backdrop-blur-md lg:hidden">
           <div className="flex items-center gap-3 px-4 py-3">
             <button
               type="button"
               onClick={() => setIsSidebarOpen(true)}
               aria-label="Open navigation"
               aria-expanded={isSidebarOpen}
-              className="-ml-2 shrink-0 rounded-lg p-2 text-slate-300 transition hover:bg-white/5"
+              className="-ml-2 shrink-0 rounded-lg p-2 text-slate-500 transition hover:bg-slate-100"
             >
               <Menu className="h-5 w-5" />
             </button>
-            <span className="flex h-7 w-7 shrink-0 overflow-hidden rounded-lg bg-white ring-1 ring-white/15">
+            <span className="flex h-8 w-8 shrink-0 overflow-hidden rounded-lg ring-1 ring-slate-200">
               <img src="/logo-mark.png" alt="" className="h-full w-full object-cover" />
             </span>
             <div className="min-w-0 flex-1">
-              <p className="text-[10px] font-bold uppercase leading-none tracking-[0.18em] text-emerald-400">
+              <p className="text-[10px] font-bold uppercase leading-none tracking-[0.18em] text-emerald-600">
                 SamleyGo Admin
               </p>
-              <p className="mt-1 truncate text-sm font-black leading-tight">{activeLabel}</p>
+              <p className="mt-1 truncate text-sm font-black leading-tight text-slate-900">
+                {activeLabel}
+              </p>
             </div>
             <button
               type="button"
               onClick={handleSignOut}
               aria-label="Sign out"
-              className="-mr-2 shrink-0 rounded-lg p-2 text-slate-300 transition hover:bg-white/5 hover:text-rose-400"
+              className="-mr-2 shrink-0 rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-rose-600"
             >
               <LogOut className="h-5 w-5" />
             </button>
           </div>
           <div className="flex gap-2 overflow-x-auto px-4 pb-3 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {navItems.map((item) => {
-              const isActive = activeTab === item.key;
+              const isActive = activeNav.label === item.label;
               return (
                 <button
-                  key={item.key}
+                  key={item.label}
                   type="button"
-                  onClick={() => handleSelectTab(item.key)}
+                  onClick={() => handleSelectNav(item)}
                   aria-current={isActive ? 'page' : undefined}
                   className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-bold transition ${
                     isActive
-                      ? 'bg-emerald-500 text-white shadow-md shadow-emerald-950/40'
-                      : 'bg-white/10 text-slate-300 hover:bg-white/15 hover:text-white'
+                      ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/20'
+                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900'
                   }`}
                 >
                   {item.label}
@@ -1162,36 +1266,90 @@ export const AdminDashboard: React.FC = () => {
         </div>
 
         {/* Desktop header */}
-        <header className="sticky top-0 z-20 hidden items-center justify-between gap-4 border-b border-slate-200/70 bg-slate-100/85 px-6 py-4 backdrop-blur-md lg:flex xl:px-8">
-          <div className="min-w-0">
-            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-600">
-              SamleyGo · Protected console
-            </p>
-            <h2 className="text-lg font-black tracking-tight text-slate-900">{activeLabel}</h2>
-          </div>
-          <div className="flex items-center gap-2.5">
-            <span className="hidden items-center gap-2 rounded-full bg-white px-3 py-1.5 text-[11px] font-bold text-slate-600 ring-1 ring-slate-200 xl:inline-flex">
-              <span className="relative flex h-2 w-2">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-              </span>
-              Realtime sync
+        <header className="sticky top-0 z-20 hidden items-center justify-between gap-4 border-b border-slate-200 bg-white/95 px-6 py-3 backdrop-blur-md lg:flex xl:px-8">
+          <div className="flex min-w-0 items-center gap-3">
+            <h1 className="text-xl font-black tracking-tight text-slate-900">
+              Operations Dashboard
+            </h1>
+            <span className="shrink-0 rounded-lg bg-slate-100 px-2.5 py-1 text-[11px] font-black tracking-wide text-slate-600 ring-1 ring-slate-200">
+              GHS
             </span>
-            <Link
-              to="/"
-              className="inline-flex items-center gap-1.5 rounded-xl bg-white px-3.5 py-2 text-xs font-bold text-slate-700 ring-1 ring-slate-200 transition hover:bg-slate-50"
-            >
-              View storefront
-              <ExternalLink className="h-3.5 w-3.5" />
-            </Link>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Global Search narrows the live kitchen queue */}
+            <div className="relative hidden md:block">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="search"
+                value={globalQuery}
+                onChange={(e) => setGlobalQuery(e.target.value)}
+                placeholder="Global Search"
+                aria-label="Global search — filters the live kitchen order queue"
+                className="w-56 rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-sm font-medium text-slate-900 transition placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 xl:w-72"
+              />
+            </div>
+
             <button
               type="button"
-              onClick={handleSignOut}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 px-3.5 py-2 text-xs font-bold text-white transition hover:bg-slate-800"
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              title="Refresh dashboard data"
+              aria-label="Refresh dashboard data"
+              className="grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 disabled:opacity-60"
             >
-              <LogOut className="h-3.5 w-3.5" />
-              Sign out
+              <RefreshCw className={`h-5 w-5 ${isRefreshing ? 'animate-spin' : ''}`} />
             </button>
+
+            <button
+              type="button"
+              onClick={() => handleSelectTab('COURIERS')}
+              title={`${pendingTotal} item${pendingTotal === 1 ? '' : 's'} waiting for your review`}
+              aria-label={`${pendingTotal} items waiting for review`}
+              className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+            >
+              <Bell className="h-5 w-5" />
+              {pendingTotal > 0 && (
+                <span className="absolute right-1 top-1 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-rose-500 px-1 text-[10px] font-black leading-none text-white ring-2 ring-white">
+                  {pendingTotal}
+                </span>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleSelectTab('ORDERS')}
+              title={`${ordersAwaitingKitchen} order${ordersAwaitingKitchen === 1 ? '' : 's'} waiting for a kitchen to confirm`}
+              aria-label={`${ordersAwaitingKitchen} orders waiting for kitchen confirmation`}
+              className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+            >
+              <Mail className="h-5 w-5" />
+              {ordersAwaitingKitchen > 0 && (
+                <span className="absolute right-1 top-1 grid h-[18px] min-w-[18px] place-items-center rounded-full bg-rose-500 px-1 text-[10px] font-black leading-none text-white ring-2 ring-white">
+                  {ordersAwaitingKitchen}
+                </span>
+              )}
+            </button>
+
+            <div
+              className="ml-1 flex items-center gap-2.5 border-l border-slate-200 pl-3"
+              title={user?.email ?? ''}
+            >
+              <span className="grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-[11px] font-black text-white ring-1 ring-emerald-600/20">
+                {profile?.avatar_url ? (
+                  <img src={profile.avatar_url} alt="" className="h-full w-full object-cover" />
+                ) : (
+                  initials
+                )}
+              </span>
+              <span className="hidden leading-tight xl:block">
+                <span className="block truncate text-sm font-black text-slate-900">
+                  {profile?.full_name || user?.email || 'Admin'}
+                </span>
+                <span className="block text-[11px] font-bold text-slate-500">Admin</span>
+              </span>
+              <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" aria-hidden="true" />
+            </div>
           </div>
         </header>
 
@@ -1213,207 +1371,230 @@ export const AdminDashboard: React.FC = () => {
               {/* ================= OVERVIEW ================= */}
               {activeTab === 'OVERVIEW' && (
                 <>
-                  <div className="flex flex-wrap items-end justify-between gap-4">
-                    <div>
-                      <h1 className="text-xl font-black tracking-tight text-slate-900 sm:text-2xl">
-                        Platform overview
-                      </h1>
-                      <p className="mt-1 text-xs text-slate-500">
-                        {new Date().toLocaleDateString('en-GH', {
-                          weekday: 'long',
-                          day: 'numeric',
-                          month: 'long',
-                          year: 'numeric',
-                        })}
-                        {' · '}
-                        {usersCount} registered {usersCount === 1 ? 'user' : 'users'}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleRefresh}
-                      disabled={isRefreshing}
-                      className="inline-flex items-center gap-2 rounded-xl bg-white px-3.5 py-2 text-xs font-bold text-slate-700 ring-1 ring-slate-200 transition hover:bg-slate-50 disabled:opacity-60"
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-                      Refresh
-                    </button>
-                  </div>
-
+                  {/* ===== KPI row ===== */}
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                    <StatCard
-                      label="Gross merchandise value"
-                      value={formatGHS(totalVolume)}
-                      meta={
-                        orders.length > 0
-                          ? `${orders.length} orders · ${formatGHS(avgOrderValue)} average`
-                          : 'No orders recorded yet'
-                      }
-                      caption="Total order volume processed through the platform"
-                      hint="The sum of every order total placed across all kitchens — before commissions or delivery fees are taken out."
+                    <OpsStatCard
+                      label="Today's Earnings"
+                      value={formatGHS(todayEarnings)}
                       icon={Wallet}
-                      tone="emerald"
-                      onClick={() => handleSelectTab('ORDERS')}
+                      hint={`${ordersToday} order${ordersToday === 1 ? '' : 's'} placed since midnight · Lifetime ${formatGHS(
+                        totalVolume
+                      )} across ${orders.length} orders (avg ${formatGHS(
+                        avgOrderValue
+                      )}) · ≈${takeRatePercent.toFixed(1)}% take rate = ${formatGHS(
+                        totalPlatformCut
+                      )} earned by the platform`}
+                      onClick={() => handleSelectNav(navItems[5])}
                     />
-                    <StatCard
-                      label="Platform commission"
-                      value={formatGHS(totalPlatformCut)}
-                      meta="Delivery share plus restaurant commission"
-                      caption={`Approx. ${takeRatePercent.toFixed(1)}% of everything sold on the platform`}
-                      hint="What SamleyGo earns: 15% of each order subtotal plus 20% of each delivery fee. Adjust both in Pricing Rules."
-                      progress={takeRatePercent}
-                      progressLabel="Take rate"
+                    <OpsStatCard
+                      label="Live Orders"
+                      value={String(activeOrdersCount)}
                       icon={Receipt}
-                      tone="sky"
-                      onClick={() => handleSelectTab('SETTINGS')}
+                      hint="Orders that have not reached the customer yet"
+                      onClick={() => handleSelectNav(navItems[3])}
                     />
-                    <StatCard
-                      label="Registered users"
-                      value={String(usersCount)}
-                      meta={`${restaurants.length} kitchens · ${couriers.length} riders on the platform`}
-                      caption="Customer, courier and restaurant owner accounts"
-                      hint="Every account that has signed up, including customers, kitchen owners and delivery riders."
-                      icon={Users}
-                      tone="violet"
-                    />
-                    <StatCard
-                      label="Couriers online"
-                      value={`${onlineCouriers}/${couriers.length}`}
-                      meta="Riders currently on shift right now"
-                      caption={
-                        couriers.length > 0
-                          ? fleetOnlinePercent >= 50
-                            ? 'Fleet capacity looks healthy'
-                            : 'Below half the fleet — coverage may be thin'
-                          : 'No riders registered yet'
-                      }
-                      hint="Riders who have toggled themselves ONLINE and can accept deliveries this minute."
-                      progress={fleetOnlinePercent}
-                      progressLabel="Fleet online"
+                    <OpsStatCard
+                      label="Active Couriers"
+                      value={String(onlineCouriers)}
                       icon={Bike}
-                      tone="amber"
-                      onClick={() => handleSelectTab('COURIERS')}
+                      hint={`Riders who are online and on shift right now — ${onlineCouriers} of ${
+                        couriers.length
+                      } (${Math.round(fleetOnlinePercent)}% of the fleet)`}
+                      onClick={() => handleSelectNav(navItems[2])}
+                    />
+                    <OpsStatCard
+                      label="Delivered"
+                      value={String(completedOrdersCount)}
+                      icon={CheckCircle}
+                      hint="Orders marked delivered or completed"
+                      onClick={() => {
+                        setOrderFilter('COMPLETED');
+                        handleSelectNav(navItems[3]);
+                      }}
                     />
                   </div>
 
-                  <div>
-                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <h2 className="text-[13px] font-black tracking-tight text-slate-900">
-                          Needs your attention
-                        </h2>
-                        <p className="text-[11px] text-slate-500">
-                          {pendingTotal > 0
-                            ? `${pendingTotal} item${pendingTotal === 1 ? '' : 's'} waiting for a decision`
-                            : 'Nothing is waiting on you right now'}
-                        </p>
-                      </div>
-                      {pendingTotal > 0 && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-black text-amber-700 ring-1 ring-amber-500/20">
-                          <span className="relative flex h-1.5 w-1.5">
-                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
-                            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-500" />
-                          </span>
-                          {pendingTotal} pending
-                        </span>
-                      )}
-                    </div>
+                  {/* ===== Live kitchen queue + courier dispatch map ===== */}
+                  <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+                    {/* ---------- Live Kitchen Order Queue ---------- */}
+                    <section className={`${CARD} flex h-[620px] flex-col overflow-hidden`}>
+                      <header className="flex flex-wrap items-start justify-between gap-3 px-5 pb-4 pt-5">
+                        <div className="min-w-0">
+                          <h2 className="text-[17px] font-black tracking-tight text-slate-900">
+                            Live Kitchen Order Queue
+                          </h2>
+                          <p className="mt-0.5 text-xs text-slate-500">
+                            {queueOrders.length} {queueOrders.length === 1 ? 'order' : 'orders'}
+                            {globalQuery.trim() ? ' matching your search' : ''}
+                          </p>
+                        </div>
+                        <label className="relative">
+                          <span className="sr-only">Filter the queue by status</span>
+                          <select
+                            value={queueFilter}
+                            onChange={(e) => setQueueFilter(e.target.value as QueueStatusFilter)}
+                            className="appearance-none rounded-xl border border-slate-200 bg-white py-2 pl-3 pr-8 text-xs font-bold text-slate-700 transition focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                          >
+                            <option value="ALL">All statuses</option>
+                            <option value="PREPARING">Preparing</option>
+                            <option value="READY_FOR_PICKUP">Ready for pickup</option>
+                            <option value="ON_THE_WAY">On the way</option>
+                          </select>
+                          <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                        </label>
+                      </header>
 
-                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                      <QuickActionCard
-                        label="Restaurant approvals"
-                        caption={pendingRestaurants ? 'Waiting for your review' : 'Everything is approved'}
-                        count={pendingRestaurants}
-                        icon={Store}
-                        tone="emerald"
-                        onClick={() => handleSelectTab('RESTAURANTS')}
-                      />
-                      <QuickActionCard
-                        label="Courier reviews"
-                        caption={pendingCouriers ? 'Riders awaiting a decision' : 'Everyone is verified'}
-                        count={pendingCouriers}
-                        icon={UserCheck}
-                        tone="sky"
-                        onClick={() => handleSelectTab('COURIERS')}
-                      />
-                      <QuickActionCard
-                        label="Documents pending"
-                        caption={pendingDocs ? 'Ghana Card & licence uploads' : 'Inbox zero'}
-                        count={pendingDocs}
-                        icon={FileCheck}
-                        tone="violet"
-                        onClick={() => handleSelectTab('COURIERS')}
-                      />
-                    </div>
+                      {orders.length === 0 ? (
+                        <EmptyState
+                          icon={Inbox}
+                          title="No orders yet"
+                          hint="Every order placed on the platform streams into this queue in realtime."
+                        />
+                      ) : queueOrders.length === 0 ? (
+                        <EmptyState
+                          icon={Search}
+                          title={
+                            globalQuery.trim() ? 'No orders match your search' : 'The kitchen queue is clear'
+                          }
+                          hint={
+                            globalQuery.trim()
+                              ? `Nothing live matches “${globalQuery.trim()}”.`
+                              : 'Nothing is being prepared, picked up or delivered right now.'
+                          }
+                          action={
+                            globalQuery.trim() ? (
+                              <button
+                                type="button"
+                                onClick={() => setGlobalQuery('')}
+                                className="rounded-xl bg-slate-900 px-4 py-2 text-[11px] font-black text-white transition hover:bg-slate-800"
+                              >
+                                Clear search
+                              </button>
+                            ) : undefined
+                          }
+                        />
+                      ) : (
+                        <div className="max-h-[560px] flex-1 overflow-auto border-t border-slate-200">
+                          <table className="w-full text-left text-[13px]">
+                            <thead>
+                              <tr className="text-[10px] font-black uppercase tracking-wider text-slate-500">
+                                <th className="sticky top-0 z-10 bg-white px-5 py-3">Order ID</th>
+                                <th className="sticky top-0 z-10 bg-white px-4 py-3">Customer</th>
+                                <th className="sticky top-0 z-10 bg-white px-4 py-3">Items</th>
+                                <th className="sticky top-0 z-10 bg-white px-4 py-3">Time</th>
+                                <th className="sticky top-0 z-10 bg-white px-4 py-3">Status Badge</th>
+                                <th className="sticky top-0 z-10 bg-white py-3 pr-5">
+                                  <span className="sr-only">Open order</span>
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {queueOrders.map((o) => {
+                                const minutes = Math.max(
+                                  1,
+                                  Math.round(
+                                    (Date.now() - new Date(o.created_at).getTime()) / 60000
+                                  )
+                                );
+                                const badge = queueBadge(o.status, minutes);
+                                const items = o.order_items ?? [];
+                                const openOrder = () => {
+                                  setOrderQuery(o.order_number);
+                                  setOrderFilter('ALL');
+                                  handleSelectNav(navItems[3]);
+                                };
+                                return (
+                                  <tr
+                                    key={o.id}
+                                    tabIndex={0}
+                                    onClick={openOrder}
+                                    onKeyDown={(e) => {
+                                      if (e.key !== 'Enter' && e.key !== ' ') return;
+                                      e.preventDefault();
+                                      openOrder();
+                                    }}
+                                    className="group cursor-pointer transition hover:bg-slate-50/80 focus:outline-none focus-visible:bg-emerald-50/60"
+                                  >
+                                    <td className="relative px-5 py-3.5 font-black text-slate-900">
+                                      <span
+                                        aria-hidden="true"
+                                        className={`absolute inset-y-0 left-0 w-1 ${badge.accent}`}
+                                      />
+                                      #{o.order_number}
+                                    </td>
+                                    <td className="px-4 py-3.5 font-medium text-slate-700">
+                                      {o.customer?.full_name || o.customer_phone || '—'}
+                                    </td>
+                                    <td className="px-4 py-3.5">
+                                      {items.length > 0 ? (
+                                        <div className="space-y-0.5">
+                                          {items.slice(0, 2).map((item) => (
+                                            <p key={item.id} className="font-medium text-slate-700">
+                                              {item.item_name}
+                                              {item.quantity > 1 ? ` (x${item.quantity})` : ''}
+                                            </p>
+                                          ))}
+                                          {items.length > 2 && (
+                                            <p className="text-[11px] text-slate-400">
+                                              +{items.length - 2} more
+                                            </p>
+                                          )}
+                                        </div>
+                                      ) : (
+                                        <p className="text-slate-500">{o.restaurant?.name || '—'}</p>
+                                      )}
+                                    </td>
+                                    <td className="px-4 py-3.5 tabular-nums text-slate-500">
+                                      {formatQueueTime(o.created_at)}
+                                    </td>
+                                    <td className="px-4 py-3.5">
+                                      <span
+                                        className={`block text-[11px] font-black uppercase tracking-wide ${badge.titleClass}`}
+                                      >
+                                        {badge.title}
+                                      </span>
+                                      <span
+                                        className={`mt-1 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-bold ring-1 ring-inset ${badge.pill}`}
+                                      >
+                                        <span className={`h-1.5 w-1.5 rounded-full ${badge.dot}`} />
+                                        {badge.label}
+                                      </span>
+                                    </td>
+                                    <td className="py-3.5 pr-5 text-right">
+                                      <ChevronRight className="inline h-4 w-4 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-emerald-600" />
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </section>
+
+                    {/* ---------- Courier Dispatch Map ---------- */}
+                    <section className={`${CARD} flex h-[620px] flex-col overflow-hidden`}>
+                      <header className="flex flex-wrap items-start justify-between gap-3 px-5 pb-4 pt-5">
+                        <div className="min-w-0">
+                          <h2 className="text-[17px] font-black tracking-tight text-slate-900">
+                            Courier Dispatch Map
+                          </h2>
+                          <p className="mt-0.5 text-xs text-slate-500">
+                            Live interactive map of {mapCity}
+                          </p>
+                        </div>
+                        <p className="text-sm font-black tabular-nums text-slate-700">{nowLabel}</p>
+                      </header>
+                      <div className="min-h-0 flex-1 border-t border-slate-200">
+                        <AdminDispatchMap
+                          couriers={mapCouriers}
+                          kitchens={mapKitchens}
+                          routes={mapRoutes}
+                        />
+                      </div>
+                    </section>
                   </div>
 
-                  <SectionCard
-                    title="Recent platform transactions"
-                    subtitle="The newest orders across every kitchen"
-                    action={
-                      <button
-                        type="button"
-                        onClick={() => handleSelectTab('ORDERS')}
-                        className="inline-flex items-center gap-1.5 rounded-xl bg-slate-100 px-3 py-1.5 text-[11px] font-black text-slate-700 transition hover:bg-emerald-50 hover:text-emerald-700"
-                      >
-                        View all orders
-                        <ArrowRight className="h-3.5 w-3.5" />
-                      </button>
-                    }
-                  >
-                    {orders.length === 0 ? (
-                      <EmptyState
-                        icon={Inbox}
-                        title="No orders recorded yet"
-                        hint="As soon as customers start ordering, the latest transactions will stream in here in realtime."
-                      />
-                    ) : (
-                      <div className="overflow-x-auto">
-                        <table className="w-full min-w-[720px] text-left text-[13px]">
-                          <thead>
-                            <tr className="border-b border-slate-200 text-[10px] text-slate-500">
-                              <th className={TH}>Order number</th>
-                              <th className={TH}>Kitchen</th>
-                              <th className={TH}>Total amount</th>
-                              <th className={TH}>Payment</th>
-                              <th className={TH}>Status</th>
-                              <th className="pb-3 text-right font-black uppercase tracking-wider">
-                                Timestamp
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-100">
-                            {orders.slice(0, 8).map((o) => (
-                              <tr key={o.id} className="transition hover:bg-slate-50/70">
-                                <td className={`${TD} font-black text-slate-900`}>
-                                  #{o.order_number}
-                                </td>
-                                <td className={`${TD} font-medium text-slate-700`}>
-                                  {o.restaurant?.name || 'Kitchen'}
-                                </td>
-                                <td className={`${TD} font-black text-emerald-700 tabular-nums`}>
-                                  {formatGHS(o.total_amount)}
-                                </td>
-                                <td className={`${TD} text-slate-500`}>{o.payment_method}</td>
-                                <td className={TD}>
-                                  <span
-                                    className={`inline-block rounded-md px-2 py-0.5 text-[10px] font-bold ${orderStatusStyle(
-                                      o.status
-                                    )}`}
-                                  >
-                                    {o.status.replace(/_/g, ' ')}
-                                  </span>
-                                </td>
-                                <td className="py-3 text-right text-slate-400">
-                                  {new Date(o.created_at).toLocaleTimeString()}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </SectionCard>
                 </>
               )}
 
