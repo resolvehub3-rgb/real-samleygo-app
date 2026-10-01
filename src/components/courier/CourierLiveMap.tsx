@@ -114,6 +114,94 @@ const bearingDeg = (from: LatLng, to: LatLng): number => {
   return (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360;
 };
 
+/** Only ride the drawn road when the marker is this close to it (≤ ~30 m). */
+const ROUTE_SNAP_KM = 0.03;
+/** …and the road detour this far from the straight chord before we give up on it. */
+const ROUTE_DETOUR_RATIO = 4;
+
+/**
+ * The road-snapped route, flattened into an arc-length track so the marker can
+ * slide *along the street* between GPS fixes instead of cutting a straight
+ * line through the blocks. `cumulative[i]` is the distance from the start of
+ * the route to vertex `i`, in kilometres.
+ */
+interface RouteTrack {
+  lat: number[];
+  lng: number[];
+  cumulative: number[];
+  totalKm: number;
+}
+
+const buildTrack = (coordinates: { lat: number; lng: number }[]): RouteTrack | null => {
+  if (coordinates.length < 2) return null;
+  const lat: number[] = [];
+  const lng: number[] = [];
+  const cumulative: number[] = [0];
+  let totalKm = 0;
+  for (const point of coordinates) {
+    lat.push(point.lat);
+    lng.push(point.lng);
+    if (lat.length > 1) {
+      const previous = { lat: lat[lat.length - 2], lng: lng[lng.length - 2] };
+      totalKm += haversineKm(previous, { lat: point.lat, lng: point.lng });
+      cumulative.push(totalKm);
+    }
+  }
+  return { lat, lng, cumulative, totalKm };
+};
+
+/** The point `sKm` along the track (clamped to its ends). */
+const trackPointAt = (track: RouteTrack, sKm: number): L.LatLng => {
+  const clamped = Math.max(0, Math.min(track.totalKm, sKm));
+  let lo = 0;
+  let hi = track.cumulative.length - 1;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (track.cumulative[mid] <= clamped) lo = mid;
+    else hi = mid;
+  }
+  const span = track.cumulative[hi] - track.cumulative[lo];
+  const k = span > 0 ? (clamped - track.cumulative[lo]) / span : 0;
+  return L.latLng(
+    track.lat[lo] + (track.lat[hi] - track.lat[lo]) * k,
+    track.lng[lo] + (track.lng[hi] - track.lng[lo]) * k
+  );
+};
+
+/**
+ * Where a point falls on the track: how far along it is (`sKm`) and how far it
+ * sits from the road (`perpKm`). Flat-earth metres are fine at this scale.
+ */
+const projectOnTrack = (
+  track: RouteTrack,
+  point: LatLng
+): { sKm: number; perpKm: number } => {
+  const midLat = ((track.lat[0] + point.lat) / 2) * (Math.PI / 180);
+  const mPerDegLat = 111_320;
+  const mPerDegLng = 111_320 * Math.cos(midLat);
+  const px = point.lng * mPerDegLng;
+  const py = point.lat * mPerDegLat;
+
+  let bestSkm = 0;
+  let bestPerpKm = Number.POSITIVE_INFINITY;
+  for (let i = 1; i < track.lat.length; i += 1) {
+    const ax = track.lng[i - 1] * mPerDegLng;
+    const ay = track.lat[i - 1] * mPerDegLat;
+    const dx = track.lng[i] * mPerDegLng - ax;
+    const dy = track.lat[i] * mPerDegLat - ay;
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq > 0 ? ((px - ax) * dx + (py - ay) * dy) / lenSq : 0;
+    t = Math.max(0, Math.min(1, t));
+    const perpKm = Math.hypot(px - (ax + dx * t), py - (ay + dy * t)) / 1000;
+    if (perpKm < bestPerpKm) {
+      const segKm = Math.hypot(dx, dy) / 1000;
+      bestPerpKm = perpKm;
+      bestSkm = track.cumulative[i - 1] + segKm * t;
+    }
+  }
+  return { sKm: bestSkm, perpKm: bestPerpKm };
+};
+
 /**
  * A coordinate is only drawn if it is finite, in range and not "null island"
  * (0,0) — the classic artifact of a column that was never really filled in.
@@ -184,11 +272,13 @@ const REROUTE_MAX_BACKOFF_MS = 120_000;
  * restaurant pickup pin and the customer drop-off pin.
  *
  * - the courier marker rides along at a constant speed derived from the GPS
- *   cadence (requestAnimationFrame), so it keeps moving between pings, points
- *   the way the rider is heading, and the camera follows until the user pans
- *   away (a "Follow" button brings the tracking back)
- * - the active leg is drawn as a road-snapped route (OSRM) that re-routes as
- *   the courier moves, falling back to a straight line whenever routing fails
+ *   cadence (requestAnimationFrame), sliding along the drawn road route so it
+ *   follows the streets instead of cutting straight across them; it keeps
+ *   moving between pings, points the way the rider is heading, and the camera
+ *   follows until the user pans away (a "Follow" button brings it back)
+ * - the active leg is the only line on the map: a road-snapped OSRM route
+ *   that re-routes as the courier moves (on failure the last good line stays
+ *   up and is retried with backoff)
  * - pins missing coordinates are geocoded from their address
  * - every network call is cached, throttled, self-healing and never throws
  *   (stale replies are dropped locally instead of cancelling requests, so a
@@ -211,8 +301,9 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const courierMarkerRef = useRef<L.Marker | null>(null);
   const destinationMarkerRef = useRef<L.Marker | null>(null);
   const pickupMarkerRef = useRef<L.Marker | null>(null);
-  const corridorPolylineRef = useRef<L.Polyline | null>(null);
   const roadPolylineRef = useRef<L.Polyline | null>(null);
+  /** Arc-length view of the drawn road route — the marker rides along this. */
+  const trackRef = useRef<RouteTrack | null>(null);
   /** Secondary restaurant pins, keyed by restaurant id so updates are cheap. */
   const restaurantMarkersRef = useRef<Map<string, L.Marker>>(new Map());
   /** Fit-once guard: pin/courier presence signature the viewport was framed for. */
@@ -236,11 +327,10 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const lastRouteDrawRef = useRef(0);
   /** Camera-follow: on until the user drags/zooms, then off until re-centred. */
   const followRef = useRef(true);
-  /** Fresh drawing closures for the animation loop (set every render). */
-  const drawRefs = useRef<{
-    corridor: (position: L.LatLng | null) => void;
-    route: (position: L.LatLng | null) => void;
-  }>({ corridor: () => {}, route: () => {} });
+  /** Fresh drawing closure for the animation loop (set every render). */
+  const drawRefs = useRef<{ route: (position: L.LatLng | null) => void }>({
+    route: () => {},
+  });
   /** Handlers the (mount-once) map setup needs from the latest render. */
   const actionRefs = useRef<{ setFollow: (on: boolean) => void }>({
     setFollow: () => {},
@@ -378,10 +468,35 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   };
 
   /**
-   * One frame of the ride: creep toward the latest fix at the speed implied by
-   * the previous gap (distance ÷ time), so the marker keeps moving between pings
-   * instead of gliding once and freezing until the next one lands.
+   * One frame of the ride: advance toward the latest fix at the speed implied
+   * by the previous gap (distance ÷ time), **sliding along the drawn road
+   * route** so the rider follows the streets instead of cutting through the
+   * blocks. Falls back to a straight hop when no route has arrived yet or the
+   * fix is nowhere near the road.
    */
+  const stepAlongRoute = (current: L.LatLng, target: L.LatLng, stepKm: number, chordKm: number) => {
+    const track = trackRef.current;
+    if (track) {
+      const from = projectOnTrack(track, current);
+      const to = projectOnTrack(track, target);
+      const sane =
+        from.perpKm < ROUTE_SNAP_KM &&
+        to.perpKm < ROUTE_SNAP_KM &&
+        to.sKm > from.sKm &&
+        to.sKm - from.sKm < Math.max(chordKm, 0.03) * ROUTE_DETOUR_RATIO;
+      if (sane) {
+        const sKm = Math.min(to.sKm, from.sKm + stepKm);
+        if (sKm > from.sKm) return trackPointAt(track, sKm);
+      }
+    }
+
+    const k = chordKm > 0 ? Math.min(1, stepKm / chordKm) : 1;
+    return L.latLng(
+      current.lat + (target.lat - current.lat) * k,
+      current.lng + (target.lng - current.lng) * k
+    );
+  };
+
   const tick = (now: number) => {
     const marker = courierMarkerRef.current;
     const target = targetRef.current;
@@ -395,26 +510,21 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
     const current = currentLatLngRef.current ?? target;
     const remainingKm = haversineKm(current, target);
+    const stepKm = speedRef.current * dt;
 
     // Arrived, no speed, or the screen went off — park on the latest fix.
-    if (document.hidden || speedRef.current <= 0 || speedRef.current * dt >= remainingKm) {
+    if (document.hidden || speedRef.current <= 0 || stepKm >= remainingKm) {
       currentLatLngRef.current = target;
       marker.setLatLng(target);
-      drawRefs.current.corridor(target);
       drawRefs.current.route(target);
       animFrameRef.current = null;
       return;
     }
 
-    const k = (speedRef.current * dt) / remainingKm;
-    const next = L.latLng(
-      current.lat + (target.lat - current.lat) * k,
-      current.lng + (target.lng - current.lng) * k
-    );
+    const next = stepAlongRoute(current, target, stepKm, remainingKm);
 
     currentLatLngRef.current = next;
     marker.setLatLng(next);
-    drawRefs.current.corridor(next);
     // The road route can carry hundreds of points — repaint it on a slow tick.
     if (now - lastRouteDrawRef.current > 200) {
       lastRouteDrawRef.current = now;
@@ -485,15 +595,11 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     const requestId = ++requestIdRef.current;
     attemptRef.current = { courier: courierPosition, target: leg.target, leg: leg.kind, at: now };
 
-    // A stale road line is more misleading than none: after two failed
-    // refreshes drop it and let the straight corridor carry the trip until
-    // routing recovers (the next attempt retries with backoff).
+    // The road line is the only guidance on the map now, so a failed refresh
+    // keeps the last good line for this leg (its origin still snaps to the
+    // rider) and simply retries with backoff instead of blanking the trip.
     const handleFailure = () => {
       failuresRef.current = Math.min(failuresRef.current + 1, 4);
-      if (failuresRef.current >= 2) {
-        setRoadRoute(null);
-        notify(null);
-      }
     };
 
     fetchRoadRoute(courierPosition, leg.target)
@@ -502,7 +608,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         if (!mountedRef.current || requestId !== requestIdRef.current) return;
 
         if (!route) {
-          handleFailure(); // straight-line corridor stays visible; retry with backoff
+          handleFailure(); // keep the last line; the next ping retries with backoff
           return;
         }
 
@@ -581,11 +687,11 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       courierMarkerRef.current = null;
       destinationMarkerRef.current = null;
       pickupMarkerRef.current = null;
-      corridorPolylineRef.current = null;
       roadPolylineRef.current = null;
       restaurantMarkersRef.current.clear(); // map.remove() already dropped the layers
       currentLatLngRef.current = null;
       fitSigRef.current = '';
+      trackRef.current = null;
       // Motion state belongs to the map that was just torn down (StrictMode
       // remounts reuse these refs): force a fresh target, cadence and heading.
       targetRef.current = null;
@@ -659,31 +765,6 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       }
     }
 
-    /** Straight dashed corridor: pickup → courier → destination (always drawn). */
-    const rebuildCorridor = (courierLL: L.LatLng | null) => {
-      const points: L.LatLngExpression[] = [];
-      if (pickupPt) points.push([pickupPt.lat, pickupPt.lng]);
-      if (courierLL) points.push([courierLL.lat, courierLL.lng]);
-      if (destinationPt) points.push([destinationPt.lat, destinationPt.lng]);
-
-      if (points.length >= 2) {
-        if (corridorPolylineRef.current) {
-          corridorPolylineRef.current.setLatLngs(points);
-        } else {
-          corridorPolylineRef.current = L.polyline(points, {
-            color: '#059669',
-            weight: 3,
-            opacity: 0.7,
-            dashArray: '8 8',
-            lineCap: 'round',
-          }).addTo(map);
-        }
-      } else if (corridorPolylineRef.current) {
-        map.removeLayer(corridorPolylineRef.current);
-        corridorPolylineRef.current = null;
-      }
-    };
-
     /** Solid road-snapped route for the leg the rider is actually driving. */
     const drawRoadRoute = (courierLL: L.LatLng | null) => {
       if (!roadRoute || roadRoute.coordinates.length < 2) {
@@ -721,9 +802,11 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       }
     };
 
-    // Hand the drawing helpers to the animation loop — they close over this
-    // run's pins and route, and the effect re-runs whenever those change.
-    drawRefs.current = { corridor: rebuildCorridor, route: drawRoadRoute };
+    // Hand the drawing helper to the animation loop — it closes over this run's
+    // route, and the effect re-runs whenever that changes. The arc-length track
+    // is rebuilt alongside it so the marker slides along the drawn road.
+    drawRefs.current = { route: drawRoadRoute };
+    trackRef.current = roadRoute ? buildTrack(roadRoute.coordinates) : null;
 
     if (courierPosition) {
       const target = L.latLng(courierPosition.lat, courierPosition.lng);
@@ -735,7 +818,6 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           .addTo(map)
           .bindPopup(popupText);
         currentLatLngRef.current = target;
-        rebuildCorridor(target);
         drawRoadRoute(target);
       } else {
         courierMarkerRef.current.setPopupContent(popupText);
@@ -775,7 +857,6 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           stopLoop();
           currentLatLngRef.current = target;
           courierMarkerRef.current.setLatLng(target);
-          rebuildCorridor(target);
           drawRoadRoute(target);
         } else if (distKm > 0) {
           // Normal ping — cover the gap at the speed the rider is actually
@@ -800,9 +881,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
       const at = currentLatLngRef.current ?? target;
 
-      // Re-draw both lines on every run: the road route or the trip pins may
+      // Re-draw the line on every run: the road route or the trip pins may
       // have changed even when the GPS fix didn't.
-      rebuildCorridor(at);
       drawRoadRoute(at);
       lastRouteDrawRef.current = performance.now();
 
@@ -811,12 +891,11 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         aimAtLeg(courierMarkerRef.current, target, leg);
       }
     } else {
-      // No courier fix yet — still show pickup → destination corridor
+      // No courier fix yet — no rider, so there is no leg to route
       stopLoop();
       targetRef.current = null;
       lastFixAtRef.current = 0;
       speedRef.current = 0;
-      rebuildCorridor(null);
       drawRoadRoute(null);
     }
 
