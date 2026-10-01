@@ -419,22 +419,25 @@ interface OpsStatCardProps {
  * numbers have to be readable in a single glance.
  */
 const OpsStatCard: React.FC<OpsStatCardProps> = ({ label, value, icon: Icon, hint, onClick }) => {
-
   const body = (
     <>
-      <span className="block min-w-0">
-        <span className="block truncate text-sm font-bold text-slate-600">{label}</span>
-        <span className="mt-2 block text-3xl font-black tabular-nums tracking-tight text-slate-900">
-          {value}
+      {/* Row 1: label left, round teal icon right — like the mockup. */}
+      <span className="flex w-full items-center justify-between gap-3">
+        <span className="min-w-0 text-xs font-bold leading-snug text-slate-600 sm:text-sm">{label}</span>
+        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-teal-50 text-teal-600 ring-1 ring-teal-500/15 transition duration-200 group-hover:scale-110">
+          <Icon className="h-5 w-5" />
         </span>
       </span>
-      <span className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-teal-50 text-teal-600 ring-1 ring-teal-500/15 transition duration-200 group-hover:scale-110">
-        <Icon className="h-5 w-5" />
+      {/* Row 2: the value spans the full card width. The font scales with the
+          card (container query) so four KPIs still fit one row on ~1024px
+          screens instead of breaking the mockup's single-line numbers. */}
+      <span className="block text-[clamp(18px,10.5cqw,30px)] font-black leading-none tabular-nums tracking-tight text-slate-900">
+        {value}
       </span>
     </>
   );
 
-  const baseClass = `group flex w-full items-start justify-between gap-3 overflow-hidden p-5 text-left ${CARD} transition duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60`;
+  const baseClass = `group @container flex w-full flex-col gap-3 overflow-hidden p-4 text-left xl:p-5 ${CARD} transition duration-200 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-slate-900/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60`;
 
   // Interactive cards are real buttons so keyboard and screen-reader users get
   // the same shortcut as mouse users.
@@ -460,7 +463,7 @@ const SkeletonBlock: React.FC<{ className?: string }> = ({ className = '' }) => 
 /** Shown while the first dashboard query round-trip is still in flight. */
 const DashboardSkeleton = () => (
   <div className="space-y-6" role="status" aria-label="Loading dashboard data">
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
       {[0, 1, 2, 3].map((i) => (
         <div key={i} className={`${CARD} space-y-3 p-5`}>
           <SkeletonBlock className="h-3 w-24" />
@@ -1372,7 +1375,7 @@ export const AdminDashboard: React.FC = () => {
               {activeTab === 'OVERVIEW' && (
                 <>
                   {/* ===== KPI row ===== */}
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
                     <OpsStatCard
                       label="Today's Earnings"
                       value={formatGHS(todayEarnings)}
@@ -1415,9 +1418,9 @@ export const AdminDashboard: React.FC = () => {
                   </div>
 
                   {/* ===== Live kitchen queue + courier dispatch map ===== */}
-                  <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
                     {/* ---------- Live Kitchen Order Queue ---------- */}
-                    <section className={`${CARD} flex h-[620px] flex-col overflow-hidden`}>
+                    <section className={`${CARD} flex h-[620px] min-w-0 flex-col overflow-hidden`}>
                       <header className="flex flex-wrap items-start justify-between gap-3 px-5 pb-4 pt-5">
                         <div className="min-w-0">
                           <h2 className="text-[17px] font-black tracking-tight text-slate-900">
@@ -1475,7 +1478,7 @@ export const AdminDashboard: React.FC = () => {
                         />
                       ) : (
                         <div className="max-h-[560px] flex-1 overflow-auto border-t border-slate-200">
-                          <table className="w-full text-left text-[13px]">
+                          <table className="w-full min-w-[460px] text-left text-[13px]">
                             <thead>
                               <tr className="text-[10px] font-black uppercase tracking-wider text-slate-500">
                                 <th className="sticky top-0 z-10 bg-white px-5 py-3">Order ID</th>
@@ -1573,7 +1576,7 @@ export const AdminDashboard: React.FC = () => {
                     </section>
 
                     {/* ---------- Courier Dispatch Map ---------- */}
-                    <section className={`${CARD} flex h-[620px] flex-col overflow-hidden`}>
+                    <section className={`${CARD} flex h-[620px] min-w-0 flex-col overflow-hidden`}>
                       <header className="flex flex-wrap items-start justify-between gap-3 px-5 pb-4 pt-5">
                         <div className="min-w-0">
                           <h2 className="text-[17px] font-black tracking-tight text-slate-900">
