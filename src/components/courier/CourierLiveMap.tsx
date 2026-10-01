@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { LocateFixed } from 'lucide-react';
 import {
   fetchRoadRoute,
   geocodeAddress,
@@ -64,25 +65,54 @@ interface CourierLiveMapProps {
 }
 
 // Small inline SVG pin icons so we don't depend on Leaflet's image assets
-const makeIcon = (emoji: string, bg: string, size = 34) =>
+const makeIcon = (emoji: string, bg: string, size = 34, halo = false) =>
   L.divIcon({
     className: '',
-    html: `<div style="
+    // The halo is a pulsing "live position" ring behind the courier pin (the
+    // round part of the teardrop sits in the middle of the box, so a centred
+    // circle lines up with it). It comes first so it paints underneath.
+    html: `${halo ? '<div class="sg-courier-halo"></div>' : ''}<div class="sg-pin" style="
       display:flex;align-items:center;justify-content:center;
       width:${size}px;height:${size}px;border-radius:50% 50% 50% 0;
       transform:rotate(-45deg);
+      transition:transform .5s cubic-bezier(.22,1,.36,1);
       background:${bg};box-shadow:0 2px 8px rgba(0,0,0,.35);
       border:2px solid white;">
-      <span style="transform:rotate(45deg);font-size:${Math.round(size * 0.44)}px;line-height:1;">${emoji}</span>
+      <span class="sg-pin-emoji" style="transform:rotate(45deg);transition:transform .5s cubic-bezier(.22,1,.36,1);font-size:${Math.round(size * 0.44)}px;line-height:1;">${emoji}</span>
     </div>`,
     iconSize: [size, size],
     iconAnchor: [size / 2, size - 2],
   });
 
-const courierIcon = makeIcon('🛵', '#059669'); // emerald-600
+const courierIcon = makeIcon('🛵', '#059669', 34, true); // emerald-600
 const destinationIcon = makeIcon('🏠', '#0f172a'); // slate-900
 const pickupIcon = makeIcon('🍳', '#f59e0b'); // amber-500
 const restaurantIcon = makeIcon('🏪', '#475569', 26); // slate-600, deliberately smaller
+
+/**
+ * The pin's tip points straight down at rotation -45°, i.e. due south (180°).
+ * Rotating by `heading - 225` puts the tip on `heading` (degrees clockwise
+ * from north) — so the marker aims the way the rider is actually driving,
+ * like a navigation arrow. The emoji counter-rotates to stay upright.
+ */
+const applyHeading = (marker: L.Marker | null, headingDeg: number) => {
+  const root = marker?.getElement() as HTMLElement | undefined;
+  const pin = root?.querySelector('.sg-pin') as HTMLElement | null;
+  if (!pin) return;
+  pin.style.transform = `rotate(${headingDeg - 225}deg)`;
+  const emoji = pin.querySelector('.sg-pin-emoji') as HTMLElement | null;
+  if (emoji) emoji.style.transform = `rotate(${225 - headingDeg}deg)`;
+};
+
+/** Initial bearing (degrees clockwise from north) from one point to another. */
+const bearingDeg = (from: LatLng, to: LatLng): number => {
+  const lat1 = (from.lat * Math.PI) / 180;
+  const lat2 = (to.lat * Math.PI) / 180;
+  const dLng = ((to.lng - from.lng) * Math.PI) / 180;
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360;
+};
 
 /**
  * A coordinate is only drawn if it is finite, in range and not "null island"
@@ -111,6 +141,38 @@ const GEOCODE_RETRY_MS = 65_000;
 
 /** Jumps larger than this snap instantly instead of animating (fresh fix / courier reassignment). */
 const SNAP_THRESHOLD_KM = 1.5;
+/**
+ * Expected time between two GPS fixes. The courier publishes roughly every
+ * 10 s, so the marker rides the gap between fixes over this window instead of
+ * gliding for a fixed duration and then freezing — the motion stays constant.
+ */
+const DEFAULT_TRAVEL_MS = 10_000;
+const MIN_TRAVEL_MS = 1_200;
+const MAX_TRAVEL_MS = 15_000;
+/** Below this much movement the pin keeps its current heading (GPS jitter). */
+const HEADING_MIN_KM = 0.02;
+/** Two fixes closer than this are the same fix re-sent by a re-render. */
+const SAME_FIX_EPS = 1e-7;
+/**
+ * The camera follows the rider until he drifts into the outer quarter of the
+ * frame (then it re-centres over the next ping). Keeping a comfortable margin
+ * means the trip pins stay on screen as long as possible — the same rule a
+ * blue-dot navigator uses.
+ */
+const OUTSIDE_FOLLOW_ZONE = 0.25;
+
+const outsideFollowZone = (map: L.Map, point: L.LatLng): boolean => {
+  const size = map.getSize();
+  const pt = map.latLngToContainerPoint(point);
+  const marginX = size.x * OUTSIDE_FOLLOW_ZONE;
+  const marginY = size.y * OUTSIDE_FOLLOW_ZONE;
+  return (
+    pt.x < marginX ||
+    pt.x > size.x - marginX ||
+    pt.y < marginY ||
+    pt.y > size.y - marginY
+  );
+};
 /** Re-route when the rider has drifted this far from the road route's origin. */
 const REROUTE_DISTANCE_KM = 0.08;
 /** …or when this much time passed since the last attempt (with exponential backoff on failure). */
@@ -121,7 +183,10 @@ const REROUTE_MAX_BACKOFF_MS = 120_000;
  * Live delivery map showing the courier's real-time position together with the
  * restaurant pickup pin and the customer drop-off pin.
  *
- * - the courier marker glides between GPS pings (requestAnimationFrame)
+ * - the courier marker rides along at a constant speed derived from the GPS
+ *   cadence (requestAnimationFrame), so it keeps moving between pings, points
+ *   the way the rider is heading, and the camera follows until the user pans
+ *   away (a "Follow" button brings the tracking back)
  * - the active leg is drawn as a road-snapped route (OSRM) that re-routes as
  *   the courier moves, falling back to a straight line whenever routing fails
  * - pins missing coordinates are geocoded from their address
@@ -156,6 +221,31 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const currentLatLngRef = useRef<L.LatLng | null>(null);
   const animFrameRef = useRef<number | null>(null);
 
+  // ── Continuous motion state (the "live navigation" feel) ──────────────
+  /** Latest GPS fix — the animation loop always steers toward this. */
+  const targetRef = useRef<L.LatLng | null>(null);
+  /** Wall-clock time of the previous fix; the gap sets the travel speed. */
+  const lastFixAtRef = useRef(0);
+  /** Marker speed in km/ms, derived from (gap distance ÷ gap time). */
+  const speedRef = useRef(0);
+  /** Timestamp of the previous animation frame (for dt). */
+  const lastFrameRef = useRef(0);
+  /** Degrees clockwise from north the pin tip points (180 = due south). */
+  const headingRef = useRef(180);
+  /** Throttle for re-drawing the (much heavier) road polyline while riding. */
+  const lastRouteDrawRef = useRef(0);
+  /** Camera-follow: on until the user drags/zooms, then off until re-centred. */
+  const followRef = useRef(true);
+  /** Fresh drawing closures for the animation loop (set every render). */
+  const drawRefs = useRef<{
+    corridor: (position: L.LatLng | null) => void;
+    route: (position: L.LatLng | null) => void;
+  }>({ corridor: () => {}, route: () => {} });
+  /** Handlers the (mount-once) map setup needs from the latest render. */
+  const actionRefs = useRef<{ setFollow: (on: boolean) => void }>({
+    setFollow: () => {},
+  });
+
   const mountedRef = useRef(true);
   const attemptRef = useRef<{ courier: LatLng; target: LatLng; leg: RouteLeg; at: number } | null>(null);
   const failuresRef = useRef(0);
@@ -167,6 +257,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const [resolvedPickup, setResolvedPickup] = useState<LatLng | null>(null);
   const [resolvedDestination, setResolvedDestination] = useState<LatLng | null>(null);
   const [roadRoute, setRoadRoute] = useState<(RoadRoute & { leg: RouteLeg }) | null>(null);
+  /** Camera-follow UI: false once the user drags/zooms away from the rider. */
+  const [following, setFollowing] = useState(true);
 
   // Always call the newest callback without re-running effects that depend on it.
   useEffect(() => {
@@ -264,6 +356,95 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
   const legKind: RouteLeg | null = leg?.kind ?? null;
   const targetKey = leg ? `${round5(leg.target.lat)},${round5(leg.target.lng)}` : '';
+
+  // ── Motion engine: constant-speed ride + camera follow ────────────────
+  const stopLoop = () => {
+    if (animFrameRef.current !== null) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+  };
+
+  const setHeading = (degrees: number) => {
+    const normalized = ((Math.round(degrees) % 360) + 360) % 360;
+    if (normalized === headingRef.current) return;
+    headingRef.current = normalized;
+    applyHeading(courierMarkerRef.current, normalized);
+  };
+
+  /** While parked, point the pin at the stop the rider is driving to. */
+  const aimAtLeg = (marker: L.Marker, from: LatLng, currentLeg: { target: LatLng } | null) => {
+    setHeading(currentLeg ? bearingDeg(from, currentLeg.target) : 180);
+  };
+
+  /**
+   * One frame of the ride: creep toward the latest fix at the speed implied by
+   * the previous gap (distance ÷ time), so the marker keeps moving between pings
+   * instead of gliding once and freezing until the next one lands.
+   */
+  const tick = (now: number) => {
+    const marker = courierMarkerRef.current;
+    const target = targetRef.current;
+    if (!mapRef.current || !marker || !target) {
+      animFrameRef.current = null;
+      return;
+    }
+
+    const dt = lastFrameRef.current ? Math.min(80, now - lastFrameRef.current) : 16;
+    lastFrameRef.current = now;
+
+    const current = currentLatLngRef.current ?? target;
+    const remainingKm = haversineKm(current, target);
+
+    // Arrived, no speed, or the screen went off — park on the latest fix.
+    if (document.hidden || speedRef.current <= 0 || speedRef.current * dt >= remainingKm) {
+      currentLatLngRef.current = target;
+      marker.setLatLng(target);
+      drawRefs.current.corridor(target);
+      drawRefs.current.route(target);
+      animFrameRef.current = null;
+      return;
+    }
+
+    const k = (speedRef.current * dt) / remainingKm;
+    const next = L.latLng(
+      current.lat + (target.lat - current.lat) * k,
+      current.lng + (target.lng - current.lng) * k
+    );
+
+    currentLatLngRef.current = next;
+    marker.setLatLng(next);
+    drawRefs.current.corridor(next);
+    // The road route can carry hundreds of points — repaint it on a slow tick.
+    if (now - lastRouteDrawRef.current > 200) {
+      lastRouteDrawRef.current = now;
+      drawRefs.current.route(next);
+    }
+    if (remainingKm > HEADING_MIN_KM) setHeading(bearingDeg(current, next));
+
+    animFrameRef.current = requestAnimationFrame(tick);
+  };
+
+  const ensureLoop = () => {
+    if (animFrameRef.current !== null || document.hidden) return;
+    lastFrameRef.current = 0;
+    animFrameRef.current = requestAnimationFrame(tick);
+  };
+
+  /** Follow the rider until the user drags/zooms; the button brings it back. */
+  const setFollow = (on: boolean) => {
+    followRef.current = on;
+    setFollowing(on);
+    if (!on) return;
+    const map = mapRef.current;
+    const at = currentLatLngRef.current ?? targetRef.current;
+    if (map && at) map.panTo(at, { animate: true, duration: 0.7, easeLinearity: 0.25 });
+  };
+
+  // The map is created once, so keep its handlers pointed at the newest closure.
+  useEffect(() => {
+    actionRefs.current.setFollow = setFollow;
+  });
 
   // ── Live road route (throttled, failure-tolerant, never throws) ───────
   useEffect(() => {
@@ -364,6 +545,17 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     map.on('click', () => map.scrollWheelZoom.enable());
     map.on('mouseout', () => map.scrollWheelZoom.disable());
 
+    // The camera follows the rider by default. The moment the user drags the
+    // map or zooms with the wheel/pinch they take control — following pauses
+    // and a "Follow" button appears. Programmatic pans/fits (and the zoom
+    // buttons, which carry no original event) keep following.
+    map.on('dragstart', () => actionRefs.current.setFollow(false));
+    map.on('zoomstart', (event: L.LeafletEvent) => {
+      // Only a user-driven zoom (wheel / pinch / keyboard) carries an event.
+      const original = (event as L.LeafletEvent & { originalEvent?: Event }).originalEvent;
+      if (original) actionRefs.current.setFollow(false);
+    });
+
     const invalidateTimer = setTimeout(() => {
       map.invalidateSize();
     }, 150);
@@ -394,6 +586,13 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       restaurantMarkersRef.current.clear(); // map.remove() already dropped the layers
       currentLatLngRef.current = null;
       fitSigRef.current = '';
+      // Motion state belongs to the map that was just torn down (StrictMode
+      // remounts reuse these refs): force a fresh target, cadence and heading.
+      targetRef.current = null;
+      lastFixAtRef.current = 0;
+      speedRef.current = 0;
+      headingRef.current = -1;
+      lastRouteDrawRef.current = 0;
     };
   }, []);
 
@@ -401,12 +600,6 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
-    // Cancel any in-flight glide — a new effect run supersedes it
-    if (animFrameRef.current !== null) {
-      cancelAnimationFrame(animFrameRef.current);
-      animFrameRef.current = null;
-    }
 
     // Destination pin (created once, then kept in sync with its coordinates)
     if (destinationPt) {
@@ -528,69 +721,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       }
     };
 
-    /** Glide the marker from its current position to the target. */
-    const animateTo = (target: L.LatLng) => {
-      const marker = courierMarkerRef.current;
-      const start = currentLatLngRef.current ?? target;
-      if (!marker) return;
-
-      if (animFrameRef.current !== null) {
-        cancelAnimationFrame(animFrameRef.current);
-        animFrameRef.current = null;
-      }
-
-      const distKm = haversineKm(
-        { lat: start.lat, lng: start.lng },
-        { lat: target.lat, lng: target.lng }
-      );
-
-      if (document.hidden) {
-        // requestAnimationFrame is paused while the tab is hidden, so a glide
-        // would never advance — place the marker on the new fix directly.
-        currentLatLngRef.current = target;
-        marker.setLatLng(target);
-        rebuildCorridor(target);
-        drawRoadRoute(target);
-        return;
-      }
-
-      // ~0.3s per km of travel, clamped to a natural-feeling window
-      const durationMs = Math.min(1800, Math.max(600, distKm * 3000));
-      const startMs = performance.now();
-
-      const step = (now: number) => {
-        const t = Math.min(1, (now - startMs) / durationMs);
-        const lat = start.lat + (target.lat - start.lat) * t;
-        const lng = start.lng + (target.lng - start.lng) * t;
-        const frameLL = L.latLng(lat, lng);
-
-        currentLatLngRef.current = frameLL;
-        marker.setLatLng(frameLL);
-        rebuildCorridor(frameLL);
-        drawRoadRoute(frameLL);
-
-        if (t >= 1) {
-          animFrameRef.current = null;
-          return;
-        }
-        if (document.hidden) {
-          // Screen went off mid-glide: finish at the target now so the marker
-          // is already correct when the customer looks again.
-          currentLatLngRef.current = target;
-          marker.setLatLng(target);
-          rebuildCorridor(target);
-          drawRoadRoute(target);
-          animFrameRef.current = null;
-          return;
-        }
-        animFrameRef.current = requestAnimationFrame(step);
-      };
-      animFrameRef.current = requestAnimationFrame(step);
-    };
+    // Hand the drawing helpers to the animation loop — they close over this
+    // run's pins and route, and the effect re-runs whenever those change.
+    drawRefs.current = { corridor: rebuildCorridor, route: drawRoadRoute };
 
     if (courierPosition) {
       const target = L.latLng(courierPosition.lat, courierPosition.lng);
-      const start = currentLatLngRef.current;
       const popupText = courierName ? `${courierName} is here` : 'Your courier is here';
 
       if (!courierMarkerRef.current) {
@@ -603,28 +739,83 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         drawRoadRoute(target);
       } else {
         courierMarkerRef.current.setPopupContent(popupText);
+      }
 
-        const distKm = start
-          ? haversineKm({ lat: start.lat, lng: start.lng }, { lat: target.lat, lng: target.lng })
+      // Consumers rebuild `courierPosition` as a fresh literal on every
+      // render, so only an actual coordinate change restarts the ride.
+      const previous = targetRef.current;
+      const isNewFix =
+        !previous ||
+        Math.abs(previous.lat - target.lat) > SAME_FIX_EPS ||
+        Math.abs(previous.lng - target.lng) > SAME_FIX_EPS;
+
+      if (isNewFix) {
+        const now = Date.now();
+        const gapMs = lastFixAtRef.current
+          ? Math.min(MAX_TRAVEL_MS, Math.max(MIN_TRAVEL_MS, now - lastFixAtRef.current))
+          : DEFAULT_TRAVEL_MS;
+        lastFixAtRef.current = now;
+        targetRef.current = target;
+
+        const animatedFrom = currentLatLngRef.current;
+        const distKm = animatedFrom
+          ? haversineKm(
+              { lat: animatedFrom.lat, lng: animatedFrom.lng },
+              { lat: target.lat, lng: target.lng }
+            )
           : Number.POSITIVE_INFINITY;
 
-        if (!start || distKm > SNAP_THRESHOLD_KM || document.hidden) {
+        if (!animatedFrom || distKm > SNAP_THRESHOLD_KM || document.hidden) {
           // Huge jump (page refresh, courier reassignment, stale fix) — snap.
-          // A hidden tab also snaps instead of gliding: requestAnimationFrame
+          // A hidden tab also snaps instead of riding: requestAnimationFrame
           // callbacks are paused while the screen is off / the app is
-          // backgrounded, so a glide started here would leave the marker stuck
+          // backgrounded, so a ride started here would leave the marker stuck
           // on an old coordinate until the customer came back.
+          speedRef.current = 0;
+          stopLoop();
           currentLatLngRef.current = target;
           courierMarkerRef.current.setLatLng(target);
           rebuildCorridor(target);
           drawRoadRoute(target);
-        } else {
-          // Normal ping — glide smoothly (keeps both polylines tracking the rider)
-          animateTo(target);
+        } else if (distKm > 0) {
+          // Normal ping — cover the gap at the speed the rider is actually
+          // moving (gap distance ÷ gap time), so the marker glides along
+          // continuously and lands on the fix as the next one is due.
+          speedRef.current = distKm / gapMs;
+          ensureLoop();
         }
+
+        // Camera: re-centre when the rider drifts into the outer band of the
+        // frame (unless the user took over by dragging/zooming). The pan runs
+        // over the same window as the marker, so camera and pin travel
+        // together instead of snapping.
+        if (followRef.current && outsideFollowZone(map, target)) {
+          map.panTo(target, {
+            animate: true,
+            duration: Math.min(6, Math.max(0.6, gapMs / 1000)),
+            easeLinearity: 0.25,
+          });
+        }
+      }
+
+      const at = currentLatLngRef.current ?? target;
+
+      // Re-draw both lines on every run: the road route or the trip pins may
+      // have changed even when the GPS fix didn't.
+      rebuildCorridor(at);
+      drawRoadRoute(at);
+      lastRouteDrawRef.current = performance.now();
+
+      // Stationary (or just snapped): aim the pin down the leg he's driving.
+      if (speedRef.current === 0 && courierMarkerRef.current) {
+        aimAtLeg(courierMarkerRef.current, target, leg);
       }
     } else {
       // No courier fix yet — still show pickup → destination corridor
+      stopLoop();
+      targetRef.current = null;
+      lastFixAtRef.current = 0;
+      speedRef.current = 0;
       rebuildCorridor(null);
       drawRoadRoute(null);
     }
@@ -657,7 +848,19 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   return (
     <div
       ref={containerRef}
-      className={`w-full ${className} rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 z-0`}
-    />
+      className={`relative w-full ${className} rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 z-0`}
+    >
+      {/* Camera-follow: shown only after the user drags/zooms away from the rider */}
+      {courierPosition && !following && (
+        <button
+          type="button"
+          onClick={() => setFollow(true)}
+          className="absolute right-2 bottom-6 z-[1000] flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white/95 px-3 py-1.5 text-[11px] font-black uppercase tracking-wide text-emerald-700 shadow-md transition active:scale-95 hover:bg-emerald-50"
+        >
+          <LocateFixed className="w-3.5 h-3.5" />
+          Follow
+        </button>
+      )}
+    </div>
   );
 };

@@ -42,6 +42,33 @@
   .animate-blob {
     animation: none !important;
   }
+  .sg-courier-halo {
+    animation: none !important;
+    opacity: 0;
+  }
+}
+
+/* Live map: pulsing "real-time position" ring behind the courier pin. */
+.sg-courier-halo {
+  position: absolute;
+  inset: -9px;
+  border-radius: 50%;
+  background: rgba(5, 150, 105, 0.45);
+  animation: sg-courier-pulse 2.4s ease-out infinite;
+}
+@keyframes sg-courier-pulse {
+  0% {
+    transform: scale(0.55);
+    opacity: 0.9;
+  }
+  70% {
+    transform: scale(1);
+    opacity: 0.2;
+  }
+  100% {
+    transform: scale(1.3);
+    opacity: 0;
+  }
 }
 
 /* iOS Safe Area Padding */
