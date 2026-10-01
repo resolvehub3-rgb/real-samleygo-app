@@ -543,6 +543,17 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         { lat: start.lat, lng: start.lng },
         { lat: target.lat, lng: target.lng }
       );
+
+      if (document.hidden) {
+        // requestAnimationFrame is paused while the tab is hidden, so a glide
+        // would never advance — place the marker on the new fix directly.
+        currentLatLngRef.current = target;
+        marker.setLatLng(target);
+        rebuildCorridor(target);
+        drawRoadRoute(target);
+        return;
+      }
+
       // ~0.3s per km of travel, clamped to a natural-feeling window
       const durationMs = Math.min(1800, Math.max(600, distKm * 3000));
       const startMs = performance.now();
@@ -558,7 +569,21 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         rebuildCorridor(frameLL);
         drawRoadRoute(frameLL);
 
-        animFrameRef.current = t < 1 ? requestAnimationFrame(step) : null;
+        if (t >= 1) {
+          animFrameRef.current = null;
+          return;
+        }
+        if (document.hidden) {
+          // Screen went off mid-glide: finish at the target now so the marker
+          // is already correct when the customer looks again.
+          currentLatLngRef.current = target;
+          marker.setLatLng(target);
+          rebuildCorridor(target);
+          drawRoadRoute(target);
+          animFrameRef.current = null;
+          return;
+        }
+        animFrameRef.current = requestAnimationFrame(step);
       };
       animFrameRef.current = requestAnimationFrame(step);
     };
@@ -583,8 +608,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           ? haversineKm({ lat: start.lat, lng: start.lng }, { lat: target.lat, lng: target.lng })
           : Number.POSITIVE_INFINITY;
 
-        if (!start || distKm > SNAP_THRESHOLD_KM) {
-          // Huge jump (page refresh, courier reassignment, stale fix) — snap
+        if (!start || distKm > SNAP_THRESHOLD_KM || document.hidden) {
+          // Huge jump (page refresh, courier reassignment, stale fix) — snap.
+          // A hidden tab also snaps instead of gliding: requestAnimationFrame
+          // callbacks are paused while the screen is off / the app is
+          // backgrounded, so a glide started here would leave the marker stuck
+          // on an old coordinate until the customer came back.
           currentLatLngRef.current = target;
           courierMarkerRef.current.setLatLng(target);
           rebuildCorridor(target);

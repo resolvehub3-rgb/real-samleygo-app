@@ -31,6 +31,7 @@ import {
   maskLicenseNumber,
 } from '../../lib/verification';
 import { watchPositionSafe, GeoError, describeGeoError } from '../../lib/geolocation';
+import { keepScreenAwake } from '../../lib/wakeLock';
 import { usePlaceLabel } from '../../hooks/usePlaceLabel';
 import { CourierLiveMap, MapRestaurantPin } from '../../components/courier/CourierLiveMap';
 import { UserAvatar } from '../../components/common/UserAvatar';
@@ -72,6 +73,7 @@ export const CourierDashboard: React.FC = () => {
   // Holds the geolocation watcher's cleanup function (typed as number for ref compatibility)
   const watchIdRef = useRef<number | null>(null);
   const lastWriteTimeRef = useRef<number>(0);
+  const releaseWakeLockRef = useRef<(() => void) | null>(null);
   // Mirror of activeDelivery so the GPS watcher (a long-lived closure) always
   // breadcrumb-logs for the CURRENT delivery, not the one from when tracking began.
   const activeDeliveryRef = useRef<Order | null>(null);
@@ -404,6 +406,12 @@ export const CourierDashboard: React.FC = () => {
     setGpsActive(true);
     setLocationStatus('Acquiring GPS lock...');
 
+    // Keep the screen on for the trip: with the phone pocketed or locked, the
+    // browser stops firing watchPosition callbacks and the live maps freeze.
+    if (!releaseWakeLockRef.current) {
+      releaseWakeLockRef.current = keepScreenAwake();
+    }
+
     const stopFn = watchPositionSafe(
       async (point) => {
         const { lat, lng } = point;
@@ -416,8 +424,10 @@ export const CourierDashboard: React.FC = () => {
           lastWriteTimeRef.current = now;
 
           try {
-            // Update courier coordinates (this is what moves the maps)
-            await supabase
+            // Update courier coordinates (this is what moves the maps).
+            // supabase-js resolves with { error } instead of throwing, so the
+            // failure has to be read explicitly or it vanishes silently.
+            const { error: coordError } = await supabase
               .from('couriers')
               .update({
                 current_latitude: lat,
@@ -426,19 +436,26 @@ export const CourierDashboard: React.FC = () => {
                 last_seen_at: new Date().toISOString(),
               })
               .eq('id', user.id);
+            if (coordError) {
+              console.warn('[GPS] courier coordinate write failed:', coordError.message);
+            }
 
             // If currently delivering an order, log breadcrumb to delivery_locations
             // (ref keeps this current — the watcher closure would be stale)
             if (activeDeliveryRef.current) {
-              await supabase.from('delivery_locations').insert({
+              const { error: breadcrumbError } = await supabase.from('delivery_locations').insert({
                 order_id: activeDeliveryRef.current.id,
                 courier_id: user.id,
                 latitude: lat,
                 longitude: lng,
               });
+              if (breadcrumbError) {
+                console.warn('[GPS] delivery breadcrumb write failed:', breadcrumbError.message);
+              }
             }
-          } catch {
-            // Location write failed — keep watching, retry on next tick
+          } catch (err) {
+            // Network failure — keep watching, retry on next tick
+            console.warn('[GPS] location write threw:', err instanceof Error ? err.message : err);
           }
         }
       },
@@ -460,6 +477,10 @@ export const CourierDashboard: React.FC = () => {
       // watchIdRef actually stores the watcher's cleanup function
       (watchIdRef.current as unknown as () => void)();
       watchIdRef.current = null;
+    }
+    if (releaseWakeLockRef.current) {
+      releaseWakeLockRef.current();
+      releaseWakeLockRef.current = null;
     }
     setGpsActive(false);
     setLocationStatus('GPS Offline');
@@ -502,12 +523,16 @@ export const CourierDashboard: React.FC = () => {
     try {
       const updates: { status: string; estimated_delivery_time?: string } = { status };
 
-      await supabase
+      const { error: statusError } = await supabase
         .from('orders')
         .update(updates)
         .eq('id', activeDelivery.id);
+      if (statusError) {
+        console.warn('[Delivery] status update failed:', statusError.message);
+        return;
+      }
 
-      await supabase.from('order_status_history').insert({
+      const { error: historyError } = await supabase.from('order_status_history').insert({
         order_id: activeDelivery.id,
         status,
         note:
@@ -518,6 +543,9 @@ export const CourierDashboard: React.FC = () => {
             : 'Delivery completed successfully.',
         changed_by: user.id,
       });
+      if (historyError) {
+        console.warn('[Delivery] status history write failed:', historyError.message);
+      }
 
       // If delivered, increment courier completed count
       if (status === 'DELIVERED') {
@@ -530,9 +558,14 @@ export const CourierDashboard: React.FC = () => {
           .eq('id', user.id);
       }
 
+      // The customer's map must show the courier moving from the moment of the
+      // transition: drop the 10 s write throttle so the very next GPS fix is
+      // published immediately instead of waiting out the gap.
+      lastWriteTimeRef.current = 0;
+
       fetchCourierData();
-    } catch {
-      // Handled
+    } catch (err) {
+      console.warn('[Delivery] status update threw:', err instanceof Error ? err.message : err);
     }
   };
 

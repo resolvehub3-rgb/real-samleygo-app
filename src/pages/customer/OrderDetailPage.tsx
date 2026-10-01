@@ -64,8 +64,6 @@ export const OrderDetailPage: React.FC = () => {
     title: string;
     message: string;
   } | null>(null);
-  // Mirrors the assigned courier id so the realtime channel filter can use it
-  const courierIdRef = useRef<string | null>(null);
   const prevStatusRef = useRef<string | null>(null);
 
   // Review state
@@ -129,7 +127,6 @@ export const OrderDetailPage: React.FC = () => {
 
         if (cData) {
           setCourierDetails(cData as unknown as Courier);
-          courierIdRef.current = (cData as { id?: string }).id ?? null;
         }
 
         // Fetch latest courier GPS location for this order
@@ -248,33 +245,6 @@ export const OrderDetailPage: React.FC = () => {
         },
         (payload) => {
           setLastLocation(payload.new as DeliveryLocation);
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'couriers',
-          // Live courier GPS pings: filtered to this order's courier once known.
-          // courierIdRef is updated by fetchOrderDetails when the assignment loads.
-          filter: `id=eq.${courierIdRef.current ?? '00000000-0000-0000-0000-000000000000'}`,
-        },
-        (payload) => {
-          // Live courier GPS ping from the couriers row — moves the map marker
-          // even when no delivery breadcrumb has been written yet.
-          const next = payload.new as {
-            current_latitude?: number | null;
-            current_longitude?: number | null;
-            current_location_updated_at?: string;
-          };
-          if (next.current_latitude != null && next.current_longitude != null) {
-            setCourierDetails((prev) =>
-              prev
-                ? ({ ...prev, ...next } as Courier)
-                : ({ current_latitude: next.current_latitude, current_longitude: next.current_longitude } as unknown as Courier)
-            );
-          }
         }
       )
       .subscribe();
@@ -449,8 +419,20 @@ export const OrderDetailPage: React.FC = () => {
       }
     };
 
-    const timer = window.setInterval(refresh, 30_000);
-    return () => window.clearInterval(timer);
+    // Safety net behind the realtime channels: 15 s while the courier is
+    // moving, plus an instant refresh the moment the customer comes back to
+    // the tab (a phone that was locked during the trip otherwise keeps a stale
+    // marker until the next tick).
+    const timer = window.setInterval(refresh, 15_000);
+    const onVisible = () => {
+      if (!document.hidden) void refresh();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    void refresh();
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [pollCourierId, pollStatus, id]);
 
   const handleSubmitReview = async (e: React.FormEvent) => {
@@ -558,6 +540,18 @@ export const OrderDetailPage: React.FC = () => {
 
   const isDelivered = ['DELIVERED', 'COMPLETED'].includes(order.status);
   const isCancelled = ['CANCELLED', 'REJECTED', 'FAILED'].includes(order.status);
+
+  // "Updated …" reports the freshest GPS the page has seen — whichever of the
+  // two live sources (the couriers row ping or the delivery_locations
+  // breadcrumb) is newer — so the label never lies about a moving courier.
+  const newestPingAt = Math.max(
+    lastLocation ? new Date(lastLocation.recorded_at).getTime() : 0,
+    courierDetails?.current_location_updated_at
+      ? new Date(courierDetails.current_location_updated_at).getTime()
+      : 0
+  );
+  const lastPingAge =
+    newestPingAt > 0 ? Math.floor((Date.now() - newestPingAt) / 60000) : null;
 
   return (
     <div className="min-h-screen pb-28 md:pb-12 bg-slate-50">
@@ -786,9 +780,6 @@ export const OrderDetailPage: React.FC = () => {
                     : null;
 
                 const hasAnyPin = courierPosition || destination || pickup;
-                const lastPingAge = lastLocation
-                  ? Math.floor((Date.now() - new Date(lastLocation.recorded_at).getTime()) / 60000)
-                  : null;
 
                 return (
                   <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
@@ -1148,11 +1139,7 @@ export const OrderDetailPage: React.FC = () => {
           }
           courierPhone={order?.courier?.phone}
           customerPhone={order?.customer_phone}
-          lastPingAgeMinutes={
-            lastLocation
-              ? Math.floor((Date.now() - new Date(lastLocation.recorded_at).getTime()) / 60000)
-              : null
-          }
+          lastPingAgeMinutes={lastPingAge}
           role="CUSTOMER"
         />
 
