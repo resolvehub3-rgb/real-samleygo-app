@@ -15,6 +15,9 @@ Before you start, make sure you have:
   - `VITE_SUPABASE_URL` (e.g. `https://xyzcompany.supabase.co`)
   - `VITE_SUPABASE_ANON_KEY` (public client key)
   - `GEMINI_API_KEY` (optional, for AI features)
+- [ ] A **[Google Cloud](https://console.cloud.google.com/)** account with the **Maps JavaScript API** enabled:
+  - `VITE_GOOGLE_MAPS_API_KEY` (browser key, restricted by HTTP referrer)
+  - `VITE_GOOGLE_MAPS_MAP_ID` (map ID used by Advanced Markers — `DEMO_MAP_ID` works)
 - [ ] A **[Google Play Console Developer Account](https://play.google.com/console)** ($25 one-time registration fee from Google).
 - [ ] **Node.js 18+** and **Java JDK 17+** (if building Android locally using Google Bubblewrap CLI).
 
@@ -49,6 +52,8 @@ Before you start, make sure you have:
    | `VITE_SUPABASE_URL` | `https://your-project.supabase.co` | Supabase endpoint |
    | `VITE_SUPABASE_ANON_KEY` | `eyJhbGciOi...` | Supabase public anon key |
    | `GEMINI_API_KEY` | `AIzaSy...` (optional) | AI features |
+   | `VITE_GOOGLE_MAPS_API_KEY` | `AIzaSy...` | Google Maps (courier + admin maps) |
+   | `VITE_GOOGLE_MAPS_MAP_ID` | `DEMO_MAP_ID` | Map ID required by Advanced Markers |
 
 5. **Deploy**:
    - Click **Deploy**.
@@ -78,6 +83,8 @@ Set your production environment variables:
 ```bash
 vercel env add VITE_SUPABASE_URL production
 vercel env add VITE_SUPABASE_ANON_KEY production
+vercel env add VITE_GOOGLE_MAPS_API_KEY production
+vercel env add VITE_GOOGLE_MAPS_MAP_ID production
 vercel --prod
 ```
 

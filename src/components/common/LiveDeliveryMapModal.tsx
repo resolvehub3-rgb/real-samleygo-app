@@ -356,9 +356,7 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
         <div className="px-4 sm:px-6 py-3 bg-white border-t border-slate-200 flex items-center justify-between gap-3 flex-shrink-0">
           <div className="flex items-center gap-2 text-xs text-slate-500">
             <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500" />
-            <span className="hidden sm:inline">
-              Real-time OpenStreetMap &amp; Leaflet tracking
-            </span>
+            <span className="hidden sm:inline">Real-time Google Maps tracking</span>
             <span className="sm:hidden text-[11px]">Realtime GPS</span>
           </div>
 

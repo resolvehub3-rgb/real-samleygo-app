@@ -1,7 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
 import { LocateFixed } from 'lucide-react';
+import {
+  ACCRA,
+  MAP_ID,
+  cancelCameraPan,
+  fitPoints,
+  loadGoogleMaps,
+  outsideCenterZone,
+  panToAnimated,
+} from '../../lib/googleMaps';
+import { escapeHtml, makePinContent, pinAnchor } from '../../lib/mapMarkers';
 import {
   fetchRoadRoute,
   geocodeAddress,
@@ -64,40 +72,17 @@ interface CourierLiveMapProps {
   onRouteUpdate?: (route: ActiveRouteInfo | null) => void;
 }
 
-// Small inline SVG pin icons so we don't depend on Leaflet's image assets
-const makeIcon = (emoji: string, bg: string, size = 34, halo = false) =>
-  L.divIcon({
-    className: '',
-    // The halo is a pulsing "live position" ring behind the courier pin (the
-    // round part of the teardrop sits in the middle of the box, so a centred
-    // circle lines up with it). It comes first so it paints underneath.
-    html: `${halo ? '<div class="sg-courier-halo"></div>' : ''}<div class="sg-pin" style="
-      display:flex;align-items:center;justify-content:center;
-      width:${size}px;height:${size}px;border-radius:50% 50% 50% 0;
-      transform:rotate(-45deg);
-      transition:transform .5s cubic-bezier(.22,1,.36,1);
-      background:${bg};box-shadow:0 2px 8px rgba(0,0,0,.35);
-      border:2px solid white;">
-      <span class="sg-pin-emoji" style="transform:rotate(45deg);transition:transform .5s cubic-bezier(.22,1,.36,1);font-size:${Math.round(size * 0.44)}px;line-height:1;">${emoji}</span>
-    </div>`,
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size - 2],
-  });
-
-const courierIcon = makeIcon('🛵', '#059669', 34, true); // emerald-600
-const destinationIcon = makeIcon('🏠', '#0f172a'); // slate-900
-const pickupIcon = makeIcon('🍳', '#f59e0b'); // amber-500
-const restaurantIcon = makeIcon('🏪', '#475569', 26); // slate-600, deliberately smaller
+/** An Advanced Marker: an HTMLElement the Maps API positions on the map. */
+type PinMarker = google.maps.marker.AdvancedMarkerElement;
 
 /**
- * The pin's tip points straight down at rotation -45°, i.e. due south (180°).
- * Rotating by `heading - 225` puts the tip on `heading` (degrees clockwise
- * from north) — so the marker aims the way the rider is actually driving,
- * like a navigation arrow. The emoji counter-rotates to stay upright.
+ * Rotates the pin so its tip points at `headingDeg` (degrees clockwise from
+ * north), like a navigation arrow — the emoji counter-rotates to stay upright.
+ * The pin's tip starts at due south (180°), so the body turns by
+ * `heading - 225`.
  */
-const applyHeading = (marker: L.Marker | null, headingDeg: number) => {
-  const root = marker?.getElement() as HTMLElement | undefined;
-  const pin = root?.querySelector('.sg-pin') as HTMLElement | null;
+const applyHeading = (content: HTMLDivElement | null, headingDeg: number) => {
+  const pin = content?.querySelector('.sg-pin') as HTMLElement | null;
   if (!pin) return;
   pin.style.transform = `rotate(${headingDeg - 225}deg)`;
   const emoji = pin.querySelector('.sg-pin-emoji') as HTMLElement | null;
@@ -151,7 +136,7 @@ const buildTrack = (coordinates: { lat: number; lng: number }[]): RouteTrack | n
 };
 
 /** The point `sKm` along the track (clamped to its ends). */
-const trackPointAt = (track: RouteTrack, sKm: number): L.LatLng => {
+const trackPointAt = (track: RouteTrack, sKm: number): LatLng => {
   const clamped = Math.max(0, Math.min(track.totalKm, sKm));
   let lo = 0;
   let hi = track.cumulative.length - 1;
@@ -162,10 +147,10 @@ const trackPointAt = (track: RouteTrack, sKm: number): L.LatLng => {
   }
   const span = track.cumulative[hi] - track.cumulative[lo];
   const k = span > 0 ? (clamped - track.cumulative[lo]) / span : 0;
-  return L.latLng(
-    track.lat[lo] + (track.lat[hi] - track.lat[lo]) * k,
-    track.lng[lo] + (track.lng[hi] - track.lng[lo]) * k
-  );
+  return {
+    lat: track.lat[lo] + (track.lat[hi] - track.lat[lo]) * k,
+    lng: track.lng[lo] + (track.lng[hi] - track.lng[lo]) * k,
+  };
 };
 
 /**
@@ -248,19 +233,6 @@ const SAME_FIX_EPS = 1e-7;
  * blue-dot navigator uses.
  */
 const OUTSIDE_FOLLOW_ZONE = 0.25;
-
-const outsideFollowZone = (map: L.Map, point: L.LatLng): boolean => {
-  const size = map.getSize();
-  const pt = map.latLngToContainerPoint(point);
-  const marginX = size.x * OUTSIDE_FOLLOW_ZONE;
-  const marginY = size.y * OUTSIDE_FOLLOW_ZONE;
-  return (
-    pt.x < marginX ||
-    pt.x > size.x - marginX ||
-    pt.y < marginY ||
-    pt.y > size.y - marginY
-  );
-};
 /** Re-route when the rider has drifted this far from the road route's origin. */
 const REROUTE_DISTANCE_KM = 0.08;
 /** …or when this much time passed since the last attempt (with exponential backoff on failure). */
@@ -283,6 +255,9 @@ const REROUTE_MAX_BACKOFF_MS = 120_000;
  * - every network call is cached, throttled, self-healing and never throws
  *   (stale replies are dropped locally instead of cancelling requests, so a
  *   cancelled fetch can never poison the cache with a false "no result")
+ *
+ * The canvas is the Google Maps JavaScript API (Advanced Markers), loaded
+ * once through `src/lib/googleMaps.ts`.
  */
 export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   courierPosition,
@@ -297,24 +272,26 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   onRouteUpdate,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const courierMarkerRef = useRef<L.Marker | null>(null);
-  const destinationMarkerRef = useRef<L.Marker | null>(null);
-  const pickupMarkerRef = useRef<L.Marker | null>(null);
-  const roadPolylineRef = useRef<L.Polyline | null>(null);
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const courierMarkerRef = useRef<PinMarker | null>(null);
+  /** The courier marker's DOM node — heading rotation happens on this. */
+  const courierContentRef = useRef<HTMLDivElement | null>(null);
+  const destinationMarkerRef = useRef<PinMarker | null>(null);
+  const pickupMarkerRef = useRef<PinMarker | null>(null);
+  const roadPolylineRef = useRef<google.maps.Polyline | null>(null);
   /** Arc-length view of the drawn road route — the marker rides along this. */
   const trackRef = useRef<RouteTrack | null>(null);
   /** Secondary restaurant pins, keyed by restaurant id so updates are cheap. */
-  const restaurantMarkersRef = useRef<Map<string, L.Marker>>(new Map());
+  const restaurantMarkersRef = useRef<Map<string, PinMarker>>(new Map());
   /** Fit-once guard: pin/courier presence signature the viewport was framed for. */
   const fitSigRef = useRef('');
   /** The marker's current *animated* position (may lag behind the latest ping). */
-  const currentLatLngRef = useRef<L.LatLng | null>(null);
+  const currentLatLngRef = useRef<LatLng | null>(null);
   const animFrameRef = useRef<number | null>(null);
 
   // ── Continuous motion state (the "live navigation" feel) ──────────────
   /** Latest GPS fix — the animation loop always steers toward this. */
-  const targetRef = useRef<L.LatLng | null>(null);
+  const targetRef = useRef<LatLng | null>(null);
   /** Wall-clock time of the previous fix; the gap sets the travel speed. */
   const lastFixAtRef = useRef(0);
   /** Marker speed in km/ms, derived from (gap distance ÷ gap time). */
@@ -328,13 +305,26 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   /** Camera-follow: on until the user drags/zooms, then off until re-centred. */
   const followRef = useRef(true);
   /** Fresh drawing closure for the animation loop (set every render). */
-  const drawRefs = useRef<{ route: (position: L.LatLng | null) => void }>({
+  const drawRefs = useRef<{ route: (position: LatLng | null) => void }>({
     route: () => {},
   });
   /** Handlers the (mount-once) map setup needs from the latest render. */
-  const actionRefs = useRef<{ setFollow: (on: boolean) => void }>({
-    setFollow: () => {},
-  });
+  const actionRefs = useRef<{
+    setFollow: (on: boolean) => void;
+    openPopup: (marker: PinMarker) => void;
+  }>({ setFollow: () => {}, openPopup: () => {} });
+
+  // ── Map bootstrap state ───────────────────────────────────────────────
+  /** Guards the async loader against React StrictMode's double effect. */
+  const initStartedRef = useRef(false);
+  /** Zoom events the API itself fires while the map is being constructed. */
+  const ignoreZoomUntilRef = useRef(0);
+  /** Timestamp of the last real gesture on the map (pointer / wheel / key). */
+  const userGestureAtRef = useRef(0);
+  /** One shared popup for every pin (Leaflet used one per marker). */
+  const infoWindowRef = useRef<google.maps.InfoWindow | null>(null);
+  const popupTextsRef = useRef<Map<PinMarker, string>>(new Map());
+  const popupAnchorRef = useRef<PinMarker | null>(null);
 
   const mountedRef = useRef(true);
   const attemptRef = useRef<{ courier: LatLng; target: LatLng; leg: RouteLeg; at: number } | null>(null);
@@ -349,6 +339,10 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const [roadRoute, setRoadRoute] = useState<(RoadRoute & { leg: RouteLeg }) | null>(null);
   /** Camera-follow UI: false once the user drags/zooms away from the rider. */
   const [following, setFollowing] = useState(true);
+  /** Flip once the API has loaded and the map exists, so pins can be drawn. */
+  const [mapReady, setMapReady] = useState(false);
+  /** Human-readable reason the map could not be shown, if any. */
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Always call the newest callback without re-running effects that depend on it.
   useEffect(() => {
@@ -447,6 +441,29 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const legKind: RouteLeg | null = leg?.kind ?? null;
   const targetKey = leg ? `${round5(leg.target.lat)},${round5(leg.target.lng)}` : '';
 
+  // ── Popups (one shared InfoWindow, text kept per pin) ─────────────────
+  const setPopupText = (marker: PinMarker, text: string) => {
+    popupTextsRef.current.set(marker, text);
+    // Keep an open bubble in sync — the courier's caption changes on every ping.
+    if (popupAnchorRef.current === marker) infoWindowRef.current?.setContent(text);
+  };
+
+  const openPopup = (marker: PinMarker) => {
+    const map = mapRef.current;
+    const text = popupTextsRef.current.get(marker);
+    if (!map || !text) return;
+    if (!infoWindowRef.current) {
+      // No auto-pan: the camera belongs to the rider, not to a stray tap.
+      infoWindowRef.current = new google.maps.InfoWindow({ disableAutoPan: true });
+      infoWindowRef.current.addListener('closeclick', () => {
+        popupAnchorRef.current = null;
+      });
+    }
+    infoWindowRef.current.setContent(text);
+    infoWindowRef.current.open({ anchor: marker, map, shouldFocus: false });
+    popupAnchorRef.current = marker;
+  };
+
   // ── Motion engine: constant-speed ride + camera follow ────────────────
   const stopLoop = () => {
     if (animFrameRef.current !== null) {
@@ -459,11 +476,11 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     const normalized = ((Math.round(degrees) % 360) + 360) % 360;
     if (normalized === headingRef.current) return;
     headingRef.current = normalized;
-    applyHeading(courierMarkerRef.current, normalized);
+    applyHeading(courierContentRef.current, normalized);
   };
 
   /** While parked, point the pin at the stop the rider is driving to. */
-  const aimAtLeg = (marker: L.Marker, from: LatLng, currentLeg: { target: LatLng } | null) => {
+  const aimAtLeg = (from: LatLng, currentLeg: { target: LatLng } | null) => {
     setHeading(currentLeg ? bearingDeg(from, currentLeg.target) : 180);
   };
 
@@ -474,7 +491,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
    * blocks. Falls back to a straight hop when no route has arrived yet or the
    * fix is nowhere near the road.
    */
-  const stepAlongRoute = (current: L.LatLng, target: L.LatLng, stepKm: number, chordKm: number) => {
+  const stepAlongRoute = (current: LatLng, target: LatLng, stepKm: number, chordKm: number) => {
     const track = trackRef.current;
     if (track) {
       const from = projectOnTrack(track, current);
@@ -491,10 +508,10 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     }
 
     const k = chordKm > 0 ? Math.min(1, stepKm / chordKm) : 1;
-    return L.latLng(
-      current.lat + (target.lat - current.lat) * k,
-      current.lng + (target.lng - current.lng) * k
-    );
+    return {
+      lat: current.lat + (target.lat - current.lat) * k,
+      lng: current.lng + (target.lng - current.lng) * k,
+    };
   };
 
   const tick = (now: number) => {
@@ -515,7 +532,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     // Arrived, no speed, or the screen went off — park on the latest fix.
     if (document.hidden || speedRef.current <= 0 || stepKm >= remainingKm) {
       currentLatLngRef.current = target;
-      marker.setLatLng(target);
+      marker.position = target;
       drawRefs.current.route(target);
       animFrameRef.current = null;
       return;
@@ -524,7 +541,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     const next = stepAlongRoute(current, target, stepKm, remainingKm);
 
     currentLatLngRef.current = next;
-    marker.setLatLng(next);
+    marker.position = next;
     // The road route can carry hundreds of points — repaint it on a slow tick.
     if (now - lastRouteDrawRef.current > 200) {
       lastRouteDrawRef.current = now;
@@ -545,15 +562,20 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const setFollow = (on: boolean) => {
     followRef.current = on;
     setFollowing(on);
-    if (!on) return;
     const map = mapRef.current;
+    if (!map) return;
+    if (!on) {
+      cancelCameraPan(map);
+      return;
+    }
     const at = currentLatLngRef.current ?? targetRef.current;
-    if (map && at) map.panTo(at, { animate: true, duration: 0.7, easeLinearity: 0.25 });
+    if (at) panToAnimated(map, at, 700);
   };
 
   // The map is created once, so keep its handlers pointed at the newest closure.
   useEffect(() => {
     actionRefs.current.setFollow = setFollow;
+    actionRefs.current.openPopup = openPopup;
   });
 
   // ── Live road route (throttled, failure-tolerant, never throws) ───────
@@ -633,62 +655,121 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
   // ── Initialize the map once ───────────────────────────────────────────
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
+    const container = containerRef.current;
+    if (!container || mapRef.current || initStartedRef.current) return;
+    initStartedRef.current = true;
 
-    const map = L.map(containerRef.current, {
-      center: [5.6037, -0.187], // Accra, Ghana — sensible default before any fix
-      zoom: 13,
-      zoomControl: true,
-      attributionControl: true,
-      scrollWheelZoom: false, // prevent page-scroll hijack on mobile; enable on tap
-    });
+    let cancelled = false;
+    let observer: ResizeObserver | null = null;
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      maxZoom: 19,
-    }).addTo(map);
+    // Same affordance as before: the wheel scrolls the page until the map is
+    // clicked, then it takes the wheel — and hands it back when the pointer
+    // leaves.
+    const enableWheel = () => mapRef.current?.setOptions({ scrollwheel: true });
+    const disableWheel = () => mapRef.current?.setOptions({ scrollwheel: false });
+    // Anything that could be a zoom gesture. `zoom_changed` alone cannot tell
+    // a pinch/wheel/+- button apart from our own `fitPoints`, and Google may
+    // raise it a beat after the change, so gestures are remembered for a
+    // second instead of being checked synchronously.
+    const markGesture = () => {
+      userGestureAtRef.current = Date.now();
+    };
 
-    map.on('click', () => map.scrollWheelZoom.enable());
-    map.on('mouseout', () => map.scrollWheelZoom.disable());
+    loadGoogleMaps()
+      .then(() => {
+        if (cancelled || mapRef.current || !containerRef.current) return;
 
-    // The camera follows the rider by default. The moment the user drags the
-    // map or zooms with the wheel/pinch they take control — following pauses
-    // and a "Follow" button appears. Programmatic pans/fits (and the zoom
-    // buttons, which carry no original event) keep following.
-    map.on('dragstart', () => actionRefs.current.setFollow(false));
-    map.on('zoomstart', (event: L.LeafletEvent) => {
-      // Only a user-driven zoom (wheel / pinch / keyboard) carries an event.
-      const original = (event as L.LeafletEvent & { originalEvent?: Event }).originalEvent;
-      if (original) actionRefs.current.setFollow(false);
-    });
+        const map = new google.maps.Map(containerRef.current, {
+          center: ACCRA,
+          zoom: 13,
+          mapId: MAP_ID, // Advanced Markers refuse to draw without one
+          zoomControl: true,
+          scrollwheel: false, // prevent page-scroll hijack; the map is clicked first
+          gestureHandling: 'greedy', // touches pan the map, like Leaflet did
+          maxZoom: 19,
+        });
+        mapRef.current = map;
+        ignoreZoomUntilRef.current = Date.now() + 750;
 
-    const invalidateTimer = setTimeout(() => {
-      map.invalidateSize();
-    }, 150);
+        // The camera follows the rider by default. The moment the user drags
+        // the map or zooms they take control — following pauses and a "Follow"
+        // button appears. Programmatic pans and fits are never gestures, so
+        // they keep following.
+        map.addListener('dragstart', () => actionRefs.current.setFollow(false));
+        map.addListener('zoom_changed', () => {
+          if (Date.now() < ignoreZoomUntilRef.current) return;
+          if (Date.now() - userGestureAtRef.current > 1000) return;
+          actionRefs.current.setFollow(false);
+        });
 
-    const resizeObserver = new ResizeObserver(() => {
-      map.invalidateSize();
-    });
-    if (containerRef.current) {
-      resizeObserver.observe(containerRef.current);
-    }
+        container.addEventListener('click', enableWheel);
+        container.addEventListener('mouseleave', disableWheel);
+        container.addEventListener('pointerdown', markGesture);
+        container.addEventListener('wheel', markGesture, { passive: true });
+        container.addEventListener('touchstart', markGesture, { passive: true });
+        container.addEventListener('keydown', markGesture);
 
-    mapRef.current = map;
+        const resize = () => {
+          const current = mapRef.current;
+          if (!current) return;
+          google.maps.event.trigger(current, 'resize');
+          const centre = current.getCenter();
+          if (centre) current.setCenter(centre); // keep the camera steady
+        };
+        observer = new ResizeObserver(resize);
+        observer.observe(container);
+
+        setMapReady(true);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setLoadError(error instanceof Error ? error.message : 'Google Maps failed to load.');
+        }
+      });
 
     return () => {
-      clearTimeout(invalidateTimer);
-      resizeObserver.disconnect();
+      cancelled = true;
+      initStartedRef.current = false;
+      observer?.disconnect();
+      container.removeEventListener('click', enableWheel);
+      container.removeEventListener('mouseleave', disableWheel);
+      container.removeEventListener('pointerdown', markGesture);
+      container.removeEventListener('wheel', markGesture);
+      container.removeEventListener('touchstart', markGesture);
+      container.removeEventListener('keydown', markGesture);
+
       if (animFrameRef.current !== null) {
         cancelAnimationFrame(animFrameRef.current);
         animFrameRef.current = null;
       }
-      map.remove();
-      mapRef.current = null;
+
+      const map = mapRef.current;
+      if (map) {
+        cancelCameraPan(map);
+        infoWindowRef.current?.close();
+        google.maps.event.clearInstanceListeners(map);
+        // There is no `map.remove()` in the Google API: detach what we added
+        // and empty the container so a remount starts from a clean slate.
+        if (courierMarkerRef.current) courierMarkerRef.current.map = null;
+        if (destinationMarkerRef.current) destinationMarkerRef.current.map = null;
+        if (pickupMarkerRef.current) pickupMarkerRef.current.map = null;
+        roadPolylineRef.current?.setMap(null);
+        restaurantMarkersRef.current.forEach((marker) => {
+          marker.map = null;
+        });
+        container.replaceChildren();
+        mapRef.current = null;
+      }
+      drawRefs.current = { route: () => {} };
+      restaurantMarkersRef.current.clear();
       courierMarkerRef.current = null;
+      courierContentRef.current = null;
       destinationMarkerRef.current = null;
       pickupMarkerRef.current = null;
       roadPolylineRef.current = null;
-      restaurantMarkersRef.current.clear(); // map.remove() already dropped the layers
+      infoWindowRef.current = null;
+      popupTextsRef.current.clear();
+      popupAnchorRef.current = null;
       currentLatLngRef.current = null;
       fitSigRef.current = '';
       trackRef.current = null;
@@ -699,6 +780,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       speedRef.current = 0;
       headingRef.current = -1;
       lastRouteDrawRef.current = 0;
+      userGestureAtRef.current = 0;
+      setMapReady(false);
     };
   }, []);
 
@@ -709,31 +792,49 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
     // Destination pin (created once, then kept in sync with its coordinates)
     if (destinationPt) {
-      const position: L.LatLngExpression = [destinationPt.lat, destinationPt.lng];
+      const position: google.maps.LatLngLiteral = { lat: destinationPt.lat, lng: destinationPt.lng };
       if (destinationMarkerRef.current) {
-        destinationMarkerRef.current.setLatLng(position);
+        destinationMarkerRef.current.position = position;
       } else {
-        destinationMarkerRef.current = L.marker(position, { icon: destinationIcon })
-          .addTo(map)
-          .bindPopup('Customer drop-off');
+        const marker = new google.maps.marker.AdvancedMarkerElement({
+          map,
+          position,
+          content: makePinContent('🏠', '#0f172a'),
+          title: 'Customer drop-off',
+          zIndex: 600,
+          gmpClickable: true,
+          ...pinAnchor(34),
+        });
+        setPopupText(marker, 'Customer drop-off');
+        marker.addEventListener('gmp-click', () => actionRefs.current.openPopup(marker));
+        destinationMarkerRef.current = marker;
       }
     } else if (destinationMarkerRef.current) {
-      map.removeLayer(destinationMarkerRef.current);
+      destinationMarkerRef.current.map = null;
       destinationMarkerRef.current = null;
     }
 
     // Restaurant pickup pin
     if (pickupPt) {
-      const position: L.LatLngExpression = [pickupPt.lat, pickupPt.lng];
+      const position: google.maps.LatLngLiteral = { lat: pickupPt.lat, lng: pickupPt.lng };
       if (pickupMarkerRef.current) {
-        pickupMarkerRef.current.setLatLng(position);
+        pickupMarkerRef.current.position = position;
       } else {
-        pickupMarkerRef.current = L.marker(position, { icon: pickupIcon })
-          .addTo(map)
-          .bindPopup('Restaurant pickup');
+        const marker = new google.maps.marker.AdvancedMarkerElement({
+          map,
+          position,
+          content: makePinContent('🍳', '#f59e0b'),
+          title: 'Restaurant pickup',
+          zIndex: 600,
+          gmpClickable: true,
+          ...pinAnchor(34),
+        });
+        setPopupText(marker, 'Restaurant pickup');
+        marker.addEventListener('gmp-click', () => actionRefs.current.openPopup(marker));
+        pickupMarkerRef.current = marker;
       }
     } else if (pickupMarkerRef.current) {
-      map.removeLayer(pickupMarkerRef.current);
+      pickupMarkerRef.current.map = null;
       pickupMarkerRef.current = null;
     }
 
@@ -746,59 +847,72 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         if (nextRestaurantIds.has(spot.id)) continue;
         nextRestaurantIds.add(spot.id);
 
-        const position: L.LatLngExpression = [spot.lat, spot.lng];
+        const position: google.maps.LatLngLiteral = { lat: spot.lat, lng: spot.lng };
+        const name = spot.name?.trim() || 'Restaurant';
         const existing = restaurantMarkersRef.current.get(spot.id);
         if (existing) {
-          existing.setLatLng(position);
+          existing.position = position;
         } else {
-          const marker = L.marker(position, { icon: restaurantIcon, keyboard: false })
-            .addTo(map)
-            .bindPopup(spot.name?.trim() || 'Restaurant');
+          const marker = new google.maps.marker.AdvancedMarkerElement({
+            map,
+            position,
+            content: makePinContent('🏪', '#475569', 26),
+            title: name,
+            zIndex: 400,
+            gmpClickable: true,
+            ...pinAnchor(26),
+          });
+          setPopupText(marker, escapeHtml(name));
+          marker.addEventListener('gmp-click', () => actionRefs.current.openPopup(marker));
           restaurantMarkersRef.current.set(spot.id, marker);
         }
       }
     }
     for (const [id, marker] of Array.from(restaurantMarkersRef.current.entries())) {
       if (!nextRestaurantIds.has(id)) {
-        map.removeLayer(marker);
+        marker.map = null;
         restaurantMarkersRef.current.delete(id);
       }
     }
 
     /** Solid road-snapped route for the leg the rider is actually driving. */
-    const drawRoadRoute = (courierLL: L.LatLng | null) => {
+    const drawRoadRoute = (courierLL: LatLng | null) => {
       if (!roadRoute || roadRoute.coordinates.length < 2) {
         if (roadPolylineRef.current) {
-          map.removeLayer(roadPolylineRef.current);
+          roadPolylineRef.current.setMap(null);
           roadPolylineRef.current = null;
         }
         return;
       }
 
-      const coords = roadRoute.coordinates.map(
-        (point): L.LatLngExpression => [point.lat, point.lng]
-      );
+      const coords: google.maps.LatLngLiteral[] = roadRoute.coordinates.map((point) => ({
+        lat: point.lat,
+        lng: point.lng,
+      }));
 
       // Keep the route glued to the live marker: the drawn line starts at the
       // rider's current spot, not where the route was requested from.
       if (courierLL) {
         const origin = roadRoute.coordinates[0];
-        if (haversineKm({ lat: origin.lat, lng: origin.lng }, { lat: courierLL.lat, lng: courierLL.lng }) < 0.5) {
-          coords[0] = [courierLL.lat, courierLL.lng];
+        if (
+          haversineKm({ lat: origin.lat, lng: origin.lng }, { lat: courierLL.lat, lng: courierLL.lng }) <
+          0.5
+        ) {
+          coords[0] = { lat: courierLL.lat, lng: courierLL.lng };
         }
       }
 
       if (roadPolylineRef.current) {
-        roadPolylineRef.current.setLatLngs(coords);
+        roadPolylineRef.current.setPath(coords);
       } else {
-        roadPolylineRef.current = L.polyline(coords, {
-          color: '#059669',
-          weight: 4,
-          opacity: 0.95,
-          lineCap: 'round',
-          lineJoin: 'round',
-        }).addTo(map);
-        roadPolylineRef.current.bringToFront();
+        roadPolylineRef.current = new google.maps.Polyline({
+          path: coords,
+          strokeColor: '#059669',
+          strokeOpacity: 0.95,
+          strokeWeight: 4,
+          zIndex: 1,
+        });
+        roadPolylineRef.current.setMap(map);
       }
     };
 
@@ -809,18 +923,32 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     trackRef.current = roadRoute ? buildTrack(roadRoute.coordinates) : null;
 
     if (courierPosition) {
-      const target = L.latLng(courierPosition.lat, courierPosition.lng);
-      const popupText = courierName ? `${courierName} is here` : 'Your courier is here';
+      const target: LatLng = { lat: courierPosition.lat, lng: courierPosition.lng };
+      const popupText = escapeHtml(
+        courierName ? `${courierName} is here` : 'Your courier is here'
+      );
 
       if (!courierMarkerRef.current) {
         // First fix — place the marker directly (no glide from nowhere)
-        courierMarkerRef.current = L.marker(target, { icon: courierIcon, zIndexOffset: 1000 })
-          .addTo(map)
-          .bindPopup(popupText);
+        const content = makePinContent('🛵', '#059669', 34, true);
+        const marker = new google.maps.marker.AdvancedMarkerElement({
+          map,
+          position: target,
+          content,
+          title: courierName || 'Your courier',
+          zIndex: 1000,
+          gmpClickable: true,
+          ...pinAnchor(34),
+        });
+        marker.addEventListener('gmp-click', () => actionRefs.current.openPopup(marker));
+        courierMarkerRef.current = marker;
+        courierContentRef.current = content;
+        setPopupText(marker, popupText);
         currentLatLngRef.current = target;
         drawRoadRoute(target);
       } else {
-        courierMarkerRef.current.setPopupContent(popupText);
+        setPopupText(courierMarkerRef.current, popupText);
+        courierMarkerRef.current.title = courierName || 'Your courier';
       }
 
       // Consumers rebuild `courierPosition` as a fresh literal on every
@@ -856,7 +984,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           speedRef.current = 0;
           stopLoop();
           currentLatLngRef.current = target;
-          courierMarkerRef.current.setLatLng(target);
+          courierMarkerRef.current!.position = target;
           drawRoadRoute(target);
         } else if (distKm > 0) {
           // Normal ping — cover the gap at the speed the rider is actually
@@ -870,12 +998,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         // frame (unless the user took over by dragging/zooming). The pan runs
         // over the same window as the marker, so camera and pin travel
         // together instead of snapping.
-        if (followRef.current && outsideFollowZone(map, target)) {
-          map.panTo(target, {
-            animate: true,
-            duration: Math.min(6, Math.max(0.6, gapMs / 1000)),
-            easeLinearity: 0.25,
-          });
+        if (followRef.current && outsideCenterZone(map, target, OUTSIDE_FOLLOW_ZONE)) {
+          panToAnimated(map, target, Math.min(6000, Math.max(600, gapMs)));
         }
       }
 
@@ -887,9 +1011,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       lastRouteDrawRef.current = performance.now();
 
       // Stationary (or just snapped): aim the pin down the leg he's driving.
-      if (speedRef.current === 0 && courierMarkerRef.current) {
-        aimAtLeg(courierMarkerRef.current, target, leg);
-      }
+      if (speedRef.current === 0) aimAtLeg(target, leg);
     } else {
       // No courier fix yet — no rider, so there is no leg to route
       stopLoop();
@@ -907,28 +1029,41 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       restaurantPins.length > 0 ? 1 : 0
     }`;
     if (fitSig !== fitSigRef.current && fitSig !== '0000') {
-      const points: L.LatLngExpression[] = [];
-      if (courierPosition) points.push([courierPosition.lat, courierPosition.lng]);
-      if (pickupPt) points.push([pickupPt.lat, pickupPt.lng]);
-      if (destinationPt) points.push([destinationPt.lat, destinationPt.lng]);
+      const points: google.maps.LatLngLiteral[] = [];
+      if (courierPosition) points.push({ lat: courierPosition.lat, lng: courierPosition.lng });
+      if (pickupPt) points.push({ lat: pickupPt.lat, lng: pickupPt.lng });
+      if (destinationPt) points.push({ lat: destinationPt.lat, lng: destinationPt.lng });
       // Every kitchen too, so the full network is on screen from the first frame
-      for (const spot of restaurantPins) points.push([spot.lat, spot.lng]);
+      for (const spot of restaurantPins) points.push({ lat: spot.lat, lng: spot.lng });
 
-      if (points.length >= 2) {
-        map.fitBounds(L.latLngBounds(points).pad(0.35));
-      } else {
-        const only = points[0] as [number, number];
-        map.setView(only, 14);
-      }
+      // Room around the pins that mirrors the old `bounds.pad(0.35)`.
+      const width = containerRef.current?.clientWidth ?? 320;
+      const height = containerRef.current?.clientHeight ?? 240;
+      const padding = Math.max(32, Math.round(Math.min(width, height) * 0.12));
+
+      fitPoints(map, points, { padding });
       fitSigRef.current = fitSig;
     }
-  }, [courierPosition, destinationPt, pickupPt, courierName, roadRoute, restaurantKey]);
+  }, [mapReady, courierPosition, destinationPt, pickupPt, courierName, roadRoute, restaurantKey]);
 
   return (
     <div
-      ref={containerRef}
       className={`relative w-full ${className} rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 z-0`}
     >
+      {/* The API owns its container's children, so the map gets a dedicated
+          empty div and every overlay below stays a sibling. */}
+      <div ref={containerRef} className="absolute inset-0" />
+
+      {/* Missing/broken key → say so instead of showing a grey box */}
+      {loadError && (
+        <div className="absolute inset-0 z-[999] grid place-items-center bg-slate-100 p-5 text-center">
+          <div className="max-w-xs space-y-1">
+            <p className="text-xs font-black text-slate-700">Map unavailable</p>
+            <p className="text-[11px] leading-snug text-slate-500">{loadError}</p>
+          </div>
+        </div>
+      )}
+
       {/* Camera-follow: shown only after the user drags/zooms away from the rider */}
       {courierPosition && !following && (
         <button

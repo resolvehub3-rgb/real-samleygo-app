@@ -1,6 +1,6 @@
-import React, { useEffect, useRef } from 'react';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
+import React, { useEffect, useRef, useState } from 'react';
+import { ACCRA, MAP_ID, fitPoints, loadGoogleMaps } from '../../lib/googleMaps';
+import { CHIP_ANCHOR, makeChipContent, makePinContent, pinAnchor } from '../../lib/mapMarkers';
 
 /** A labelled map pin (rider chip or kitchen pin). */
 export interface DispatchMapPoint {
@@ -27,46 +27,15 @@ interface AdminDispatchMapProps {
   className?: string;
 }
 
-/** Camera used before any rider or kitchen fix has loaded. */
-const ACCRA: L.LatLngExpression = [5.6037, -0.187];
-
-const HTML_ESCAPES: Record<string, string> = {
-  '&': '&amp;',
-  '<': '&lt;',
-  '>': '&gt;',
-  '"': '&quot;',
-};
-
-/** Marker labels come from user data, so they are escaped before interpolation. */
-const escapeHtml = (value: string): string =>
-  value.replace(/[&<>"]/g, (char) => HTML_ESCAPES[char] ?? char);
-
-/** White name chip used for live riders (mirrors the operations mockup). */
-const courierChipIcon = (label: string) =>
-  L.divIcon({
-    className: '',
-    // The icon box is 0×0, so the chip is translated into place around the point.
-    html: `<span style="transform:translate(-50%,-100%);display:inline-flex;align-items:center;gap:5px;white-space:nowrap;background:#ffffff;border:1px solid #e2e8f0;border-radius:9999px;padding:5px 10px;box-shadow:0 4px 12px rgba(15,23,42,.18);font:700 12px/1.1 'Plus Jakarta Sans',system-ui,sans-serif;color:#0f172a;">🛵 ${escapeHtml(
-      label
-    )}</span>`,
-    iconSize: [0, 0],
-    iconAnchor: [0, 0],
-  });
-
-/** Teardrop kitchen pin, same construction as the courier dashboard map. */
-const kitchenPinIcon = L.divIcon({
-  className: '',
-  html: `<div style="display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:#f59e0b;border:2px solid #ffffff;box-shadow:0 3px 10px rgba(15,23,42,.35);"><span style="transform:rotate(45deg);font-size:14px;line-height:1;">🍳</span></div>`,
-  iconSize: [30, 30],
-  iconAnchor: [15, 28],
-});
+/** Kitchen teardrop — same proportions as the courier dashboard's pins. */
+const KITCHEN_PIN_SIZE = 30;
 
 /**
- * Read-only operations map for the admin console: OpenStreetMap tiles with a
+ * Read-only operations map for the admin console: Google Maps tiles with a
  * rider chip per online courier, a kitchen pin per restaurant and one line per
- * live order. The camera only refits when the *set* of riders/kitchens changes —
- * GPS pings move markers every few seconds and must never wrestle the view away
- * from whoever is dragging the map.
+ * live order. The camera only refits when the *set* of riders/kitchens changes
+ * — GPS pings move markers every few seconds and must never wrestle the view
+ * away from whoever is dragging the map.
  */
 export const AdminDispatchMap: React.FC<AdminDispatchMapProps> = ({
   couriers,
@@ -75,96 +44,165 @@ export const AdminDispatchMap: React.FC<AdminDispatchMapProps> = ({
   className = '',
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const layerRef = useRef<L.LayerGroup | null>(null);
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const markersRef = useRef<google.maps.marker.AdvancedMarkerElement[]>([]);
+  const polylinesRef = useRef<google.maps.Polyline[]>([]);
   const fitSignatureRef = useRef('');
+  /** Guards the async loader against React StrictMode's double effect. */
+  const initStartedRef = useRef(false);
+
+  const [mapReady, setMapReady] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // ── Initialize the map once ───────────────────────────────────────────
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || mapRef.current) return;
+    if (!container || mapRef.current || initStartedRef.current) return;
+    initStartedRef.current = true;
 
-    const map = L.map(container, {
-      center: ACCRA,
-      zoom: 12,
-      zoomControl: true,
-      attributionControl: true,
-      scrollWheelZoom: false, // page scrolling wins until the map is clicked
-    });
+    let cancelled = false;
+    let observer: ResizeObserver | null = null;
+    let invalidateTimer: number | null = null;
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      maxZoom: 19,
-    }).addTo(map);
+    // Page scrolling wins until the map is clicked, then the wheel zooms the
+    // map — and hands itself back when the pointer leaves.
+    const enableWheel = () => mapRef.current?.setOptions({ scrollwheel: true });
+    const disableWheel = () => mapRef.current?.setOptions({ scrollwheel: false });
 
-    map.on('click', () => map.scrollWheelZoom.enable());
-    map.on('mouseout', () => map.scrollWheelZoom.disable());
+    loadGoogleMaps()
+      .then(() => {
+        if (cancelled || mapRef.current || !containerRef.current) return;
 
-    const layer = L.layerGroup().addTo(map);
-    layerRef.current = layer;
-    mapRef.current = map;
+        const map = new google.maps.Map(containerRef.current, {
+          center: ACCRA,
+          zoom: 12,
+          mapId: MAP_ID, // Advanced Markers refuse to draw without one
+          zoomControl: true,
+          scrollwheel: false,
+          gestureHandling: 'greedy',
+          maxZoom: 19,
+        });
+        mapRef.current = map;
 
-    // The panel animates in with the rest of the page, so give Leaflet a beat
-    // to measure the container before the first paint of the tiles.
-    const invalidateTimer = window.setTimeout(() => map.invalidateSize(), 150);
-    const resizeObserver = new ResizeObserver(() => map.invalidateSize());
-    resizeObserver.observe(container);
+        container.addEventListener('click', enableWheel);
+        container.addEventListener('mouseleave', disableWheel);
+
+        observer = new ResizeObserver(() => {
+          const current = mapRef.current;
+          if (!current) return;
+          google.maps.event.trigger(current, 'resize');
+          const centre = current.getCenter();
+          if (centre) current.setCenter(centre);
+        });
+        observer.observe(container);
+
+        // The panel animates in with the rest of the page, so give the API a
+        // beat to measure the container before the first paint of the tiles.
+        invalidateTimer = window.setTimeout(() => {
+          google.maps.event.trigger(map, 'resize');
+        }, 150);
+
+        setMapReady(true);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setLoadError(error instanceof Error ? error.message : 'Google Maps failed to load.');
+        }
+      });
 
     return () => {
-      window.clearTimeout(invalidateTimer);
-      resizeObserver.disconnect();
-      map.remove(); // also drops every marker and polyline on the layer
-      mapRef.current = null;
-      layerRef.current = null;
+      cancelled = true;
+      initStartedRef.current = false;
+      if (invalidateTimer !== null) window.clearTimeout(invalidateTimer);
+      observer?.disconnect();
+      container.removeEventListener('click', enableWheel);
+      container.removeEventListener('mouseleave', disableWheel);
+
+      const map = mapRef.current;
+      if (map) {
+        google.maps.event.clearInstanceListeners(map);
+        // There is no `map.remove()` in the Google API: detach what we added
+        // and empty the container so a remount starts from a clean slate.
+        polylinesRef.current.forEach((line) => line.setMap(null));
+        markersRef.current.forEach((marker) => {
+          marker.map = null;
+        });
+        container.replaceChildren();
+        mapRef.current = null;
+      }
+      polylinesRef.current = [];
+      markersRef.current = [];
       fitSignatureRef.current = '';
+      setMapReady(false);
     };
   }, []);
 
   // ── Redraw riders, kitchens and live routes whenever data changes ─────
   useEffect(() => {
     const map = mapRef.current;
-    const layer = layerRef.current;
-    if (!map || !layer) return;
+    if (!map) return;
 
-    layer.clearLayers();
-    const bounds: L.LatLngTuple[] = [];
+    // Start from an empty canvas: markers are cheap to rebuild and the old
+    // layer group behaved exactly the same way.
+    markersRef.current.forEach((marker) => {
+      marker.map = null;
+    });
+    markersRef.current = [];
+    polylinesRef.current.forEach((line) => line.setMap(null));
+    polylinesRef.current = [];
+
+    const points: google.maps.LatLngLiteral[] = [];
 
     routes.forEach((route) => {
       if (route.points.length < 2) return;
-      L.polyline(
-        route.points.map((point) => [point.lat, point.lng] as L.LatLngExpression),
-        { color: '#0f766e', weight: 4, opacity: 0.85, lineCap: 'round', lineJoin: 'round' }
-      ).addTo(layer);
-      route.points.forEach((point) => bounds.push([point.lat, point.lng]));
+      const path = route.points.map((point) => ({ lat: point.lat, lng: point.lng }));
+      const line = new google.maps.Polyline({
+        path,
+        strokeColor: '#0f766e',
+        strokeOpacity: 0.85,
+        strokeWeight: 4,
+        zIndex: 1,
+      });
+      line.setMap(map);
+      polylinesRef.current.push(line);
+      path.forEach((point) => points.push(point));
     });
 
     kitchens.forEach((kitchen) => {
-      L.marker([kitchen.lat, kitchen.lng], {
-        icon: kitchenPinIcon,
+      const marker = new google.maps.marker.AdvancedMarkerElement({
+        map,
+        position: { lat: kitchen.lat, lng: kitchen.lng },
+        content: makePinContent('🍳', '#f59e0b', KITCHEN_PIN_SIZE),
         title: kitchen.label,
-      }).addTo(layer);
-      bounds.push([kitchen.lat, kitchen.lng]);
+        zIndex: 500,
+        ...pinAnchor(KITCHEN_PIN_SIZE),
+      });
+      markersRef.current.push(marker);
+      points.push({ lat: kitchen.lat, lng: kitchen.lng });
     });
 
     couriers.forEach((courier) => {
-      L.marker([courier.lat, courier.lng], {
-        icon: courierChipIcon(courier.label),
+      const marker = new google.maps.marker.AdvancedMarkerElement({
+        map,
+        position: { lat: courier.lat, lng: courier.lng },
+        content: makeChipContent(courier.label),
         title: courier.label,
-        zIndexOffset: 500,
-      }).addTo(layer);
-      bounds.push([courier.lat, courier.lng]);
+        zIndex: 900,
+        ...CHIP_ANCHOR,
+      });
+      markersRef.current.push(marker);
+      points.push({ lat: courier.lat, lng: courier.lng });
     });
 
     // Refit only when the roster changes (never on a GPS ping).
     const fitSignature = [...couriers.map((c) => c.id), ...kitchens.map((k) => k.id)]
       .sort()
       .join('|');
-    if (bounds.length > 0 && fitSignature !== fitSignatureRef.current) {
+    if (points.length > 0 && fitSignature !== fitSignatureRef.current) {
       fitSignatureRef.current = fitSignature;
-      map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+      fitPoints(map, points, { padding: 40, maxZoom: 14 });
     }
-  }, [couriers, kitchens, routes]);
+  }, [mapReady, couriers, kitchens, routes]);
 
   return (
     <div className={`relative h-full w-full ${className}`}>
@@ -174,6 +212,16 @@ export const AdminDispatchMap: React.FC<AdminDispatchMapProps> = ({
         role="img"
         aria-label="Live map of couriers, kitchens and active deliveries"
       />
+
+      {/* Missing/broken key → say so instead of showing a grey box */}
+      {loadError && (
+        <div className="absolute inset-0 z-[1000] grid place-items-center bg-slate-100 p-5 text-center">
+          <div className="max-w-xs space-y-1">
+            <p className="text-xs font-black text-slate-700">Map unavailable</p>
+            <p className="text-[11px] leading-snug text-slate-500">{loadError}</p>
+          </div>
+        </div>
+      )}
 
       {/* Rider legend, stacked the same way as the operations mockup */}
       {couriers.length > 0 && (
