@@ -7,6 +7,7 @@ import { useAuth } from '../../context/AuthContext';
 import { formatGHS } from '../../lib/pricing';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { ReorderButton } from '../../components/common/ReorderButton';
+import { TestRingBellButton } from '../../components/common/TestRingBellButton';
 import { playCustomerSound, playCustomerStatusAlert } from '../../lib/soundAlerts';
 
 export const OrdersPage: React.FC = () => {
@@ -223,9 +224,16 @@ export const OrdersPage: React.FC = () => {
               Live updates and order history in Ghana
             </p>
           </div>
-          <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-1 rounded-xl">
-            {orders.length} {orders.length === 1 ? 'Order' : 'Orders'}
-          </span>
+          <div className="flex items-center gap-2">
+            <TestRingBellButton
+              tone="customer"
+              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 shadow-xs"
+              iconClassName="text-emerald-600"
+            />
+            <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-1 rounded-xl">
+              {orders.length} {orders.length === 1 ? 'Order' : 'Orders'}
+            </span>
+          </div>
         </div>
 
         {isLoading ? (

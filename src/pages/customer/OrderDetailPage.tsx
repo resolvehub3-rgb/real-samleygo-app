@@ -35,6 +35,7 @@ import { CourierLiveMap } from '../../components/courier/CourierLiveMap';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { UserAvatar } from '../../components/common/UserAvatar';
 import { ReorderButton } from '../../components/common/ReorderButton';
+import { TestRingBellButton } from '../../components/common/TestRingBellButton';
 import {
   playCustomerArrivedAlert,
   playCustomerSound,
@@ -681,15 +682,11 @@ export const OrderDetailPage: React.FC = () => {
                 {(isDelivered || isCancelled) && (
                   <ReorderButton order={order} className="px-3.5 py-1.5 text-xs" />
                 )}
-                <button
-                  type="button"
-                  onClick={() => playCustomerStatusAlert('PICKED_UP')}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 font-bold text-xs transition"
-                  title="Test customer alert sound (customer-sound.mp3, rings three times)"
-                >
-                  <Bell className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Test Alert Sound</span>
-                </button>
+                <TestRingBellButton
+                  tone="customer"
+                  className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
+                  iconClassName="text-emerald-600"
+                />
               </div>
             </div>
 

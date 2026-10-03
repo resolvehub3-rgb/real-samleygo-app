@@ -28,6 +28,7 @@ import { geocodeRestaurantPin } from '../../lib/restaurantPins';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { UserAvatar } from '../../components/common/UserAvatar';
 import { playRestaurantOrderAlert } from '../../lib/soundAlerts';
+import { TestRingBellButton } from '../../components/common/TestRingBellButton';
 
 // "3 min ago" style helper for order cards
 function timeAgo(iso: string) {
@@ -750,15 +751,11 @@ export const RestaurantDashboard: React.FC = () => {
 
             <div className="flex flex-col gap-2 sm:items-end">
               <div className="flex items-center gap-2 flex-wrap sm:justify-end">
-                <button
-                  type="button"
-                  onClick={() => playRestaurantOrderAlert()}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-white/15 hover:bg-white/25 active:scale-95 text-emerald-100 ring-1 ring-white/20 transition backdrop-blur-xs"
-                  title="Test professional restaurant ringing bell alert"
-                >
-                  <Bell className="w-3.5 h-3.5 text-amber-300" />
-                  <span>Test Ring Bell</span>
-                </button>
+                <TestRingBellButton
+                  tone="restaurant"
+                  className="px-3 py-1.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-white/15 hover:bg-white/25 text-emerald-100 ring-1 ring-white/20 backdrop-blur-xs"
+                  iconClassName="text-amber-300"
+                />
                 <span
                   className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-black uppercase tracking-wider ring-1 ${
                     restaurant.is_open
