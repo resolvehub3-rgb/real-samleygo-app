@@ -43,7 +43,6 @@ import {
 import { UserAvatar } from '../../components/common/UserAvatar';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { playCourierAssignedAlert, initAudioUnlock } from '../../lib/soundAlerts';
-import { TestRingBellButton } from '../../components/common/TestRingBellButton';
 
 export const CourierDashboard: React.FC = () => {
   const { user } = useAuth();
@@ -866,11 +865,6 @@ export const CourierDashboard: React.FC = () => {
               <span className="font-semibold">{locationStatus}</span>
             </div>
             <div className="flex items-center gap-3">
-              <TestRingBellButton
-                tone="courier"
-                className="px-3 py-1 rounded-xl text-xs font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200"
-                iconClassName="text-emerald-600 animate-pulse"
-              />
               {currentCoords && (
                 <span
                   className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-600 bg-slate-50 border border-slate-200 px-2 py-1 rounded-lg"
