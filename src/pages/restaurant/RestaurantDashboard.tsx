@@ -24,6 +24,7 @@ import { formatGHS } from '../../lib/pricing';
 import { RestaurantShell } from '../../components/restaurant/RestaurantShell';
 import { CourierLiveMap, LatLng } from '../../components/courier/CourierLiveMap';
 import { haversineKm } from '../../lib/routing';
+import { geocodeRestaurantPin } from '../../lib/restaurantPins';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { UserAvatar } from '../../components/common/UserAvatar';
 import { playRestaurantOrderAlert } from '../../lib/soundAlerts';
@@ -468,6 +469,30 @@ export const RestaurantDashboard: React.FC = () => {
 
       if (!error && data) {
         setRestaurant(data as Restaurant);
+
+        // Resolve the kitchen's GPS point from its address right away (best
+        // effort, non-blocking): the courier's map, the dispatch boards and the
+        // pickup route all draw one pin per registered kitchen, and many owners
+        // never open Settings to capture a pin themselves. Coordinates are
+        // persisted so the kitchen shows up everywhere from the first render.
+        void geocodeRestaurantPin({
+          id: data.id,
+          name: data.name,
+          address: data.address,
+          city: data.city,
+        }).then(async (pin) => {
+          if (!pin) return;
+          const { error: pinError } = await supabase
+            .from('restaurants')
+            .update({ latitude: pin.lat, longitude: pin.lng })
+            .eq('id', pin.id);
+          if (pinError) return;
+          setRestaurant((prev) =>
+            prev && prev.id === pin.id ? { ...prev, latitude: pin.lat, longitude: pin.lng } : prev
+          );
+        }).catch(() => {
+          // Best effort — the courier map resolves the address itself if this fails.
+        });
       }
     } catch {
       // Handled

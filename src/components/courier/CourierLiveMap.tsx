@@ -10,6 +10,7 @@ import {
   panToAnimated,
 } from '../../lib/googleMaps';
 import { escapeHtml, makePinContent, pinAnchor } from '../../lib/mapMarkers';
+import type { RestaurantMapPin } from '../../lib/restaurantPins';
 import {
   fetchRoadRoute,
   geocodeAddress,
@@ -32,13 +33,11 @@ export interface ActiveRouteInfo {
   durationSeconds: number;
 }
 
-/** A secondary restaurant pin drawn alongside the active trip. */
-export interface MapRestaurantPin {
-  id: string;
-  lat: number;
-  lng: number;
-  name?: string;
-}
+/**
+ * A secondary restaurant pin drawn alongside the active trip.
+ * One shared shape, owned by the map-pin helpers in `src/lib/restaurantPins`.
+ */
+export type MapRestaurantPin = RestaurantMapPin;
 
 interface CourierLiveMapProps {
   /** Courier's live position (updates in realtime) */

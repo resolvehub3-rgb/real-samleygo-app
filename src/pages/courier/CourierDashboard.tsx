@@ -34,6 +34,12 @@ import { watchPositionSafe, GeoError, describeGeoError } from '../../lib/geoloca
 import { keepScreenAwake } from '../../lib/wakeLock';
 import { usePlaceLabel } from '../../hooks/usePlaceLabel';
 import { CourierLiveMap, MapRestaurantPin } from '../../components/courier/CourierLiveMap';
+import {
+  RESTAURANT_PIN_COLUMNS,
+  geocodeRestaurantPin,
+  pinFromRow,
+  type RestaurantPinRow,
+} from '../../lib/restaurantPins';
 import { UserAvatar } from '../../components/common/UserAvatar';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { playCourierAssignedAlert, initAudioUnlock } from '../../lib/soundAlerts';
@@ -58,6 +64,18 @@ export const CourierDashboard: React.FC = () => {
   const [isInlineMapHidden, setIsInlineMapHidden] = useState(false);
   /** Every restaurant on the platform, drawn as secondary pins on the live map. */
   const [mapRestaurants, setMapRestaurants] = useState<MapRestaurantPin[]>([]);
+  /**
+   * Pins that came straight from the DB, kept apart from the ones resolved from
+   * address text so a background refresh can rebuild the list without dropping
+   * (and then re-drawing, one per second) the lookups already paid for.
+   */
+  const dbPinsRef = useRef<MapRestaurantPin[]>([]);
+  /** Address-resolved pins for this session — keys are restaurant ids. */
+  const resolvedPinsRef = useRef<Map<string, MapRestaurantPin>>(new Map());
+  /** Ids whose address lookup is already waiting its turn in the queue. */
+  const queuedLookupsRef = useRef<Set<string>>(new Set());
+  /** Newest read wins: a slow, older response never overwrites a fresher list. */
+  const mapRestaurantsSeqRef = useRef(0);
   const [incomingAssignedAlert, setIncomingAssignedAlert] = useState<{
     orderNumber: string | number;
     orderId: string;
@@ -172,38 +190,85 @@ export const CourierDashboard: React.FC = () => {
     }
   };
 
+  /** Rebuilds the drawn list from the DB rows plus everything resolved so far. */
+  const publishMapRestaurants = () => {
+    const fromDb = dbPinsRef.current;
+    const drawnIds = new Set(fromDb.map((pin) => pin.id));
+    const resolved = Array.from(resolvedPinsRef.current.values()).filter(
+      (pin) => !drawnIds.has(pin.id)
+    );
+    setMapRestaurants(
+      [...fromDb, ...resolved].sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
+    );
+  };
+
   /**
-   * All restaurants for the live map. Only the columns the map needs, rows
-   * without usable coordinates skipped, and every failure swallowed so a bad
-   * response can never take the dashboard (or its map) down.
+   * Look one kitchen's address up, then repaint. The lookup joins a queue that
+   * runs one request at a time (see `geocodeRestaurantPin`), so a long list of
+   * un-pinned kitchens fills in progressively instead of slamming the geocoder.
+   */
+  const queueRestaurantLookup = (row: RestaurantPinRow) => {
+    const id = row.id;
+    if (!id || queuedLookupsRef.current.has(id)) return;
+    queuedLookupsRef.current.add(id);
+
+    geocodeRestaurantPin(row)
+      .then((pin) => {
+        if (!pin) return; // Unplaceable address — it stays off the map (and is retried later).
+        resolvedPinsRef.current.set(pin.id, pin);
+        publishMapRestaurants();
+      })
+      .catch(() => {
+        // Defensive: a rejected lookup must never surface as an unhandled rejection.
+      })
+      .finally(() => {
+        queuedLookupsRef.current.delete(id);
+      });
+  };
+
+  /**
+   * All restaurants for the live map. Only the columns the map needs, bad rows
+   * skipped, and every failure swallowed so a bad response can never take the
+   * dashboard (or its map) down.
+   *
+   * Kitchens registered without a GPS point are NOT dropped: their address text
+   * is looked up in the background so every registered kitchen still lands on
+   * the courier's map (they just pop in a beat later).
    */
   const fetchMapRestaurants = async () => {
     if (!isSupabaseConfigured) return;
+    const seq = ++mapRestaurantsSeqRef.current;
 
     try {
       const { data, error } = await supabase
         .from('restaurants')
-        .select('id, name, latitude, longitude')
+        .select(RESTAURANT_PIN_COLUMNS)
         .order('name', { ascending: true });
 
       if (error || !Array.isArray(data)) return;
+      if (seq !== mapRestaurantsSeqRef.current) return; // a newer read already landed
 
+      const rows = data as RestaurantPinRow[];
+      const seenIds = new Set<string>();
       const pins: MapRestaurantPin[] = [];
-      for (const row of data as Array<{
-        id?: string | null;
-        name?: string | null;
-        latitude?: number | null;
-        longitude?: number | null;
-      }>) {
+      const needsLookup: RestaurantPinRow[] = [];
+
+      for (const row of rows) {
         if (!row?.id) continue;
-        if (row.latitude == null || row.longitude == null) continue;
-        if (!Number.isFinite(row.latitude) || !Number.isFinite(row.longitude)) continue;
-        if (Math.abs(row.latitude) > 90 || Math.abs(row.longitude) > 180) continue;
-        // Skip "null island" (0,0) — the artifact of a never-filled coordinate
-        if (Math.abs(row.latitude) < 0.01 && Math.abs(row.longitude) < 0.01) continue;
-        pins.push({ id: row.id, name: row.name ?? undefined, lat: row.latitude, lng: row.longitude });
+        seenIds.add(row.id);
+        const pin = pinFromRow(row);
+        if (pin) pins.push(pin);
+        else if (!resolvedPinsRef.current.has(row.id)) needsLookup.push(row);
       }
-      setMapRestaurants(pins);
+
+      // Drop resolved pins for kitchens that were deleted since last time.
+      for (const id of Array.from(resolvedPinsRef.current.keys())) {
+        if (!seenIds.has(id)) resolvedPinsRef.current.delete(id);
+      }
+
+      dbPinsRef.current = pins;
+      publishMapRestaurants();
+      needsLookup.forEach(queueRestaurantLookup);
     } catch {
       // Offline / RLS surprise — keep whatever pins are already on screen.
     }
