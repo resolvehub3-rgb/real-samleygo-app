@@ -15,6 +15,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useCart } from '../../context/CartContext';
 import { PWAInstallButton } from './PWAInstallButton';
+import { UserAvatar } from './UserAvatar';
 
 export const Navbar: React.FC = () => {
   const { user, profile, role, signOut, unreadCount, notifications, markNotificationAsRead } = useAuth();
@@ -228,9 +229,17 @@ export const Navbar: React.FC = () => {
                   }}
                   className="flex items-center gap-2 p-1.5 sm:px-3 sm:py-2 rounded-xl hover:bg-slate-100 border border-slate-200/60 transition"
                 >
-                  <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center justify-center">
-                    {profile?.full_name ? profile.full_name.charAt(0).toUpperCase() : <User className="w-4 h-4" />}
-                  </div>
+                  {/* The signed-in person's actual photo (uploaded on the profile
+                      page) — falls back to their initial, or the generic icon,
+                      when they have not added one yet. */}
+                  <UserAvatar
+                    src={profile?.avatar_url}
+                    name={profile?.full_name}
+                    sizeClassName="w-8 h-8"
+                    shapeClassName="rounded-lg"
+                    className="text-xs shadow-xs"
+                    fallback={profile?.full_name ? undefined : <User className="w-4 h-4" />}
+                  />
                   <span className="hidden lg:block text-xs font-bold text-slate-800 max-w-[100px] truncate">
                     {profile?.full_name || user.email?.split('@')[0]}
                   </span>
@@ -241,10 +250,22 @@ export const Navbar: React.FC = () => {
                 {showUserMenu && (
                   <div className="absolute right-0 mt-2 w-56 rounded-2xl bg-white shadow-2xl border border-slate-100 p-2 z-50">
                     <div className="px-3 py-2 border-b border-slate-100">
-                      <p className="text-xs font-bold text-slate-900 truncate">
-                        {profile?.full_name || 'My Account'}
-                      </p>
-                      <p className="text-[11px] text-slate-500 truncate">{user.email}</p>
+                      <div className="flex items-center gap-2.5">
+                        <UserAvatar
+                          src={profile?.avatar_url}
+                          name={profile?.full_name}
+                          sizeClassName="w-9 h-9"
+                          shapeClassName="rounded-xl"
+                          className="shadow-sm"
+                          fallback={profile?.full_name ? undefined : <User className="w-4 h-4" />}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-bold text-slate-900 truncate">
+                            {profile?.full_name || 'My Account'}
+                          </p>
+                          <p className="text-[11px] text-slate-500 truncate">{user.email}</p>
+                        </div>
+                      </div>
                       <span className="inline-block mt-1 text-[10px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md">
                         {role.replace('_', ' ')}
                       </span>
