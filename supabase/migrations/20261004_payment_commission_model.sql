@@ -811,23 +811,40 @@ create policy "Customers can record payments for their own orders" on public.pay
 --    IS NOT NULL), so a later platform rate change cannot rewrite
 --    historical orders.
 -- ---------------------------------------------------------------------
+-- LATERAL cannot reference the UPDATE target table by alias (42P10), so the
+-- financial split is computed in a CTE first and joined back by primary key.
+with backfill as (
+    select o.id,
+           f.commission_rate,
+           f.commission_amount,
+           f.restaurant_gross_amount,
+           f.restaurant_net_amount,
+           f.courier_earning,
+           f.platform_revenue,
+           case
+               when o.status in ('DELIVERED', 'COMPLETED')
+                    and o.payment_status in ('COMPLETED', 'PAID') then 'ELIGIBLE'::text
+               when o.status in ('CANCELLED', 'REJECTED', 'FAILED') then 'CANCELLED'
+               else 'PENDING'
+           end as settlement_status
+      from public.orders o
+      cross join lateral public.compute_order_financials(
+          o.restaurant_id, o.subtotal, o.delivery_fee
+      ) f
+     where o.commission_amount is null
+)
 update public.orders o
-   set commission_rate = f.commission_rate,
-       commission_amount = f.commission_amount,
-       restaurant_gross_amount = f.restaurant_gross_amount,
-       restaurant_net_amount = f.restaurant_net_amount,
-       courier_earning = f.courier_earning,
-       platform_revenue = f.platform_revenue,
+   set commission_rate = b.commission_rate,
+       commission_amount = b.commission_amount,
+       restaurant_gross_amount = b.restaurant_gross_amount,
+       restaurant_net_amount = b.restaurant_net_amount,
+       courier_earning = b.courier_earning,
+       platform_revenue = b.platform_revenue,
        commission_calculated_at = now(),
-       settlement_status = case
-           when o.status in ('DELIVERED', 'COMPLETED')
-                and o.payment_status in ('COMPLETED', 'PAID') then 'ELIGIBLE'
-           when o.status in ('CANCELLED', 'REJECTED', 'FAILED') then 'CANCELLED'
-           else 'PENDING'
-       end,
+       settlement_status = b.settlement_status,
        settlement_updated_at = now()
-  from lateral public.compute_order_financials(o.restaurant_id, o.subtotal, o.delivery_fee) f
- where o.commission_amount is null;
+  from backfill b
+ where o.id = b.id;
 
 -- ---------------------------------------------------------------------
 -- 10. ADMIN RPCs (server-validated; callable only by a super admin).
