@@ -32,6 +32,16 @@ import {
   maskLicenseNumber,
 } from '../../lib/verification';
 import { watchPositionSafe, GeoError, describeGeoError } from '../../lib/geolocation';
+import {
+  createGpsFilter,
+  destinationForPhase,
+  endNavigationSession,
+  gpsRejectionMessage,
+  navLog,
+  resolveNavigationPhase,
+  syncNavigationSession,
+  type GpsFilter,
+} from '../../lib/navigation';
 import { keepScreenAwake } from '../../lib/wakeLock';
 import { usePlaceLabel } from '../../hooks/usePlaceLabel';
 import { CourierLiveMap, MapRestaurantPin } from '../../components/courier/CourierLiveMap';
@@ -44,6 +54,28 @@ import {
 import { UserAvatar } from '../../components/common/UserAvatar';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { playCourierAssignedAlert, initAudioUnlock } from '../../lib/soundAlerts';
+
+/**
+ * How often the courier's `couriers` row is refreshed — this is what every
+ * live map (courier, customer, restaurant) renders. Active deliveries need a
+ * tight cadence so the customer can follow along; an idle courier is
+ * stationary and would only burn battery and rows.
+ */
+const LOC_PUBLISH_ACTIVE_MS = 10_000;
+const LOC_PUBLISH_IDLE_MS = 25_000;
+/**
+ * Breadcrumb cadence for `delivery_locations` (the replay/history trail).
+ * The live map reads the `couriers` row, so breadcrumbs only need to be
+ * dense enough to reconstruct the trip afterwards.
+ */
+const BREADCRUMB_MS = 60_000;
+/** Telemetry handed to the map's deviation filter and diagnostics HUD. */
+type CourierFixTelemetry = {
+  accuracy?: number | null;
+  heading?: number | null;
+  speed?: number | null;
+  timestamp?: number | null;
+} | null;
 
 export const CourierDashboard: React.FC = () => {
   const { user } = useAuth();
@@ -92,10 +124,20 @@ export const CourierDashboard: React.FC = () => {
   // Holds the geolocation watcher's cleanup function (typed as number for ref compatibility)
   const watchIdRef = useRef<number | null>(null);
   const lastWriteTimeRef = useRef<number>(0);
+  /** Last `delivery_locations` breadcrumb — a much slower cadence than the row. */
+  const lastBreadcrumbTimeRef = useRef<number>(0);
   const releaseWakeLockRef = useRef<(() => void) | null>(null);
   // Mirror of activeDelivery so the GPS watcher (a long-lived closure) always
   // breadcrumb-logs for the CURRENT delivery, not the one from when tracking began.
   const activeDeliveryRef = useRef<Order | null>(null);
+  /**
+   * Sequential GPS gate (accuracy / staleness / jump filtering). Built once so
+   * the fix history survives every re-render — a fresh filter would forget the
+   * previous fix and let a teleport through.
+   */
+  const gpsFilterRef = useRef<GpsFilter | null>(null);
+  /** Latest ACCEPTED GPS telemetry — accuracy/heading/speed for the map HUD. */
+  const [courierFix, setCourierFix] = useState<CourierFixTelemetry>(null);
 
   // Surface any non-fatal warning raised while creating the courier account
   useEffect(() => {
@@ -379,6 +421,48 @@ export const CourierDashboard: React.FC = () => {
     activeDeliveryRef.current = activeDelivery;
   }, [activeDelivery]);
 
+  // ── Navigation session: ONE authoritative record of what this courier is
+  // navigating to right now. It follows the order's status, so the phase can
+  // never disagree with the map — and a finished/cancelled order ends it.
+  useEffect(() => {
+    if (!user?.id || !isSupabaseConfigured) return;
+
+    if (!activeDelivery) {
+      endNavigationSession('NO_ACTIVE_DELIVERY');
+      return;
+    }
+
+    const pickup =
+      activeDelivery.restaurant?.latitude != null && activeDelivery.restaurant?.longitude != null
+        ? { lat: activeDelivery.restaurant.latitude, lng: activeDelivery.restaurant.longitude }
+        : null;
+    const dropoff =
+      activeDelivery.delivery_latitude != null && activeDelivery.delivery_longitude != null
+        ? { lat: activeDelivery.delivery_latitude, lng: activeDelivery.delivery_longitude }
+        : null;
+
+    const phase = resolveNavigationPhase(activeDelivery.status, {
+      hasPickup: pickup !== null,
+      hasDestination: dropoff !== null,
+    });
+    if (phase === 'IDLE') {
+      // Ended/cancelled (or no coordinates at all) — never navigate anywhere.
+      endNavigationSession('NO_NAVIGATION_TARGET');
+      return;
+    }
+
+    syncNavigationSession({
+      orderId: activeDelivery.id,
+      courierId: user.id,
+      phase,
+      origin: currentCoords,
+      destination: destinationForPhase(phase, pickup, dropoff),
+    });
+    // `currentCoords` is the courier's latest GPS — the session's origin is
+    // always where they are, never where the trip started.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, activeDelivery, currentCoords]);
+
   // Realtime: approval status & document review updates pushed from the admin console
   useEffect(() => {
     if (!user?.id || !isSupabaseConfigured) return;
@@ -480,14 +564,58 @@ export const CourierDashboard: React.FC = () => {
 
     const stopFn = watchPositionSafe(
       async (point) => {
+        const now = Date.now();
+        const fix = {
+          lat: point.lat,
+          lng: point.lng,
+          accuracy: point.accuracy ?? null,
+          heading: point.heading ?? null,
+          speed: point.speed ?? null,
+          timestamp: point.timestamp ?? null,
+        };
+
+        // Sequential gate: accuracy, staleness and implausible-jump filtering.
+        // A rejected fix never moves the marker, never gets published, and
+        // never triggers a reroute — the last good fix stays authoritative.
+        if (!gpsFilterRef.current) gpsFilterRef.current = createGpsFilter();
+        const verdict = gpsFilterRef.current.accept(fix, now);
+        if (!verdict.ok) {
+          navLog('NAVIGATION_GPS_REJECTED', {
+            reason: verdict.reason,
+            accuracyMeters: fix.accuracy ?? undefined,
+          });
+          const message = gpsRejectionMessage(verdict.reason);
+          if (message) setLocationStatus(message);
+          return;
+        }
+
         const { lat, lng } = point;
         setCurrentCoords({ lat, lng });
-        setLocationStatus('GPS Live · updating every few seconds');
+        setCourierFix({
+          accuracy: fix.accuracy,
+          heading: fix.heading,
+          speed: fix.speed,
+          timestamp: fix.timestamp ?? now,
+        });
+        setLocationStatus(
+          verdict.weak
+            ? 'GPS signal is weak — using the best available fix'
+            : 'GPS Live · updating every few seconds'
+        );
 
-        // Throttle database writes (minimum 10 seconds between writes to preserve battery & network)
-        const now = Date.now();
-        if (now - lastWriteTimeRef.current > 10000 && user) {
+        const delivery = activeDeliveryRef.current;
+
+        // Throttle database writes: a delivery in progress publishes every ~10 s
+        // (that is what moves the customer's map), an idle courier every ~25 s.
+        const publishGap = delivery ? LOC_PUBLISH_ACTIVE_MS : LOC_PUBLISH_IDLE_MS;
+        if (now - lastWriteTimeRef.current > publishGap && user) {
           lastWriteTimeRef.current = now;
+          navLog('NAVIGATION_GPS_UPDATE', {
+            lat,
+            lng,
+            accuracyMeters: fix.accuracy ?? undefined,
+            active: Boolean(delivery),
+          });
 
           try {
             // Update courier coordinates (this is what moves the maps).
@@ -505,23 +633,29 @@ export const CourierDashboard: React.FC = () => {
             if (coordError) {
               console.warn('[GPS] courier coordinate write failed:', coordError.message);
             }
-
-            // If currently delivering an order, log breadcrumb to delivery_locations
-            // (ref keeps this current — the watcher closure would be stale)
-            if (activeDeliveryRef.current) {
-              const { error: breadcrumbError } = await supabase.from('delivery_locations').insert({
-                order_id: activeDeliveryRef.current.id,
-                courier_id: user.id,
-                latitude: lat,
-                longitude: lng,
-              });
-              if (breadcrumbError) {
-                console.warn('[GPS] delivery breadcrumb write failed:', breadcrumbError.message);
-              }
-            }
           } catch (err) {
             // Network failure — keep watching, retry on next tick
             console.warn('[GPS] location write threw:', err instanceof Error ? err.message : err);
+          }
+        }
+
+        // History breadcrumb, on its own slower cadence (the live map does not
+        // read it — writing one per fix would multiply DB writes for nothing).
+        // (ref keeps this current — the watcher closure would be stale)
+        if (delivery && user && now - lastBreadcrumbTimeRef.current > BREADCRUMB_MS) {
+          lastBreadcrumbTimeRef.current = now;
+          try {
+            const { error: breadcrumbError } = await supabase.from('delivery_locations').insert({
+              order_id: delivery.id,
+              courier_id: user.id,
+              latitude: lat,
+              longitude: lng,
+            });
+            if (breadcrumbError) {
+              console.warn('[GPS] delivery breadcrumb write failed:', breadcrumbError.message);
+            }
+          } catch (err) {
+            console.warn('[GPS] breadcrumb write threw:', err instanceof Error ? err.message : err);
           }
         }
       },
@@ -548,6 +682,12 @@ export const CourierDashboard: React.FC = () => {
       releaseWakeLockRef.current();
       releaseWakeLockRef.current = null;
     }
+    // Fresh tracking session → forget the old fix history (its timestamps are
+    // from before the gap and would reject the first fix of the new session).
+    gpsFilterRef.current?.reset();
+    // No GPS → no navigation: end the session so nothing keeps pointing at a
+    // destination the courier is no longer tracking (logged off / unmounted).
+    endNavigationSession('GPS_STOPPED');
     setGpsActive(false);
     setLocationStatus('GPS Offline');
   };
@@ -950,6 +1090,8 @@ export const CourierDashboard: React.FC = () => {
                       : undefined
                   }
                   restaurants={otherRestaurants}
+                  courierFix={courierFix}
+                  showNavigationHud
                   className="h-56 sm:h-64"
                 />
 
@@ -1320,6 +1462,7 @@ export const CourierDashboard: React.FC = () => {
           courierPhone={courier?.profile?.phone}
           customerPhone={activeDelivery?.customer_phone}
           role="COURIER"
+          courierFix={courierFix}
         />
 
       </div>

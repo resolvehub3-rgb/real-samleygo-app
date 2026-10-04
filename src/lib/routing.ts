@@ -1,9 +1,11 @@
 /**
  * Map routing & geocoding helpers for the live delivery map.
  *
- * Road routes come from the free OSRM demo server and address lookups from
- * OpenStreetMap Nominatim — both keyless public endpoints, which means they
- * are best-effort. Every call here is therefore defensive:
+ * Road routes come from an OSRM-compatible routing engine (the free
+ * router.project-osrm.org demo endpoint by default, overridable with
+ * `VITE_ROUTING_API_URL` for a self-hosted or proxied instance) and address
+ * lookups from OpenStreetMap Nominatim — keyless public endpoints, which
+ * means they are best-effort. Every call here is therefore defensive:
  *
  *  - a hard timeout via AbortController (never hangs a UI)
  *  - in-memory cache + in-flight de-duplication so rapid pings never hammer
@@ -13,8 +15,27 @@
  *  - ANY failure resolves to `null` instead of throwing — callers fall back
  *    to the straight-line route or simply hide the pin.
  *
+ * PROVIDER ABSTRACTION: the app only talks to the {@link RoutingService}
+ * interface and the provider-agnostic {@link NavigationRoute} structure (see
+ * `src/lib/navigation.ts`). Swapping OSRM for another engine only means
+ * re-implementing that one class — no UI, map or state code changes.
+ *
+ * COORDINATES: this module is the ONLY place that converts SamleyGo's
+ * canonical `{ lat, lng }` into a provider's `lon,lat` URL order / GeoJSON
+ * `[lng, lat]` pairs. Input coordinates are validated (and obvious lat/lng
+ * swaps corrected) by `normalizeCoordinate` before they are sent.
+ *
  * Nothing in here can surface an error to the user.
  */
+
+import {
+  asCoordinate,
+  buildInstruction,
+  navLog,
+  type NavPoint,
+  type NavigationRoute,
+  type NavigationStep,
+} from './navigation';
 
 export interface LatLng {
   lat: number;
@@ -28,7 +49,27 @@ export interface RoadRoute {
   durationSeconds: number;
 }
 
-const OSRM_URL = 'https://router.project-osrm.org/route/v1/driving';
+/**
+ * Base URL of an OSRM-compatible routing API (`…/route/v1`). Defaults to the
+ * public demo endpoint; point `VITE_ROUTING_API_URL` at a self-hosted engine
+ * or a SamleyGo server proxy when a keyed/commercial provider is adopted —
+ * secrets must NEVER ship in the client bundle.
+ */
+// Vite injects `import.meta.env` at build time. In non-Vite runtimes (the
+// node test runners, plain tsx) it does not exist, so fall back to an empty
+// value instead of throwing — the default demo endpoint is used.
+const routingEnvUrl = (): string => {
+  try {
+    const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+    return (env?.VITE_ROUTING_API_URL ?? '').trim();
+  } catch {
+    return '';
+  }
+};
+
+const ROUTING_API_URL = routingEnvUrl().replace(/\/+$/, '');
+const OSRM_BASE_URL = ROUTING_API_URL || 'https://router.project-osrm.org/route/v1';
+
 const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
 
@@ -46,7 +87,7 @@ interface CacheEntry<T> {
   expires: number;
 }
 
-const routeCache = new Map<string, CacheEntry<RoadRoute | null>>();
+const routeCache = new Map<string, CacheEntry<NavigationRoute | null>>();
 const geocodeCache = new Map<string, CacheEntry<LatLng | null>>();
 const searchCache = new Map<string, CacheEntry<AddressSuggestion[]>>();
 const reverseCache = new Map<string, CacheEntry<string | null>>();
@@ -90,87 +131,250 @@ async function getJson(url: string): Promise<unknown | null> {
 
 const round = (value: number, decimals: number) => Number(value.toFixed(decimals));
 
-const routeCacheKey = (from: LatLng, to: LatLng): string =>
-  `${round(from.lat, 4)},${round(from.lng, 4)}>${round(to.lat, 4)},${round(to.lng, 4)}`;
+const routeCacheKey = (from: NavPoint, to: NavPoint, suffix: string): string =>
+  `${round(from.lat, 4)},${round(from.lng, 4)}>${round(to.lat, 4)},${round(to.lng, 4)}${suffix}`;
 
-/**
- * Fetch ONLY the road distance (km) between two points — a much lighter
- * request than `fetchRoadRoute`, because the delivery-quote flow needs the
- * metre count, not the polyline.
- *
- * Uses the same cache/timeout/never-throw rules: `null` means "no route
- * could be resolved", and the caller then falls back to the server's own
- * straight-line measurement (which is what the backend validates against).
- */
-export async function fetchRoadDistanceKm(from: LatLng, to: LatLng): Promise<number | null> {
-  if (!isCoordinate(from) || !isCoordinate(to)) return null;
-  if (Math.abs(from.lat - to.lat) < 1e-6 && Math.abs(from.lng - to.lng) < 1e-6) return null;
-
-  const route = await fetchRoadRoute(from, to);
-  if (!route || !Number.isFinite(route.distanceMeters) || route.distanceMeters <= 0) return null;
-  return Number((route.distanceMeters / 1000).toFixed(3));
+/** Options accepted by every routing request. */
+export interface RouteRequestOptions {
+  /** Ask the engine for turn-by-turn steps (navigation screens). Default `false`. */
+  steps?: boolean;
 }
 
 /**
- * Fetch the driving route between two points.
- *
- * @returns the road polyline with distance/ETA, or `null` when no route can be
- * resolved (caller draws its straight-line fallback instead).
+ * The routing abstraction. The rest of the app only ever sees this interface
+ * and the provider-agnostic `NavigationRoute` — never an OSRM/Google/Valhalla
+ * response shape — so the backend can be replaced without touching a single
+ * component.
  */
-export async function fetchRoadRoute(from: LatLng, to: LatLng): Promise<RoadRoute | null> {
-  if (!isCoordinate(from) || !isCoordinate(to)) return null;
+export interface RoutingService {
+  /** Stable identifier, stored on every route it produces. */
+  readonly id: string;
+  /**
+   * Calculate the drivable road route from `origin` to `destination`.
+   * Resolves to `null` (never throws) when no route can be resolved.
+   */
+  calculateRoute(
+    origin: NavPoint,
+    destination: NavPoint,
+    options?: RouteRequestOptions
+  ): Promise<NavigationRoute | null>;
+}
+
+// ── OSRM response shapes (only ever read here) ─────────────────────────────
+
+interface OsrmManeuverRaw {
+  type?: unknown;
+  modifier?: unknown;
+  location?: unknown;
+  bearing_after?: unknown;
+  exit?: unknown;
+}
+
+interface OsrmStepRaw {
+  distance?: unknown;
+  duration?: unknown;
+  name?: unknown;
+  maneuver?: OsrmManeuverRaw;
+}
+
+interface OsrmRouteRaw {
+  distance?: unknown;
+  duration?: unknown;
+  geometry?: { coordinates?: unknown };
+  legs?: Array<{ steps?: unknown }>;
+}
+
+const toFiniteNumber = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+/**
+ * Decode a GeoJSON LineString into canonical `{ lat, lng }` points.
+ *
+ * GeoJSON is `[lng, lat]` — the classic source of reversed routes when read
+ * as `[lat, lng]`. Every pair is range-checked; malformed pairs are dropped.
+ */
+const parseGeometryCoordinates = (raw: unknown): NavPoint[] => {
+  const points: NavPoint[] = [];
+  if (!Array.isArray(raw)) return points;
+  for (const pair of raw) {
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    const lng = toFiniteNumber(pair[0]);
+    const lat = toFiniteNumber(pair[1]);
+    if (lat === null || lng === null) continue;
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) continue;
+    points.push({ lat, lng });
+  }
+  return points;
+};
+
+/** Flatten every leg's steps into SamleyGo `NavigationStep`s. */
+const parseSteps = (route: OsrmRouteRaw): NavigationStep[] => {
+  const steps: NavigationStep[] = [];
+  let cumulative = 0;
+
+  for (const leg of route.legs ?? []) {
+    if (!Array.isArray(leg?.steps)) continue;
+    for (const raw of leg.steps as OsrmStepRaw[]) {
+      const distance = toFiniteNumber(raw?.distance) ?? 0;
+      const duration = toFiniteNumber(raw?.duration) ?? 0;
+      const maneuver = raw?.maneuver;
+      const locationRaw = Array.isArray(maneuver?.location) ? maneuver.location : null;
+      const lng = locationRaw ? toFiniteNumber(locationRaw[0]) : null;
+      const lat = locationRaw ? toFiniteNumber(locationRaw[1]) : null;
+      const type = typeof maneuver?.type === 'string' ? maneuver.type : 'continue';
+      const modifier =
+        typeof maneuver?.modifier === 'string' ? maneuver.modifier : undefined;
+      const name = typeof raw?.name === 'string' ? raw.name : '';
+      const bearingAfter = toFiniteNumber(maneuver?.bearing_after);
+      const exit = toFiniteNumber(maneuver?.exit);
+
+      steps.push({
+        instruction: buildInstruction({
+          type,
+          modifier,
+          name,
+          bearingAfter,
+          exit,
+        }),
+        distanceMeters: Math.round(distance),
+        durationSeconds: Math.round(duration),
+        maneuverType: type,
+        maneuverModifier: modifier,
+        roadName: name || undefined,
+        location:
+          lat !== null && lng !== null && Math.abs(lat) <= 90 && Math.abs(lng) <= 180
+            ? { lat, lng }
+            : { lat: 0, lng: 0 },
+        cumulativeMeters: Math.round(cumulative),
+      });
+      cumulative += distance;
+    }
+  }
+
+  return steps;
+};
+
+/** Turn one decoded OSRM route into the app's `NavigationRoute`. */
+const parseOsrmRoute = (route: OsrmRouteRaw | undefined, provider: string): NavigationRoute | null => {
+  if (!route) return null;
+  const distance = toFiniteNumber(route.distance);
+  const duration = toFiniteNumber(route?.duration);
+  if (!distance || !duration) return null;
+
+  const coordinates = parseGeometryCoordinates(route.geometry?.coordinates);
+  if (coordinates.length < 2) return null;
+
+  return {
+    distanceMeters: Math.round(distance),
+    durationSeconds: Math.round(duration),
+    geometry: { coordinates },
+    steps: parseSteps(route),
+    calculatedAt: new Date().toISOString(),
+    provider,
+  };
+};
+
+// ── The OSRM-backed service ────────────────────────────────────────────────
+
+class OsrmRoutingService implements RoutingService {
+  readonly id = 'OSRM';
+
+  async calculateRoute(
+    origin: NavPoint,
+    destination: NavPoint,
+    options: RouteRequestOptions = {}
+  ): Promise<NavigationRoute | null> {
+    // Delegates to the module-level function so validation, caching, logging
+    // and the never-throw contract stay in exactly one place.
+    return calculateRoute(origin, destination, options);
+  }
+}
+
+/** The routing backend used across the app (swap here to change providers). */
+export const routingService: RoutingService = new OsrmRoutingService();
+
+/**
+ * Calculate (and cache) a road route through the configured
+ * {@link RoutingService}. Never throws; `null` means "no route could be
+ * resolved right now".
+ *
+ * Origin is ALWAYS the caller's first argument — navigation always passes the
+ * courier's current GPS fix as origin and the active phase's destination as
+ * destination, and this function refuses invalid/swapped coordinates.
+ */
+export async function calculateRoute(
+  origin: NavPoint,
+  destination: NavPoint,
+  options: RouteRequestOptions = {}
+): Promise<NavigationRoute | null> {
+  const from = asCoordinate(origin);
+  const to = asCoordinate(destination);
+  if (!from || !to) {
+    navLog('NAVIGATION_ROUTE_FAILURE', { reason: 'INVALID_COORDINATES' }, 'warn');
+    return null;
+  }
   // Degenerate requests (a few metres apart) add nothing to the map.
   if (Math.abs(from.lat - to.lat) < 1e-6 && Math.abs(from.lng - to.lng) < 1e-6) return null;
 
+  const wantsSteps = options.steps === true;
   prune(routeCache as Map<string, CacheEntry<unknown>>);
 
-  const key = routeCacheKey(from, to);
+  const key = routeCacheKey(from, to, wantsSteps ? ':steps' : '');
   const cached = routeCache.get(key);
   if (cached && cached.expires > Date.now()) return cached.value;
 
   const pending = inFlight.get(key);
-  if (pending) return pending as Promise<RoadRoute | null>;
+  if (pending) return pending as Promise<NavigationRoute | null>;
 
-  const request = (async (): Promise<RoadRoute | null> => {
-    const url = `${OSRM_URL}/${from.lng},${from.lat};${to.lng},${to.lat}` +
-      '?overview=full&geometries=geojson&alternatives=false&steps=false';
+  const startedAt = Date.now();
+  navLog('NAVIGATION_ROUTE_REQUEST', {
+    provider: routingService.id,
+    origin: from,
+    destination: to,
+    steps: wantsSteps,
+  });
 
-    const json = (await getJson(url)) as {
-      routes?: Array<{
-        distance?: number;
-        duration?: number;
-        geometry?: { coordinates?: unknown };
-      }>;
-    } | null;
+  const request = (async (): Promise<NavigationRoute | null> => {
+    // Provider boundary: SamleyGo `{lat,lng}` → OSRM `lon,lat` URL order.
+    const url =
+      `${OSRM_BASE_URL}/driving/${from.lng},${from.lat};${to.lng},${to.lat}` +
+      `?overview=full&geometries=geojson&alternatives=false&steps=${wantsSteps ? 'true' : 'false'}`;
 
-    const route = json?.routes?.[0];
-    const raw = Array.isArray(route?.geometry?.coordinates)
-      ? (route.geometry.coordinates as unknown[])
-      : [];
+    const json = (await getJson(url)) as { routes?: OsrmRouteRaw[] } | null;
 
-    const coordinates: LatLng[] = [];
-    for (const point of raw) {
-      if (Array.isArray(point) && point.length >= 2) {
-        const [lng, lat] = point as [unknown, unknown];
-        if (typeof lng === 'number' && typeof lat === 'number' && Number.isFinite(lng) && Number.isFinite(lat)) {
-          coordinates.push({ lat, lng });
-        }
-      }
-    }
-
-    if (coordinates.length < 2 || !route?.distance || !route?.duration) {
-      // No route (islands, water, service gap) — remember briefly to avoid retry storms.
+    if (!json) {
+      navLog(
+        'NAVIGATION_ROUTE_FAILURE',
+        { reason: 'NETWORK_OR_TIMEOUT', provider: routingService.id, ms: Date.now() - startedAt },
+        'warn'
+      );
       routeCache.set(key, { value: null, expires: Date.now() + ROUTE_MISS_TTL_MS });
       return null;
     }
 
-    const value: RoadRoute = {
-      coordinates,
-      distanceMeters: Math.round(route.distance),
-      durationSeconds: Math.round(route.duration),
-    };
-    routeCache.set(key, { value, expires: Date.now() + ROUTE_CACHE_TTL_MS });
-    return value;
+    const route = parseOsrmRoute(json.routes?.[0], routingService.id);
+
+    if (!route) {
+      // No route (islands, water, service gap) — remember briefly to avoid retry storms.
+      navLog(
+        'NAVIGATION_ROUTE_FAILURE',
+        { reason: json.routes?.length ? 'MALFORMED_ROUTE' : 'NO_ROUTE', provider: routingService.id },
+        'warn'
+      );
+      routeCache.set(key, { value: null, expires: Date.now() + ROUTE_MISS_TTL_MS });
+      return null;
+    }
+
+    navLog('NAVIGATION_ROUTE_SUCCESS', {
+      provider: routingService.id,
+      distanceMeters: route.distanceMeters,
+      durationSeconds: route.durationSeconds,
+      steps: route.steps.length,
+      ms: Date.now() - startedAt,
+    });
+
+    routeCache.set(key, { value: route, expires: Date.now() + ROUTE_CACHE_TTL_MS });
+    return route;
   })();
 
   inFlight.set(key, request);
@@ -179,6 +383,38 @@ export async function fetchRoadRoute(from: LatLng, to: LatLng): Promise<RoadRout
   } finally {
     inFlight.delete(key);
   }
+}
+
+/**
+ * Fetch ONLY the road distance (km) between two points — a much lighter
+ * request than a full navigation route (no steps), because the delivery-quote
+ * flow needs the metre count, not the polyline or instructions.
+ *
+ * Uses the same cache/timeout/never-throw rules: `null` means "no route
+ * could be resolved", and the caller then falls back to the server's own
+ * straight-line measurement (which is what the backend validates against).
+ */
+export async function fetchRoadDistanceKm(from: LatLng, to: LatLng): Promise<number | null> {
+  const route = await fetchRoadRoute(from, to);
+  if (!route || !Number.isFinite(route.distanceMeters) || route.distanceMeters <= 0) return null;
+  return Number((route.distanceMeters / 1000).toFixed(3));
+}
+
+/**
+ * Fetch the driving route between two points (polyline + distance + ETA,
+ * no turn-by-turn steps — use {@link calculateRoute} for navigation).
+ *
+ * @returns the road route, or `null` when no route can be resolved (caller
+ * draws its straight-line fallback instead).
+ */
+export async function fetchRoadRoute(from: LatLng, to: LatLng): Promise<RoadRoute | null> {
+  const route = await calculateRoute(from, to, { steps: false });
+  if (!route) return null;
+  return {
+    coordinates: route.geometry.coordinates,
+    distanceMeters: route.distanceMeters,
+    durationSeconds: route.durationSeconds,
+  };
 }
 
 async function nominatimLookup(url: string): Promise<LatLng | null> {

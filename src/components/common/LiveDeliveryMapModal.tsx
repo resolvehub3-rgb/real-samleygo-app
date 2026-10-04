@@ -41,6 +41,17 @@ export interface LiveDeliveryMapModalProps {
   customerPhone?: string;
   lastPingAgeMinutes?: number | null;
   role?: 'COURIER' | 'CUSTOMER' | 'RESTAURANT';
+  /**
+   * The courier's own GPS telemetry (only known on the courier's screen).
+   * Feeds deviation thresholds, marker heading and the diagnostics HUD; other
+   * roles simply omit it and get position-only tracking as before.
+   */
+  courierFix?: {
+    accuracy?: number | null;
+    heading?: number | null;
+    speed?: number | null;
+    timestamp?: number | null;
+  } | null;
 }
 
 export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
@@ -62,6 +73,7 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
   customerPhone,
   lastPingAgeMinutes,
   role = 'CUSTOMER',
+  courierFix,
 }) => {
   // Close on Escape key
   useEffect(() => {
@@ -309,11 +321,19 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
             destinationAddress={destinationAddress}
             restaurants={restaurants}
             onRouteUpdate={setRouteInfo}
+            courierFix={courierFix}
+            showNavigationHud={role === 'COURIER'}
             className="w-full h-full min-h-[300px] sm:min-h-[440px] md:min-h-[480px] rounded-none border-0"
           />
 
-          {/* Floating Live Guidance Overlay */}
-          <div className="absolute bottom-3 left-3 right-3 sm:left-4 sm:right-auto z-10 max-w-sm bg-white/95 backdrop-blur-md rounded-2xl p-3 border border-slate-200/90 shadow-lg text-xs space-y-1">
+          {/* Floating Live Guidance Overlay. The courier's own HUD draws a
+              remaining-distance strip along the bottom of the map, so on that
+              screen the card sits above it instead of covering it. */}
+          <div
+            className={`absolute ${
+              role === 'COURIER' ? 'bottom-14' : 'bottom-3'
+            } left-3 right-3 sm:left-4 sm:right-auto z-10 max-w-sm bg-white/95 backdrop-blur-md rounded-2xl p-3 border border-slate-200/90 shadow-lg text-xs space-y-1`}
+          >
             <div className="flex items-center justify-between gap-2 font-bold text-slate-900">
               <span className="flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
@@ -345,7 +365,18 @@ export const LiveDeliveryMapModal: React.FC<LiveDeliveryMapModalProps> = ({
                   {routeInfo.leg === 'TO_PICKUP' ? 'Road route to kitchen' : 'Road route to customer'}
                 </span>
                 <span className="ml-auto font-black text-emerald-700 whitespace-nowrap">
-                  {formatRouteDistance(routeInfo.distanceMeters)} · {formatRouteDuration(routeInfo.durationSeconds)}
+                  {routeInfo.remainingMeters != null
+                    ? // Live remaining leg (falls back to the totals before the
+                      // first projection lands).
+                      `${
+                        formatRouteDistance(routeInfo.remainingMeters) || '0 m'
+                      } left · ${
+                        formatRouteDuration(routeInfo.remainingSeconds ?? routeInfo.durationSeconds) ||
+                        'now'
+                      }`
+                    : `${formatRouteDistance(routeInfo.distanceMeters)} · ${formatRouteDuration(
+                        routeInfo.durationSeconds
+                      )}`}
                 </span>
               </div>
             )}

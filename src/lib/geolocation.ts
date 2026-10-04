@@ -14,6 +14,12 @@ export interface GeoPoint {
   lat: number;
   lng: number;
   accuracy?: number;
+  /** Degrees clockwise from north (0–360), when the device provides it. */
+  heading?: number | null;
+  /** Metres per second, when the device provides it. */
+  speed?: number | null;
+  /** Epoch ms of the fix as reported by the device. */
+  timestamp?: number;
 }
 
 export class GeoError extends Error {
@@ -59,6 +65,16 @@ interface GetOptions {
   timeoutMs?: number;
 }
 
+/** Normalise a browser `Position` into a GeoPoint with all available telemetry. */
+const toGeoPoint = (pos: GeolocationPosition): GeoPoint => ({
+  lat: pos.coords.latitude,
+  lng: pos.coords.longitude,
+  accuracy: pos.coords.accuracy,
+  heading: pos.coords.heading,
+  speed: pos.coords.speed,
+  timestamp: pos.timestamp,
+});
+
 /** Promise-based one-shot position with secure-context check + accuracy fallback. */
 export function getCurrentPositionSafe(opts?: GetOptions): Promise<GeoPoint> {
   return new Promise((resolve, reject) => {
@@ -90,12 +106,7 @@ export function getCurrentPositionSafe(opts?: GetOptions): Promise<GeoPoint> {
 
     const tryAttempt = (index: number) => {
       navigator.geolocation.getCurrentPosition(
-        (pos) =>
-          resolve({
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude,
-            accuracy: pos.coords.accuracy,
-          }),
+        (pos) => resolve(toGeoPoint(pos)),
         (err) => {
           // Permission/availability errors are final — no point retrying with
           // different accuracy. Only timeouts fall through to the next attempt.
@@ -145,11 +156,7 @@ export function watchPositionSafe(
   watchId = navigator.geolocation.watchPosition(
     (pos) => {
       started = true;
-      onSuccess({
-        lat: pos.coords.latitude,
-        lng: pos.coords.longitude,
-        accuracy: pos.coords.accuracy,
-      });
+      onSuccess(toGeoPoint(pos));
     },
     (err) => {
       if (err.code === 1 || err.code === 2) {
@@ -164,11 +171,7 @@ export function watchPositionSafe(
         watchId = navigator.geolocation.watchPosition(
           (pos) => {
             started = true;
-            onSuccess({
-              lat: pos.coords.latitude,
-              lng: pos.coords.longitude,
-              accuracy: pos.coords.accuracy,
-            });
+            onSuccess(toGeoPoint(pos));
           },
           (err2) => onError(new GeoError(describeGeoError(err2), err2.code)),
           { enableHighAccuracy: false, timeout: 15000, maximumAge: 20000 }

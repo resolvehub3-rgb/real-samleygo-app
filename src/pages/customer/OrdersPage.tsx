@@ -20,6 +20,8 @@ export const OrdersPage: React.FC = () => {
   // transition. payload.old is unreliable (REPLICA IDENTITY default only ships
   // the primary key), so the realtime handler compares against this instead.
   const lastAlertedStatusRef = useRef<Record<string, string>>({});
+  /** Epoch ms of the last courier position applied to the open map (stale-guard). */
+  const lastAppliedPosAtRef = useRef(0);
 
   // Live GPS courier tracking for the opened map modal on Orders list
   useEffect(() => {
@@ -29,16 +31,39 @@ export const OrdersPage: React.FC = () => {
     }
 
     let isMounted = true;
+    // Epoch ms of the last position drawn. Realtime can arrive late or replay
+    // (socket reconnects, delayed inserts), so anything older than this is
+    // dropped — the marker never rides backwards.
+    lastAppliedPosAtRef.current = 0;
+
+    const applyPosition = (
+      lat: number,
+      lng: number,
+      at?: string | number | null
+    ): void => {
+      if (!isMounted) return;
+      const ts =
+        typeof at === 'number' ? at : typeof at === 'string' ? Date.parse(at) : Number.NaN;
+      if (Number.isFinite(ts)) {
+        if (ts < lastAppliedPosAtRef.current) return;
+        lastAppliedPosAtRef.current = ts;
+      }
+      setMapCourierPos({ lat, lng });
+    };
 
     // Fetch initial courier location
     supabase
       .from('couriers')
-      .select('current_latitude, current_longitude')
+      .select('current_latitude, current_longitude, current_location_updated_at')
       .eq('id', mapOrder.courier_id)
       .maybeSingle() // no courier row yet → null, not HTTP 406
       .then(({ data }) => {
-        if (isMounted && data?.current_latitude && data?.current_longitude) {
-          setMapCourierPos({ lat: data.current_latitude, lng: data.current_longitude });
+        if (data?.current_latitude && data?.current_longitude) {
+          applyPosition(
+            data.current_latitude,
+            data.current_longitude,
+            data.current_location_updated_at ?? null
+          );
         }
       });
 
@@ -57,9 +82,14 @@ export const OrdersPage: React.FC = () => {
           const next = payload.new as {
             current_latitude?: number | null;
             current_longitude?: number | null;
+            current_location_updated_at?: string | null;
           };
-          if (isMounted && next.current_latitude != null && next.current_longitude != null) {
-            setMapCourierPos({ lat: next.current_latitude, lng: next.current_longitude });
+          if (next.current_latitude != null && next.current_longitude != null) {
+            applyPosition(
+              next.current_latitude,
+              next.current_longitude,
+              next.current_location_updated_at ?? null
+            );
           }
         }
       )
@@ -72,9 +102,13 @@ export const OrdersPage: React.FC = () => {
           filter: `courier_id=eq.${mapOrder.courier_id}`,
         },
         (payload) => {
-          const loc = payload.new as { latitude?: number; longitude?: number };
-          if (isMounted && loc.latitude != null && loc.longitude != null) {
-            setMapCourierPos({ lat: loc.latitude, lng: loc.longitude });
+          const loc = payload.new as {
+            latitude?: number;
+            longitude?: number;
+            recorded_at?: string | null;
+          };
+          if (loc.latitude != null && loc.longitude != null) {
+            applyPosition(loc.latitude, loc.longitude, loc.recorded_at ?? null);
           }
         }
       )

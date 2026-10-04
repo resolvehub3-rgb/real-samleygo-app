@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { LocateFixed } from 'lucide-react';
+import { ArrowUp, CornerUpLeft, CornerUpRight, LocateFixed, MapPin } from 'lucide-react';
 import {
   ACCRA,
   MAP_ID,
@@ -12,12 +12,28 @@ import {
 import { escapeHtml, makePinContent, pinAnchor } from '../../lib/mapMarkers';
 import type { RestaurantMapPin } from '../../lib/restaurantPins';
 import {
-  fetchRoadRoute,
+  calculateRoute,
+  formatRouteDistance,
+  formatRouteDuration,
   geocodeAddress,
   haversineKm,
   type LatLng,
-  type RoadRoute,
 } from '../../lib/routing';
+import {
+  destinationForPhase,
+  evaluateReroute,
+  isOffRoute,
+  navLog,
+  nextManeuver,
+  currentRoadName,
+  projectOnRoute,
+  resolveNavigationPhase,
+  recordSessionRoute,
+  type NavigationPhase,
+  type NavigationRoute,
+  type NavigationStep,
+  type UpcomingManeuver,
+} from '../../lib/navigation';
 
 // Re-exported as a type only: exporting runtime values alongside components
 // would break React Fast Refresh (dev HMR falls back to full reloads).
@@ -31,13 +47,29 @@ export interface ActiveRouteInfo {
   leg: RouteLeg;
   distanceMeters: number;
   durationSeconds: number;
+  /** Metres still to drive — refreshed as the courier moves along the route. */
+  remainingMeters?: number;
+  /** Seconds still to drive (scaled from the routing engine's duration). */
+  remainingSeconds?: number;
+  /** Navigation phase this route belongs to. */
+  phase?: NavigationPhase;
 }
 
-/**
- * A secondary restaurant pin drawn alongside the active trip.
+/** A secondary restaurant pin drawn alongside the active trip.
  * One shared shape, owned by the map-pin helpers in `src/lib/restaurantPins`.
  */
 export type MapRestaurantPin = RestaurantMapPin;
+
+/** Everything the navigation HUD needs, recomputed on every GPS fix. */
+interface NavProgress {
+  remainingMeters: number;
+  remainingSeconds: number;
+  offRouteMeters: number;
+  maneuver: UpcomingManeuver | null;
+  currentRoad: string | null;
+  /** Courier is inside the destination radius ("You have arrived"). */
+  arrived: boolean;
+}
 
 interface CourierLiveMapProps {
   /** Courier's live position (updates in realtime) */
@@ -69,6 +101,22 @@ interface CourierLiveMapProps {
   restaurants?: MapRestaurantPin[];
   /** Reports the active leg's road route whenever it changes (or clears). */
   onRouteUpdate?: (route: ActiveRouteInfo | null) => void;
+  /**
+   * Latest GPS telemetry for the courier fix (accuracy/heading/speed/timestamp).
+   * Drives deviation thresholds, marker rotation and the diagnostics HUD.
+   */
+  courierFix?: {
+    accuracy?: number | null;
+    heading?: number | null;
+    speed?: number | null;
+    timestamp?: number | null;
+  } | null;
+  /**
+   * Draw the courier navigation HUD (next maneuver, ETA, distance remaining,
+   * arrival notice). Only the courier's own screen sets this — customers get
+   * position + route overview + ETA, never turn-by-turn instructions.
+   */
+  showNavigationHud?: boolean;
 }
 
 /** An Advanced Marker: an HTMLElement the Maps API positions on the map. */
@@ -197,14 +245,14 @@ const isUsablePin = (lat: number, lng: number): boolean =>
   Math.abs(lng) <= 180 &&
   !(Math.abs(lat) < 0.01 && Math.abs(lng) < 0.01);
 
-/** Statuses where the rider is still driving toward the kitchen. */
-const TO_PICKUP_STATUSES = new Set([
-  'COURIER_ASSIGNED',
-  'COURIER_ACCEPTED',
-  'READY_FOR_PICKUP',
-  'RESTAURANT_ACCEPTED',
-  'PREPARING',
-]);
+/** How close (metres) the courier must be to a pin before "You have arrived". */
+const ARRIVAL_RADIUS_M = 150;
+/** GPS heading is only trusted above this speed — below it, noise dominates. */
+const GPS_HEADING_MIN_SPEED_MPS = 3;
+/** Re-notify parents about remaining distance every ~100 m of progress. */
+const PROGRESS_NOTIFY_M = 100;
+/** HUD refresh granularity: only re-render when progress actually moved. */
+const PROGRESS_STATE_M = 25;
 
 const round5 = (value: number) => Number(value.toFixed(5));
 
@@ -232,11 +280,12 @@ const SAME_FIX_EPS = 1e-7;
  * blue-dot navigator uses.
  */
 const OUTSIDE_FOLLOW_ZONE = 0.25;
-/** Re-route when the rider has drifted this far from the road route's origin. */
-const REROUTE_DISTANCE_KM = 0.08;
-/** …or when this much time passed since the last attempt (with exponential backoff on failure). */
-const REROUTE_MIN_INTERVAL_MS = 20_000;
-const REROUTE_MAX_BACKOFF_MS = 120_000;
+/**
+ * Re-route policy (off-route threshold, cooldown, backoff, route staleness)
+ * lives in `src/lib/navigation.ts` (`evaluateReroute`) so it is unit-tested
+ * and shared with every consumer — it used to be keyed on distance from the
+ * route origin here, which fired every ~20 s and cut across city blocks.
+ */
 
 /**
  * Live delivery map showing the courier's real-time position together with the
@@ -269,6 +318,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   destinationAddress,
   restaurants,
   onRouteUpdate,
+  courierFix,
+  showNavigationHud = false,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
@@ -332,10 +383,24 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const requestIdRef = useRef(0);
   const lastNotifiedRef = useRef('none');
   const onRouteUpdateRef = useRef(onRouteUpdate);
+  /** Consecutive off-route fixes — a single bad reading never reroutes. */
+  const offRouteStreakRef = useRef(0);
+  /** GPS heading while it is reliable (speed above the noise floor). */
+  const gpsHeadingRef = useRef<number | null>(null);
+  /** Latest GPS telemetry, readable from long-lived closures. */
+  const courierFixRef = useRef(courierFix ?? null);
 
   const [resolvedPickup, setResolvedPickup] = useState<LatLng | null>(null);
   const [resolvedDestination, setResolvedDestination] = useState<LatLng | null>(null);
-  const [roadRoute, setRoadRoute] = useState<(RoadRoute & { leg: RouteLeg }) | null>(null);
+  const [roadRoute, setRoadRoute] = useState<
+    (NavigationRoute & { leg: RouteLeg; phase: NavigationPhase }) | null
+  >(null);
+  /** Lifecycle of the current route request, surfaced on the HUD. */
+  const [routeStatus, setRouteStatus] = useState<
+    'idle' | 'loading' | 'recalculating' | 'ready' | 'retrying'
+  >('idle');
+  /** Live navigation progress (remaining distance/ETA, next maneuver). */
+  const [navProgress, setNavProgress] = useState<NavProgress | null>(null);
   /** Camera-follow UI: false once the user drags/zooms away from the rider. */
   const [following, setFollowing] = useState(true);
   /** Flip once the API has loaded and the map exists, so pins can be drawn. */
@@ -346,6 +411,18 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   // Always call the newest callback without re-running effects that depend on it.
   useEffect(() => {
     onRouteUpdateRef.current = onRouteUpdate;
+    courierFixRef.current = courierFix ?? null;
+
+    // Compass-free devices report `heading: null`, and at walking pace the
+    // reported heading is pure noise — only trust it above the speed floor.
+    const heading = courierFix?.heading;
+    const speed = courierFix?.speed ?? 0;
+    const headingOk =
+      typeof heading === 'number' && Number.isFinite(heading) && heading >= 0 && heading < 360;
+    gpsHeadingRef.current =
+      headingOk && Number.isFinite(speed) && speed >= GPS_HEADING_MIN_SPEED_MPS
+        ? (heading as number)
+        : null;
   });
 
   // Invalidate every in-flight response when the map goes away.
@@ -429,13 +506,23 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   }, [pickupLat, pickupLng, destinationLat, destinationLng, pickupAddress, destinationAddress]);
 
   // ── Which leg the rider is currently driving ──────────────────────────
-  const leg: { kind: RouteLeg; target: LatLng } | null = (() => {
-    const headingToPickup = status ? TO_PICKUP_STATUSES.has(status) : Boolean(pickupPt);
-    if (headingToPickup && pickupPt) return { kind: 'TO_PICKUP', target: pickupPt };
-    if (destinationPt) return { kind: 'TO_CUSTOMER', target: destinationPt };
-    if (pickupPt) return { kind: 'TO_PICKUP', target: pickupPt };
-    return null;
-  })();
+  // ONE source of truth: the phase is derived from the REAL order status and
+  // the pins that actually exist (see src/lib/navigation.ts). A delivery-phase
+  // order can only ever resolve to the customer — never back to the kitchen,
+  // and never to another order's destination.
+  const phase: NavigationPhase = resolveNavigationPhase(status, {
+    hasPickup: Boolean(pickupPt),
+    hasDestination: Boolean(destinationPt),
+  });
+  const phaseTarget = destinationForPhase(phase, pickupPt, destinationPt);
+
+  const leg: { kind: RouteLeg; target: LatLng; phase: NavigationPhase } | null = phaseTarget
+    ? {
+        kind: phase === 'TO_RESTAURANT' ? 'TO_PICKUP' : 'TO_CUSTOMER',
+        target: phaseTarget,
+        phase,
+      }
+    : null;
 
   const legKind: RouteLeg | null = leg?.kind ?? null;
   const targetKey = leg ? `${round5(leg.target.lat)},${round5(leg.target.lng)}` : '';
@@ -476,6 +563,20 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     if (normalized === headingRef.current) return;
     headingRef.current = normalized;
     applyHeading(courierContentRef.current, normalized);
+  };
+
+  /**
+   * Icon for the HUD's "next maneuver" card — derived from the routing
+   * engine's own maneuver type/modifier, never from a hardcoded list of
+   * streets.
+   */
+  const maneuverIcon = (step: NavigationStep | undefined | null) => {
+    const type = (step?.maneuverType ?? '').toLowerCase();
+    const modifier = (step?.maneuverModifier ?? '').toLowerCase();
+    if (type === 'arrive') return <MapPin className="w-5 h-5" />;
+    if (modifier.includes('left')) return <CornerUpLeft className="w-5 h-5" />;
+    if (modifier.includes('right')) return <CornerUpRight className="w-5 h-5" />;
+    return <ArrowUp className="w-5 h-5" />;
   };
 
   /** While parked, point the pin at the stop the rider is driving to. */
@@ -546,7 +647,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       lastRouteDrawRef.current = now;
       drawRefs.current.route(next);
     }
-    if (remainingKm > HEADING_MIN_KM) setHeading(bearingDeg(current, next));
+    // Point the pin where the rider is actually driving: a trustworthy GPS
+    // heading wins over the geometry of the animated hop (which lags a fix
+    // behind), and the leg bearing stays the fallback while moving slowly.
+    const gpsHeading = gpsHeadingRef.current;
+    if (gpsHeading !== null) setHeading(gpsHeading);
+    else if (remainingKm > HEADING_MIN_KM) setHeading(bearingDeg(current, next));
 
     animFrameRef.current = requestAnimationFrame(tick);
   };
@@ -577,20 +683,51 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     actionRefs.current.openPopup = openPopup;
   });
 
-  // ── Live road route (throttled, failure-tolerant, never throws) ───────
-  useEffect(() => {
-    const notify = (info: ActiveRouteInfo | null) => {
-      const key = info ? `${info.leg}:${info.distanceMeters}:${info.durationSeconds}` : 'none';
-      if (key === lastNotifiedRef.current) return;
-      lastNotifiedRef.current = key;
-      onRouteUpdateRef.current?.(info);
-    };
+  // ── Route bookkeeping ─────────────────────────────────────────────────
+  /**
+   * Report the active route (and the courier's progress along it) to parents.
+   * Deduped — including remaining distance in 100 m buckets — so a GPS stream
+   * can never turn into a re-render storm.
+   */
+  const notifyRouteUpdate = (info: ActiveRouteInfo | null) => {
+    const key = info
+      ? `${info.leg}:${info.distanceMeters}:${info.durationSeconds}:${Math.round(
+          (info.remainingMeters ?? 0) / PROGRESS_NOTIFY_M
+        )}`
+      : 'none';
+    if (key === lastNotifiedRef.current) return;
+    lastNotifiedRef.current = key;
+    onRouteUpdateRef.current?.(info);
+  };
 
+  // ── A changed phase/destination invalidates every in-flight request ───
+  // Bump the request id FIRST: a response from the previous destination
+  // (restaurant → customer, or an old customer pin) must never overwrite the
+  // route to the new one, no matter when it finally lands.
+  useEffect(() => {
+    requestIdRef.current += 1;
+    routeInFlightRef.current = false;
+    attemptRef.current = null;
+    failuresRef.current = 0;
+    offRouteStreakRef.current = 0;
+    setRoadRoute((current) => (current && leg && current.leg !== leg.kind ? null : current));
+    setRouteStatus('idle');
+    setNavProgress(null);
+    if (leg) {
+      navLog('NAVIGATION_DESTINATION_CHANGED', { phase: leg.phase, target: leg.target });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [legKind, targetKey]);
+
+  // ── Live road route: deviation-aware, debounced, failure-tolerant ─────
+  useEffect(() => {
     if (!courierPosition || !leg) {
       attemptRef.current = null;
       failuresRef.current = 0;
+      offRouteStreakRef.current = 0;
       setRoadRoute(null);
-      notify(null);
+      setRouteStatus('idle');
+      notifyRouteUpdate(null);
       return;
     }
 
@@ -599,33 +736,70 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
     const now = Date.now();
     const attempt = attemptRef.current;
-    const sameLeg =
-      attempt?.leg === leg.kind && haversineKm(attempt.target, leg.target) < 0.01;
-    const movedKm = attempt ? haversineKm(courierPosition, attempt.courier) : Number.POSITIVE_INFINITY;
-    const backoffMs = Math.min(
-      REROUTE_MIN_INTERVAL_MS * 2 ** Math.min(failuresRef.current, 4),
-      REROUTE_MAX_BACKOFF_MS
-    );
+    const activeRoute = roadRoute && roadRoute.leg === leg.kind ? roadRoute : null;
 
-    // Fresh enough — avoid hammering the routing service on every GPS ping.
-    if (sameLeg && attempt && movedKm < REROUTE_DISTANCE_KM && now - attempt.at < backoffMs) return;
+    // Deviation: where does the LIVE fix sit relative to the drawn road route?
+    const projection = activeRoute ? projectOnRoute(activeRoute, courierPosition) : null;
+    const offRouteMeters = projection?.offRouteMeters ?? null;
+    const accuracy = courierFixRef.current?.accuracy ?? null;
+    const offRoute = isOffRoute(offRouteMeters, accuracy);
+    // Two consecutive off-route fixes before a reroute is considered real —
+    // one noisy reading must never trigger a routing request.
+    offRouteStreakRef.current = offRoute
+      ? Math.min(offRouteStreakRef.current + 1, 4)
+      : 0;
+
+    const destinationChanged =
+      !attempt ||
+      attempt.leg !== leg.kind ||
+      haversineKm(attempt.target, leg.target) >= 0.01;
+    const movedKm = attempt ? haversineKm(courierPosition, attempt.courier) : null;
+
+    const decision = evaluateReroute({
+      now,
+      hasRoute: Boolean(activeRoute),
+      destinationChanged,
+      offRoute,
+      offRouteStreak: offRouteStreakRef.current,
+      lastAttemptAt: attempt?.at ?? null,
+      failureCount: failuresRef.current,
+      movedFromRouteOriginMeters:
+        movedKm != null && Number.isFinite(movedKm) ? movedKm * 1000 : null,
+      routeAgeMs: activeRoute ? now - Date.parse(activeRoute.calculatedAt) : null,
+    });
+
+    if (!decision.recalculate) return;
     // One request at a time; the next ping retries if this one was skipped.
     if (routeInFlightRef.current) return;
+
+    if (decision.reason === 'ROUTE_DEVIATION') {
+      navLog('NAVIGATION_DEVIATION_DETECTED', {
+        offRouteMeters: Math.round(offRouteMeters ?? 0),
+        accuracyMeters: accuracy ?? undefined,
+        streak: offRouteStreakRef.current,
+      });
+      navLog('NAVIGATION_REROUTE', { reason: decision.reason, origin: courierPosition });
+    }
 
     routeInFlightRef.current = true;
     const requestId = ++requestIdRef.current;
     attemptRef.current = { courier: courierPosition, target: leg.target, leg: leg.kind, at: now };
+    setRouteStatus(activeRoute ? 'recalculating' : 'loading');
 
-    // The road line is the only guidance on the map now, so a failed refresh
-    // keeps the last good line for this leg (its origin still snaps to the
-    // rider) and simply retries with backoff instead of blanking the trip.
+    // A failed refresh keeps the last good line for this leg (its origin still
+    // snaps to the rider) and retries with exponential backoff instead of
+    // blanking the trip.
     const handleFailure = () => {
       failuresRef.current = Math.min(failuresRef.current + 1, 4);
+      setRouteStatus('retrying');
     };
 
-    fetchRoadRoute(courierPosition, leg.target)
+    // Origin is ALWAYS the courier's current GPS position; destination is the
+    // active phase's target. Steps=true powers the turn-by-turn HUD.
+    calculateRoute(courierPosition, leg.target, { steps: true })
       .then((route) => {
         routeInFlightRef.current = false;
+        // Stale response guard: an older request can never overwrite a newer one.
         if (!mountedRef.current || requestId !== requestIdRef.current) return;
 
         if (!route) {
@@ -634,11 +808,16 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         }
 
         failuresRef.current = 0;
-        setRoadRoute({ ...route, leg: leg.kind });
-        notify({
+        setRoadRoute({ ...route, leg: leg.kind, phase: leg.phase });
+        setRouteStatus('ready');
+        recordSessionRoute(route);
+        notifyRouteUpdate({
           leg: leg.kind,
           distanceMeters: route.distanceMeters,
           durationSeconds: route.durationSeconds,
+          remainingMeters: route.distanceMeters,
+          remainingSeconds: route.durationSeconds,
+          phase: leg.phase,
         });
       })
       .catch(() => {
@@ -651,6 +830,54 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     // in-flight fetch is intentionally allowed to finish and be discarded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [courierPosition, legKind, targetKey]);
+
+  // ── Live progress: remaining distance/ETA, next maneuver, arrival ─────
+  useEffect(() => {
+    if (!roadRoute || !courierPosition || !leg) {
+      setNavProgress(null);
+      notifyRouteUpdate(null);
+      return;
+    }
+
+    const projection = projectOnRoute(roadRoute, courierPosition);
+    if (!projection) return;
+
+    const total = Math.max(1, roadRoute.distanceMeters);
+    const travelled = Math.min(projection.alongMeters, total);
+    const remainingMeters = Math.max(0, Math.round(total - travelled));
+    const remainingSeconds = Math.max(
+      0,
+      Math.round(Math.max(1, roadRoute.durationSeconds) * (remainingMeters / total))
+    );
+    const offRouteMeters = Math.round(projection.offRouteMeters);
+    const maneuver = nextManeuver(roadRoute, travelled);
+    const currentRoad = currentRoadName(roadRoute, travelled);
+    const arrived = haversineKm(courierPosition, leg.target) * 1000 <= ARRIVAL_RADIUS_M;
+
+    notifyRouteUpdate({
+      leg: roadRoute.leg,
+      distanceMeters: roadRoute.distanceMeters,
+      durationSeconds: roadRoute.durationSeconds,
+      remainingMeters,
+      remainingSeconds,
+      phase: roadRoute.phase,
+    });
+
+    setNavProgress((previous) => {
+      if (
+        previous &&
+        Math.abs(previous.remainingMeters - remainingMeters) < PROGRESS_STATE_M &&
+        previous.maneuver?.step.instruction === maneuver?.step.instruction &&
+        Math.abs(previous.offRouteMeters - offRouteMeters) < 10 &&
+        previous.arrived === arrived &&
+        previous.currentRoad === currentRoad
+      ) {
+        return previous;
+      }
+      return { remainingMeters, remainingSeconds, offRouteMeters, maneuver, currentRoad, arrived };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roadRoute, courierPosition, legKind, targetKey]);
 
   // ── Initialize the map once ───────────────────────────────────────────
   useEffect(() => {
@@ -778,6 +1005,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       lastFixAtRef.current = 0;
       speedRef.current = 0;
       headingRef.current = -1;
+      gpsHeadingRef.current = null;
+      offRouteStreakRef.current = 0;
       lastRouteDrawRef.current = 0;
       userGestureAtRef.current = 0;
       setMapReady(false);
@@ -876,7 +1105,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
     /** Solid road-snapped route for the leg the rider is actually driving. */
     const drawRoadRoute = (courierLL: LatLng | null) => {
-      if (!roadRoute || roadRoute.coordinates.length < 2) {
+      if (!roadRoute || roadRoute.geometry.coordinates.length < 2) {
         if (roadPolylineRef.current) {
           roadPolylineRef.current.setMap(null);
           roadPolylineRef.current = null;
@@ -884,18 +1113,21 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         return;
       }
 
-      const coords: google.maps.LatLngLiteral[] = roadRoute.coordinates.map((point) => ({
+      const coords: google.maps.LatLngLiteral[] = roadRoute.geometry.coordinates.map((point) => ({
         lat: point.lat,
         lng: point.lng,
       }));
 
-      // Keep the route glued to the live marker: the drawn line starts at the
-      // rider's current spot, not where the route was requested from.
+      // Keep the line glued to the live marker — but ONLY when the rider is
+      // already on the route. Rewriting the first vertex from up to 500 m away
+      // drew a fake straight-line segment across the city blocks between them;
+      // 150 m is the deviation threshold at which we re-route anyway, so beyond
+      // that the correct fix is a fresh route from the current GPS, not a lie.
       if (courierLL) {
-        const origin = roadRoute.coordinates[0];
+        const origin = roadRoute.geometry.coordinates[0];
         if (
           haversineKm({ lat: origin.lat, lng: origin.lng }, { lat: courierLL.lat, lng: courierLL.lng }) <
-          0.5
+          0.15
         ) {
           coords[0] = { lat: courierLL.lat, lng: courierLL.lng };
         }
@@ -919,7 +1151,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     // route, and the effect re-runs whenever that changes. The arc-length track
     // is rebuilt alongside it so the marker slides along the drawn road.
     drawRefs.current = { route: drawRoadRoute };
-    trackRef.current = roadRoute ? buildTrack(roadRoute.coordinates) : null;
+    trackRef.current = roadRoute ? buildTrack(roadRoute.geometry.coordinates) : null;
 
     if (courierPosition) {
       const target: LatLng = { lat: courierPosition.lat, lng: courierPosition.lng };
@@ -1009,8 +1241,10 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       drawRoadRoute(at);
       lastRouteDrawRef.current = performance.now();
 
-      // Stationary (or just snapped): aim the pin down the leg he's driving.
-      if (speedRef.current === 0) aimAtLeg(target, leg);
+      // Stationary (or just snapped): keep the real driving direction when the
+      // GPS still knows it, otherwise aim down the leg he's driving to.
+      if (gpsHeadingRef.current !== null) setHeading(gpsHeadingRef.current);
+      else if (speedRef.current === 0) aimAtLeg(target, leg);
     } else {
       // No courier fix yet — no rider, so there is no leg to route
       stopLoop();
@@ -1045,6 +1279,30 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     }
   }, [mapReady, courierPosition, destinationPt, pickupPt, courierName, roadRoute, restaurantKey]);
 
+  // ── HUD copy (courier screen only — customers never see turn-by-turn) ──
+  const maneuver = navProgress?.maneuver ?? null;
+  const weakGps = courierFix?.accuracy != null && courierFix.accuracy > 100;
+  const routeStatusText = !courierPosition
+    ? 'Locating you…'
+    : routeStatus === 'loading'
+      ? 'Calculating route…'
+      : routeStatus === 'recalculating'
+        ? 'Recalculating route…'
+        : routeStatus === 'retrying'
+          ? 'Unable to calculate route. Retrying…'
+          : null;
+  const destinationLabel =
+    leg?.kind === 'TO_PICKUP'
+      ? pickupAddress || 'Restaurant pickup'
+      : destinationAddress || 'Customer drop-off';
+  const etaAt =
+    navProgress && navProgress.remainingSeconds > 0
+      ? new Date(Date.now() + navProgress.remainingSeconds * 1000).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      : null;
+
   return (
     <div
       className={`relative w-full ${className} rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 z-0`}
@@ -1052,6 +1310,101 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       {/* The API owns its container's children, so the map gets a dedicated
           empty div and every overlay below stays a sibling. */}
       <div ref={containerRef} className="absolute inset-0" />
+
+      {/* ── Navigation HUD — courier-only turn-by-turn overlay ──────────── */}
+      {showNavigationHud && mapReady && (
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-[900] flex flex-col items-start gap-1.5 p-2">
+          {/* Next maneuver, straight from the routing engine's steps */}
+          {!navProgress?.arrived && maneuver && (
+            <div className="flex max-w-full items-center gap-3 rounded-xl bg-slate-900/90 px-3 py-2 text-white shadow-lg ring-1 ring-white/10 backdrop-blur-sm">
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-emerald-500 text-white">
+                {maneuverIcon(maneuver.step)}
+              </span>
+              <div className="min-w-0">
+                <p className="truncate text-sm font-black leading-tight">
+                  {maneuver.step.instruction}
+                </p>
+                <p className="truncate text-[11px] text-slate-300">
+                  {formatRouteDistance(maneuver.distanceMeters) || '0 m'}
+                  {navProgress?.currentRoad ? ` · on ${navProgress.currentRoad}` : ''}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Route/GPS lifecycle, so a blank line is never mistaken for a route */}
+          {routeStatusText && (
+            <span className="w-fit rounded-full bg-amber-100/95 px-2.5 py-1 text-[11px] font-bold text-amber-800 shadow">
+              {routeStatusText}
+            </span>
+          )}
+          {weakGps && !routeStatusText && (
+            <span className="w-fit rounded-full bg-amber-100/95 px-2.5 py-1 text-[11px] font-bold text-amber-800 shadow">
+              GPS signal is weak
+            </span>
+          )}
+
+          {/* Arrival prompt — it never confirms anything by itself: pickup and
+              delivery still go through the existing confirmation/OTP flow. */}
+          {navProgress?.arrived && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/95 px-3 py-2 shadow-lg backdrop-blur-sm">
+              <p className="text-xs font-black text-emerald-800">You have arrived</p>
+              <p className="text-[11px] leading-snug text-emerald-700">
+                {leg?.phase === 'TO_RESTAURANT'
+                  ? 'At the restaurant — confirm the pickup in your order screen.'
+                  : 'At the drop-off — complete the delivery in your order screen.'}
+              </p>
+            </div>
+          )}
+
+          {/* Dev-only diagnostics HUD (spec §40): raw GPS + route telemetry.
+              Flows under the cards above it, so it can never collide with the
+              Follow button or the modal's guidance panel. */}
+          {import.meta.env.DEV && (
+            <div className="mt-1 rounded-lg bg-slate-900/85 p-2 font-mono text-[10px] leading-relaxed text-emerald-300 ring-1 ring-emerald-400/30">
+              <div>
+                phase {leg?.phase ?? '—'} · {routeStatus} · {roadRoute?.provider ?? '—'}
+              </div>
+              <div>
+                gps acc {courierFix?.accuracy != null ? Math.round(courierFix.accuracy) : '—'}m ·
+                hdg {courierFix?.heading != null ? Math.round(courierFix.heading) : '—'}° · spd{' '}
+                {courierFix?.speed != null ? courierFix.speed.toFixed(1) : '—'}m/s
+              </div>
+              <div>
+                route{' '}
+                {roadRoute
+                  ? `${roadRoute.geometry.coordinates.length} pts / ${roadRoute.steps.length} steps`
+                  : '—'}{' '}
+                · off {navProgress?.offRouteMeters ?? 0}m
+              </div>
+              <div>
+                rem {navProgress?.remainingMeters ?? 0}m · {navProgress?.remainingSeconds ?? 0}s ·{' '}
+                {navProgress?.arrived ? 'ARRIVED' : 'EN_ROUTE'}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Bottom strip: how far/long the rest of this leg is (courier screen) */}
+      {showNavigationHud && mapReady && navProgress && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-[900] flex items-end justify-between gap-3 border-t border-slate-200/80 bg-white/95 px-3 py-1.5">
+          <div className="min-w-0">
+            <p className="truncate text-[10px] font-bold uppercase tracking-wide text-slate-500">
+              {leg?.kind === 'TO_PICKUP' ? 'To pickup' : 'To drop-off'} · {destinationLabel}
+            </p>
+            <p className="truncate text-sm font-black text-slate-900">
+              {formatRouteDistance(navProgress.remainingMeters) || '0 m'}
+              {navProgress.remainingSeconds > 0
+                ? ` · ${formatRouteDuration(navProgress.remainingSeconds)}`
+                : ''}
+            </p>
+          </div>
+          {etaAt && (
+            <p className="shrink-0 text-[11px] font-bold text-slate-600">ETA {etaAt}</p>
+          )}
+        </div>
+      )}
 
       {/* Missing/broken key → say so instead of showing a grey box */}
       {loadError && (
@@ -1068,7 +1421,9 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         <button
           type="button"
           onClick={() => setFollow(true)}
-          className="absolute right-2 bottom-6 z-[1000] flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white/95 px-3 py-1.5 text-[11px] font-black uppercase tracking-wide text-emerald-700 shadow-md transition active:scale-95 hover:bg-emerald-50"
+          className={`absolute right-2 z-[1000] flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white/95 px-3 py-1.5 text-[11px] font-black uppercase tracking-wide text-emerald-700 shadow-md transition active:scale-95 hover:bg-emerald-50 ${
+            showNavigationHud && navProgress ? 'bottom-14' : 'bottom-6'
+          }`}
         >
           <LocateFixed className="w-3.5 h-3.5" />
           Follow

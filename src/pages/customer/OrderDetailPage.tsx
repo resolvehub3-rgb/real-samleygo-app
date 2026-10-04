@@ -254,7 +254,18 @@ export const OrderDetailPage: React.FC = () => {
           filter: `order_id=eq.${id}`,
         },
         (payload) => {
-          setLastLocation(payload.new as DeliveryLocation);
+          const incoming = payload.new as DeliveryLocation;
+          // Never move the marker backwards: an out-of-order breadcrumb (socket
+          // replay, delayed insert) must not overwrite a fresher one.
+          setLastLocation((prev) => {
+            if (!prev) return incoming;
+            const incomingTime = Date.parse(incoming?.recorded_at ?? '');
+            const prevTime = Date.parse(prev?.recorded_at ?? '');
+            if (Number.isFinite(incomingTime) && Number.isFinite(prevTime) && incomingTime < prevTime) {
+              return prev;
+            }
+            return incoming;
+          });
         }
       )
       .subscribe();
@@ -285,14 +296,28 @@ export const OrderDetailPage: React.FC = () => {
             current_location_updated_at?: string;
           };
           if (next.current_latitude != null && next.current_longitude != null) {
-            setCourierDetails((prev) =>
-              prev
-                ? ({ ...prev, ...next } as Courier)
-                : ({
-                    current_latitude: next.current_latitude,
-                    current_longitude: next.current_longitude,
-                  } as unknown as Courier)
-            );
+            setCourierDetails((prev) => {
+              if (!prev) {
+                return {
+                  current_latitude: next.current_latitude,
+                  current_longitude: next.current_longitude,
+                  current_location_updated_at: next.current_location_updated_at,
+                } as unknown as Courier;
+              }
+              // Stale ping guard: realtime events can arrive late or replayed.
+              // A row stamped older than what's already on screen never moves
+              // the marker backwards.
+              const prevTime = prev.current_location_updated_at
+                ? Date.parse(prev.current_location_updated_at)
+                : 0;
+              const nextTime = next.current_location_updated_at
+                ? Date.parse(next.current_location_updated_at)
+                : 0;
+              if (Number.isFinite(prevTime) && Number.isFinite(nextTime) && nextTime < prevTime) {
+                return prev;
+              }
+              return { ...prev, ...next } as Courier;
+            });
           }
         }
       )
