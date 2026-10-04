@@ -23,7 +23,7 @@ import {
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { Courier, CourierDocument, Order } from '../../types/database';
-import { formatGHS } from '../../lib/pricing';
+import { formatDistanceKm, formatGHS } from '../../lib/pricing';
 import { getOrderFinancials, round2 } from '../../lib/commission';
 import { DocumentImage } from '../../components/common/DocumentImage';
 import {
@@ -1071,6 +1071,45 @@ export const CourierDashboard: React.FC = () => {
               </div>
             </div>
 
+            {/* What this job pays — straight from the order's server-written
+                financial snapshot: distance, fee, courier earning. */}
+            {(() => {
+              const f = getOrderFinancials(activeDelivery);
+              return (
+                <dl className="grid grid-cols-3 gap-2 rounded-2xl border border-emerald-100 bg-emerald-50/60 p-4 text-center">
+                  <div>
+                    <dt className="text-[10px] font-black uppercase tracking-wide text-slate-400">
+                      Distance
+                    </dt>
+                    <dd className="text-sm font-black tabular-nums text-slate-900">
+                      {formatDistanceKm(activeDelivery.delivery_distance_km)}
+                    </dd>
+                  </div>
+                  <div className="border-x border-emerald-100">
+                    <dt className="text-[10px] font-black uppercase tracking-wide text-slate-400">
+                      Delivery fee
+                    </dt>
+                    <dd className="text-sm font-black tabular-nums text-slate-900">
+                      {formatGHS(f.deliveryFee)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[10px] font-black uppercase tracking-wide text-emerald-600">
+                      Courier earning
+                    </dt>
+                    <dd className="text-sm font-black tabular-nums text-emerald-700">
+                      {formatGHS(f.courierEarning)}
+                      {f.tip > 0 && (
+                        <span className="block text-[10px] font-bold text-emerald-600">
+                          + {formatGHS(f.tip)} tip
+                        </span>
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+              );
+            })()}
+
             {/* Courier Step Actions */}
             <div className="pt-2 flex flex-col sm:flex-row gap-3">
               {activeDelivery.status === 'COURIER_ASSIGNED' && (
@@ -1169,7 +1208,12 @@ export const CourierDashboard: React.FC = () => {
             </div>
           ) : (
             <div className="space-y-3">
-              {availableRequests.map((req) => (
+              {availableRequests.map((req) => {
+                // Money straight from the order's server-written snapshot:
+                // distance, the fee the customer paid and what the courier
+                // keeps (Phase 1: 100% of the fee, tip included in payout).
+                const f = getOrderFinancials(req);
+                return (
                 <div
                   key={req.id}
                   className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200 shadow-xs hover:border-emerald-500 transition space-y-3"
@@ -1184,19 +1228,12 @@ export const CourierDashboard: React.FC = () => {
                       </p>
                     </div>
                     <div className="text-right">
-                      {(() => {
-                        const f = getOrderFinancials(req);
-                        return (
-                          <>
-                            <span className="font-black text-sm text-slate-900">
-                              Payout: {formatGHS(round2(f.courierEarning + f.tip))}
-                            </span>
-                            <span className="text-[10px] text-slate-400 block">
-                              Fee: {formatGHS(f.courierEarning)} + Tip: {formatGHS(f.tip)}
-                            </span>
-                          </>
-                        );
-                      })()}
+                      <span className="font-black text-sm text-slate-900">
+                        Payout: {formatGHS(round2(f.courierEarning + f.tip))}
+                      </span>
+                      <span className="text-[10px] text-slate-400 block">
+                        Delivery fee: {formatGHS(f.courierEarning)} + Tip: {formatGHS(f.tip)}
+                      </span>
                     </div>
                   </div>
 
@@ -1211,6 +1248,35 @@ export const CourierDashboard: React.FC = () => {
                     </p>
                   </div>
 
+                  {/* Distance → delivery fee → courier earning: the three
+                      numbers that decide whether a job is worth taking. */}
+                  <dl className="grid grid-cols-3 gap-2 rounded-xl border border-slate-100 bg-slate-50 p-3 text-center">
+                    <div>
+                      <dt className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                        Distance
+                      </dt>
+                      <dd className="text-xs font-black tabular-nums text-slate-900">
+                        {formatDistanceKm(req.delivery_distance_km)}
+                      </dd>
+                    </div>
+                    <div className="border-x border-slate-100">
+                      <dt className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                        Delivery fee
+                      </dt>
+                      <dd className="text-xs font-black tabular-nums text-slate-900">
+                        {formatGHS(f.deliveryFee)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-[10px] font-bold uppercase tracking-wide text-emerald-600">
+                        Courier earning
+                      </dt>
+                      <dd className="text-xs font-black tabular-nums text-emerald-700">
+                        {formatGHS(f.courierEarning)}
+                      </dd>
+                    </div>
+                  </dl>
+
                   <button
                     onClick={() => handleAcceptOrder(req.id)}
                     className="w-full py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs transition"
@@ -1218,7 +1284,8 @@ export const CourierDashboard: React.FC = () => {
                     Accept Delivery Request
                   </button>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

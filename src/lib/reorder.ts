@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { calculateDeliveryFee, calculateDistanceKm } from './pricing';
+import { DELIVERY_LOCATION_ERROR, requestDeliveryQuote } from './deliveryQuote';
 import { Order, OrderStatus } from '../types/database';
 
 /** One tap on "Reorder" rebuilds a finished order from today's menu. */
@@ -94,21 +94,30 @@ export const placeReorder = async (source: Order): Promise<ReorderOutcome> => {
 
   // ── 4. Money at today's rates (the old fee was a snapshot too) ────────
   const subtotal = round2(lines.reduce((sum, line) => sum + line.subtotal, 0));
-  const canMeasureDistance =
-    restaurant.latitude != null &&
-    restaurant.longitude != null &&
-    source.delivery_latitude != null &&
-    source.delivery_longitude != null;
-  const deliveryFee = canMeasureDistance
-    ? calculateDeliveryFee(
-        calculateDistanceKm(
-          restaurant.latitude as number,
-          restaurant.longitude as number,
-          source.delivery_latitude as number,
-          source.delivery_longitude as number
-        )
-      )
-    : Number(source.delivery_fee ?? 0);
+
+  // The drop-off point of the original order is reused, but the PRICE is
+  // never reused: the backend measures the route again against the current
+  // delivery pricing rules and hands back a fresh quote. Without real
+  // coordinates there is no route, so there is no reorder.
+  const deliveryPoint =
+    source.delivery_latitude != null && source.delivery_longitude != null
+      ? { lat: source.delivery_latitude, lng: source.delivery_longitude }
+      : null;
+  const restaurantPoint =
+    restaurant.latitude != null && restaurant.longitude != null
+      ? { lat: restaurant.latitude, lng: restaurant.longitude }
+      : null;
+
+  if (!deliveryPoint) return { ok: false, error: DELIVERY_LOCATION_ERROR };
+
+  const quoteResult = await requestDeliveryQuote({
+    restaurantId: restaurant.id,
+    restaurantPoint,
+    deliveryPoint,
+  });
+  if (!quoteResult.ok) return { ok: false, error: quoteResult.error };
+
+  const deliveryFee = quoteResult.quote.deliveryFee;
   const tip = round2(Number(source.tip ?? 0));
   const totalAmount = round2(subtotal + deliveryFee + tip);
 
@@ -116,6 +125,8 @@ export const placeReorder = async (source: Order): Promise<ReorderOutcome> => {
   const paymentMethod = source.payment_method || 'CASH';
 
   // ── 5. Place it — same shape and pipeline as the checkout form ────────
+  // `delivery_fee` is deliberately absent: the database prices the order
+  // from the quote and re-derives the customer total itself.
   const { data: created, error: orderError } = await supabase
     .from('orders')
     .insert({
@@ -124,12 +135,12 @@ export const placeReorder = async (source: Order): Promise<ReorderOutcome> => {
       restaurant_id: source.restaurant_id,
       status: 'RESTAURANT_PENDING' satisfies OrderStatus,
       subtotal,
-      delivery_fee: deliveryFee,
+      delivery_quote_id: quoteResult.quote.quoteId,
       tip,
       total_amount: totalAmount,
       delivery_address: source.delivery_address,
-      delivery_latitude: source.delivery_latitude,
-      delivery_longitude: source.delivery_longitude,
+      delivery_latitude: deliveryPoint.lat,
+      delivery_longitude: deliveryPoint.lng,
       customer_phone: source.customer_phone,
       delivery_notes: source.delivery_notes || null,
       payment_method: paymentMethod,

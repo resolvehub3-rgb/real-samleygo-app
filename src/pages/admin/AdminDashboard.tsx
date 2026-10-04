@@ -33,7 +33,7 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
-import { supabase, isSupabaseConfigured } from '../../lib/supabase';
+import { supabase, isSupabaseConfigured, cleanRpcErrorMessage } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import {
   Restaurant,
@@ -49,6 +49,7 @@ import {
   AuditLog,
 } from '../../types/database';
 import {
+  aggregateDeliveryStats,
   calculateDeliveryFee,
   formatGHS,
   DEFAULT_PRICING,
@@ -625,9 +626,17 @@ export const AdminDashboard: React.FC = () => {
         .limit(1000);
       setAdjustments((adjData || []) as OrderSettlementAdjustment[]);
 
-      // 5. Fetch Platform Settings
+      // 5. Fetch Platform Settings (merged over the defaults so a partial
+      //    row can never drop a rule — an absent max_fee means "no cap").
       const { data: settsData } = await supabase.from('platform_settings').select('*').eq('key', 'delivery_pricing').maybeSingle();
-      if (settsData && settsData.value) setPricingSettings(settsData.value as PlatformPricingSettings);
+      if (settsData && settsData.value) {
+        const raw = settsData.value as Partial<PlatformPricingSettings>;
+        setPricingSettings({
+          ...DEFAULT_PRICING,
+          ...raw,
+          max_fee: raw.max_fee ?? null,
+        });
+      }
 
       // 5b. Commission rules (seeded by the Phase 1 migration).
       const { data: commData } = await supabase
@@ -766,30 +775,63 @@ export const AdminDashboard: React.FC = () => {
     );
   };
 
-  // Save Pricing Settings
+  // Save Delivery Pricing — the numbers are validated by the DATABASE
+  // (set_delivery_pricing), which also bumps pricing_version so quotes and
+  // orders placed before the change keep the rules they were priced with.
   const handleSavePricing = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    const base = pricingSettings.base_fee;
+    const perKm = pricingSettings.per_km_rate;
+    const min = pricingSettings.min_fee;
+    const max = pricingSettings.max_fee ?? null;
+    const earning = pricingSettings.courier_earning_percentage ?? 100;
+
+    if ([base, perKm, min, earning].some((v) => !Number.isFinite(v))) {
+      notify('Enter a valid number in every delivery pricing field.', 'error');
+      return;
+    }
+    if (max !== null && max < min) {
+      notify('The maximum delivery fee cannot be lower than the minimum.', 'error');
+      return;
+    }
+
     setIsSavingSettings(true);
     try {
-      const { error } = await supabase.from('platform_settings').upsert({
-        key: 'delivery_pricing',
-        value: pricingSettings,
-        description: 'Updated by Super Admin',
+      const { data, error } = await supabase.rpc('set_delivery_pricing', {
+        p_base_fee: base,
+        p_per_km_rate: perKm,
+        p_min_fee: min,
+        p_max_fee: max,
+        p_courier_earning_percentage: earning,
       });
-
       if (error) throw error;
 
-      if (user) {
-        await supabase.from('audit_logs').insert({
-          actor_id: user.id,
-          action: 'PLATFORM_SETTINGS_UPDATED',
-          target_type: 'settings',
-          metadata: { pricing: pricingSettings },
+      // Store exactly what the server saved (it normalizes and versions).
+      const saved = data as Partial<PlatformPricingSettings> | null;
+      if (saved) {
+        setPricingSettings({
+          ...DEFAULT_PRICING,
+          ...saved,
+          max_fee: saved.max_fee ?? null,
         });
       }
-      notify('Platform pricing rules updated successfully.');
-    } catch {
-      notify('Failed to save settings. Please try again.', 'error');
+
+      // The database writes its own authoritative audit entry
+      // (DELIVERY_PRICING_UPDATED) with the values it actually stored, so
+      // this screen does not log a second, potentially different copy.
+      notify(
+        `Delivery pricing saved — version ${saved?.pricing_version ?? 'updated'}. New quotes and orders use it; existing orders never change.`
+      );
+      await fetchAdminData();
+    } catch (err) {
+      notify(
+        cleanRpcErrorMessage(
+          err instanceof Error ? err.message : null,
+          'Failed to save delivery pricing. Please try again.'
+        ),
+        'error'
+      );
     } finally {
       setIsSavingSettings(false);
     }
@@ -963,6 +1005,9 @@ export const AdminDashboard: React.FC = () => {
   // financial snapshot the database wrote (commission_rate, commission_amount,
   // *_amount), net of refund adjustments. No hard-coded percentages anywhere.
   const financials = aggregateFinancials(orders, adjustments);
+  // Delivery economics, summed from the same real order rows: distance is
+  // the restaurant → customer route the database priced each order with.
+  const deliveryStats = aggregateDeliveryStats(orders, adjustments);
   const totalVolume = round2(orders.reduce((sum, o) => sum + o.total_amount, 0));
   const totalPlatformCut = financials.platformRevenue;
   const onlineCouriers = couriers.filter((c) => c.is_online).length;
@@ -1222,6 +1267,9 @@ export const AdminDashboard: React.FC = () => {
 
   // Pricing preview (mirrors the exact fee the customer would be charged)
   const sampleFee = calculateDeliveryFee(SAMPLE_DISTANCE_KM, pricingSettings);
+  const courierSampleEarning = round2(
+    (sampleFee * (pricingSettings.courier_earning_percentage ?? 100)) / 100
+  );
   // Phase 1: the courier keeps the whole delivery fee (0% courier commission);
   // the platform earns the restaurant commission on the FOOD subtotal only.
   const sampleFoodOrder = 100;
@@ -1739,6 +1787,56 @@ export const AdminDashboard: React.FC = () => {
                             </dd>
                           </div>
                         </dl>
+
+                        {/* ---- Delivery economics: fees, earnings, distance ---- */}
+                        <div className="mt-4 border-t border-slate-100 pt-4">
+                          <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                            Delivery — fees, courier earnings &amp; distance
+                          </p>
+                          <dl className="mt-2 grid grid-cols-1 gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Total delivery fees collected</dt>
+                              <dd className="font-black tabular-nums text-slate-900">
+                                {formatGHS(deliveryStats.totalDeliveryFees)}
+                              </dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Total courier earnings</dt>
+                              <dd className="font-black tabular-nums text-emerald-700">
+                                {formatGHS(deliveryStats.totalCourierEarnings)}
+                              </dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Total delivery distance</dt>
+                              <dd className="font-black tabular-nums text-slate-900">
+                                {deliveryStats.totalDistanceKm.toFixed(1)} km
+                              </dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Average delivery distance</dt>
+                              <dd className="font-black tabular-nums text-slate-900">
+                                {deliveryStats.averageDistanceKm.toFixed(1)} km
+                              </dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Average delivery fee</dt>
+                              <dd className="font-black tabular-nums text-slate-900">
+                                {formatGHS(deliveryStats.averageDeliveryFee)}
+                              </dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Orders measured</dt>
+                              <dd className="font-black tabular-nums text-slate-900">
+                                {deliveryStats.measuredOrders} of {deliveryStats.orders}
+                              </dd>
+                            </div>
+                          </dl>
+                          <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
+                            Summed from stored order records (delivered &amp; paid, net of
+                            refunds). The delivery fee funds the courier earning; the
+                            restaurant commission is calculated separately on food sales.
+                          </p>
+                        </div>
                       </>
                     )}
 
@@ -2895,8 +2993,8 @@ export const AdminDashboard: React.FC = () => {
 
                   <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
                   <SectionCard
-                    title="Ghana delivery fee rules"
-                    subtitle="Controls dynamic distance-based pricing across Accra, Kumasi and other operational hubs"
+                    title="Delivery Pricing"
+                    subtitle="Distance-based fees for every new order: base + (distance × rate), clamped by the floor and an optional cap"
                     className="max-w-2xl"
                   >
                     <form onSubmit={handleSavePricing} className="space-y-4">
@@ -2972,21 +3070,71 @@ export const AdminDashboard: React.FC = () => {
                             htmlFor="max_fee"
                             className="mb-1.5 block text-xs font-bold text-slate-600"
                           >
-                            Maximum fee cap (GH₵)
+                            Maximum fee cap (GH₵){' '}
+                            <span className="font-normal text-slate-400">— optional</span>
                           </label>
                           <input
                             id="max_fee"
                             type="number"
                             step="1.00"
-                            value={pricingSettings.max_fee}
+                            min={pricingSettings.min_fee}
+                            placeholder="No maximum"
+                            value={pricingSettings.max_fee ?? ''}
                             onChange={(e) =>
                               setPricingSettings({
                                 ...pricingSettings,
-                                max_fee: parseFloat(e.target.value) || 0,
+                                max_fee:
+                                  e.target.value.trim() === ''
+                                    ? null
+                                    : Number(e.target.value),
                               })
                             }
                             className={INPUT_CLASS}
                           />
+                          <p className="mt-1 text-[10px] text-slate-400">
+                            Leave empty to charge the calculated fee with no ceiling.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-4 border-t border-slate-100 pt-4 sm:grid-cols-2">
+                        <div>
+                          <label
+                            htmlFor="courier_earning_percentage"
+                            className="mb-1.5 block text-xs font-bold text-slate-600"
+                          >
+                            Courier earning (% of the delivery fee)
+                          </label>
+                          <input
+                            id="courier_earning_percentage"
+                            type="number"
+                            step="1"
+                            min={0}
+                            max={100}
+                            value={pricingSettings.courier_earning_percentage ?? 100}
+                            onChange={(e) =>
+                              setPricingSettings({
+                                ...pricingSettings,
+                                courier_earning_percentage: Math.min(
+                                  100,
+                                  Math.max(0, Number(e.target.value) || 0)
+                                ),
+                              })
+                            }
+                            className={INPUT_CLASS}
+                          />
+                        </div>
+                        <div>
+                          <span className="mb-1.5 block text-xs font-bold text-slate-600">
+                            Courier commission
+                          </span>
+                          <div className={`${INPUT_CLASS} bg-slate-50 text-slate-500`}>
+                            {round2(100 - (pricingSettings.courier_earning_percentage ?? 100))}%
+                          </div>
+                          <p className="mt-1 text-[10px] text-slate-400">
+                            The restaurant never pays anything out of the delivery fee — this
+                            only decides how the fee is split between courier and platform.
+                          </p>
                         </div>
                       </div>
 
@@ -3000,7 +3148,8 @@ export const AdminDashboard: React.FC = () => {
                           {isSavingSettings ? 'Saving…' : 'Apply pricing rules'}
                         </button>
                         <span className="text-[11px] text-slate-400">
-                          Applies to every new order instantly.
+                          Applies to new quotes and orders only · pricing version{' '}
+                          {pricingSettings.pricing_version ?? 1}
                         </span>
                       </div>
                     </form>
@@ -3023,10 +3172,11 @@ export const AdminDashboard: React.FC = () => {
                         </div>
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-slate-500">
-                            Courier keeps (0% commission)
+                            Courier earns ({round2(100 - (pricingSettings.courier_earning_percentage ?? 100))}%
+                            {' '}commission)
                           </span>
                           <span className="font-black tabular-nums text-emerald-700">
-                            {formatGHS(sampleFee)}
+                            {formatGHS(courierSampleEarning)}
                           </span>
                         </div>
                         <div className="flex items-center justify-between gap-3">
@@ -3045,9 +3195,11 @@ export const AdminDashboard: React.FC = () => {
                         food subtotal.
                       </p>
                       <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
-                        Fees are clamped between {formatGHS(pricingSettings.min_fee)} and{' '}
-                        {formatGHS(pricingSettings.max_fee)} with a ×
-                        {pricingSettings.surge_multiplier ?? 1} surge multiplier.
+                        Floor {formatGHS(pricingSettings.min_fee)} ·{' '}
+                        {pricingSettings.max_fee != null
+                          ? `cap ${formatGHS(pricingSettings.max_fee)}`
+                          : 'no maximum cap'}{' '}
+                        · ×{pricingSettings.surge_multiplier ?? 1} surge
                       </p>
                     </div>
 
@@ -3062,7 +3214,12 @@ export const AdminDashboard: React.FC = () => {
                         </li>
                         <li className="flex gap-2">
                           <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
-                          Result is clamped by the minimum floor and maximum cap
+                          Distance is measured restaurant → customer on the real road route
+                          whenever the mapping service can provide one
+                        </li>
+                        <li className="flex gap-2">
+                          <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                          Result is clamped by the minimum floor and the optional maximum cap
                         </li>
                         <li className="flex gap-2">
                           <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />

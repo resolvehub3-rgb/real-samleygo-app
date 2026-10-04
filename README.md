@@ -329,6 +329,8 @@ Run these SQL scripts, **in order**, inside the **Supabase SQL Editor**:
 4. `supabase/migrations/20260927_signup_repair.sql` — **signup repair**: replaces `handle_new_user()` with a version that pins its `search_path`, schema-qualifies every object, is null-safe on the `NOT NULL` profile columns, and can never block a registration (failures are logged to `public.signup_debug` instead of aborting the `auth.users` insert). Also records a before/after probe of the trigger so the original error is captured verbatim.
 5. `supabase/migrations/20260929_courier_avatar.sql` — **profile photos**: public `avatars` Storage bucket (each user can only write inside their own folder) plus a `supabase_realtime` publication entry for `public.profiles`, so a courier uploading a rider photo reaches the customer's live order card and the restaurant's dispatch board immediately.
 6. `supabase/migrations/20260930_reviews_ratings.sql` — **customer reviews**: row level security policies for `public.reviews` (it had RLS enabled with zero policies, so every submit was rejected while the app still said "recorded"), one review per order per customer, a `refresh_review_ratings()` trigger that recomputes `restaurants.rating` / `restaurants.total_reviews` and `couriers.rating`, and a backfill of the current averages. Without this the rate form, the kitchen's *Customer Rating* card and the courier's rating never move.
+7. `supabase/migrations/20261004_payment_commission_model.sql` — **payments & restaurant commission**: the `commission` settings, the `apply_order_financials()` trigger that writes each order's money snapshot (commission on the **food subtotal only**), the settlement lifecycle and the append-only refund adjustments. Required before step 8 — delivery pricing reads the same settings tables but never touches commission.
+8. `supabase/migrations/20261005_distance_delivery_pricing.sql` — **distance-based delivery pricing**: `haversine_km()`, `delivery_pricing_amounts()` (the `base + (km × rate)` formula with its floor and optional cap), the short-lived `delivery_quotes` table (5-minute TTL, server-created only) plus `create_delivery_quote()` and `set_delivery_pricing()`. `apply_order_financials()` now validates the customer's coordinates (raising *"Please select a valid delivery location to calculate your delivery fee."* when there is none), consumes a live quote — recalculating it server-side if it is missing, expired or for another customer/restaurant — and snapshots `delivery_distance_km`, `delivery_fee`, `courier_earning` and `delivery_pricing_version` onto the order. Historical orders are never re-priced. A Super Admin saves pricing from **Settings → Delivery Pricing**, which calls the RPC (it validates, bumps `pricing_version` and keeps courier commission in sync at `100 − earning`).
 
 All scripts are idempotent and create:
 
@@ -345,6 +347,14 @@ npm run dev
 ```
 
 The web application runs at `http://localhost:3000`.
+
+### Tests
+```bash
+npm test            # commission model + distance delivery pricing suites
+npm run lint        # TypeScript type check (tsc --noEmit)
+```
+
+`scripts/commission.test.ts` locks down checkout totals, the 15%-of-food-only restaurant commission, the 0% courier commission and the settlement lifecycle. `scripts/delivery_pricing.test.ts` locks down the distance pricing: the worked example (8 km ⇒ GH₵21 delivery, GH₵100 food ⇒ GH₵121 total, courier earns GH₵21, restaurant commission GH₵15 ⇒ GH₵85 net), the floor/optional-cap clamps, 2-decimal rounding, the 5-minute quote lifecycle, the delivery reporting aggregates, and source scans proving the browser never posts a price (it posts a `delivery_quote_id` instead).
 
 ### 5. Super Admin Access
 `/admin/dashboard` is gated by `ProtectedRoute allowedRoles={['SUPER_ADMIN']}` **and** by `profiles.role` in PostgreSQL.

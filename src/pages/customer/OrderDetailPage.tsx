@@ -30,7 +30,7 @@ import {
   Review,
 } from '../../types/database';
 import { useAuth } from '../../context/AuthContext';
-import { formatGHS } from '../../lib/pricing';
+import { formatDistanceKm, formatGHS } from '../../lib/pricing';
 import { CourierLiveMap } from '../../components/courier/CourierLiveMap';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { UserAvatar } from '../../components/common/UserAvatar';
@@ -950,6 +950,10 @@ export const OrderDetailPage: React.FC = () => {
               <div className="flex justify-between">
                 <span>Food subtotal</span>
                 <span>{formatGHS(order.subtotal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Delivery distance</span>
+                <span>{formatDistanceKm(order.delivery_distance_km)}</span>
               </div>
               <div className="flex justify-between">
                 <span>Delivery fee</span>

@@ -186,6 +186,15 @@ export interface Order {
   /** SamleyGo revenue: restaurant commission (+ delivery share, if any). */
   platform_revenue?: number | null;
   currency?: string;
+  // ---- Immutable order-level DELIVERY record (server-computed) ----
+  /** Restaurant -> customer route distance used for the delivery fee. */
+  delivery_distance_km?: number | null;
+  /** ROAD_ROUTE when the mapping service priced it, STRAIGHT_LINE otherwise. */
+  delivery_distance_source?: 'ROAD_ROUTE' | 'STRAIGHT_LINE' | null;
+  /** Delivery pricing rules version this order was priced with. */
+  delivery_pricing_version?: number | null;
+  /** The (already consumed) delivery quote this order was placed from. */
+  delivery_quote_id?: string | null;
   settlement_status?: SettlementStatus;
   commission_calculated_at?: string;
   settlement_updated_at?: string;
@@ -298,13 +307,25 @@ export interface NotificationItem {
   created_at: string;
 }
 
+/**
+ * Distance-based delivery pricing rules (platform_settings key
+ * `delivery_pricing`). Read from the database — never hard-coded in the
+ * frontend — and written only through the set_delivery_pricing() RPC,
+ * which bumps `pricing_version` so every quote and order can record the
+ * rules it was priced with.
+ */
 export interface PlatformPricingSettings {
   base_fee: number;
   per_km_rate: number;
   min_fee: number;
-  max_fee: number;
+  /** Optional cap. `null` / omitted = no maximum delivery fee. */
+  max_fee?: number | null;
   currency: string;
   surge_multiplier: number;
+  /** Share of the delivery fee the courier earns (100% in Phase 1). */
+  courier_earning_percentage?: number;
+  /** Incremented on every settings change; snapshotted onto quotes/orders. */
+  pricing_version?: number;
   /** @deprecated Legacy delivery split — courier earnings now derive from
    * CommissionSettings.courier_commission_percentage (0% in Phase 1). */
   courier_payout_percentage?: number;

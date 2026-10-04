@@ -91,6 +91,24 @@ const routeCacheKey = (from: LatLng, to: LatLng): string =>
   `${round(from.lat, 4)},${round(from.lng, 4)}>${round(to.lat, 4)},${round(to.lng, 4)}`;
 
 /**
+ * Fetch ONLY the road distance (km) between two points — a much lighter
+ * request than `fetchRoadRoute`, because the delivery-quote flow needs the
+ * metre count, not the polyline.
+ *
+ * Uses the same cache/timeout/never-throw rules: `null` means "no route
+ * could be resolved", and the caller then falls back to the server's own
+ * straight-line measurement (which is what the backend validates against).
+ */
+export async function fetchRoadDistanceKm(from: LatLng, to: LatLng): Promise<number | null> {
+  if (!isCoordinate(from) || !isCoordinate(to)) return null;
+  if (Math.abs(from.lat - to.lat) < 1e-6 && Math.abs(from.lng - to.lng) < 1e-6) return null;
+
+  const route = await fetchRoadRoute(from, to);
+  if (!route || !Number.isFinite(route.distanceMeters) || route.distanceMeters <= 0) return null;
+  return Number((route.distanceMeters / 1000).toFixed(3));
+}
+
+/**
  * Fetch the driving route between two points.
  *
  * @returns the road polyline with distance/ETA, or `null` when no route can be

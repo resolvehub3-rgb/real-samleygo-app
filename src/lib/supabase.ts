@@ -2,8 +2,12 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 // Retrieve credentials from environment or browser configuration storage
 export function getSupabaseCredentials() {
-  const envUrl = import.meta.env.VITE_SUPABASE_URL;
-  const envKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  // Vite injects `import.meta.env` at build time. In non-Vite runtimes
+  // (node test runners, plain tsx) it does not exist, so fall back to an
+  // empty object instead of throwing — the same "not configured" result.
+  const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+  const envUrl = env?.VITE_SUPABASE_URL;
+  const envKey = env?.VITE_SUPABASE_ANON_KEY;
 
   if (envUrl && envKey && envUrl.trim() !== '' && envKey.trim() !== '') {
     return { url: envUrl.trim(), key: envKey.trim(), fromEnv: true };
@@ -59,3 +63,19 @@ export const supabase: SupabaseClient = createClient(
     },
   }
 );
+
+/**
+ * PostgREST wraps a raised exception as `Failed to call RPC 'name': {...json...}`.
+ * Surfaces should show the database's own message (e.g. the delivery-location
+ * copy) instead of that wrapper and its JSON envelope.
+ */
+export function cleanRpcErrorMessage(
+  message: string | null | undefined,
+  fallback: string
+): string {
+  const text = message ?? '';
+  const fromEnvelope = /"message"\s*:\s*"([^"]*)"/.exec(text);
+  if (fromEnvelope?.[1]) return fromEnvelope[1];
+  const stripped = text.replace(/^Failed to call RPC '.*': /, '').trim();
+  return stripped || fallback;
+}

@@ -20,11 +20,19 @@ import {
   calculateDistanceKm,
   calculateDeliveryFee,
   formatGHS,
+  isValidDeliveryPoint,
   DEFAULT_PRICING,
 } from '../../lib/pricing';
 import { computeCustomerTotals } from '../../lib/commission';
+import {
+  DELIVERY_LOCATION_ERROR,
+  DeliveryQuote,
+  ensureFreshQuote,
+  requestDeliveryQuote,
+} from '../../lib/deliveryQuote';
+import { geocodeAddress, LatLng } from '../../lib/routing';
 import { PlatformPricingSettings } from '../../types/database';
-import { supabase, isSupabaseConfigured } from '../../lib/supabase';
+import { supabase, isSupabaseConfigured, cleanRpcErrorMessage } from '../../lib/supabase';
 import { isGeolocationAvailable } from '../../lib/geolocation';
 import { readDeliverTo } from '../../lib/deliverTo';
 import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
@@ -53,9 +61,22 @@ export const CartPage: React.FC = () => {
   const [momoNumber, setMomoNumber] = useState(profile?.phone || '');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  // Live pricing rules from platform_settings so the delivery fee shown
-  // here is exactly what the server will charge (falls back to defaults).
+  // Live pricing rules from platform_settings — used ONLY for the signed-out
+  // preview. Every signed-in quote is calculated by the database.
   const [pricingSettings, setPricingSettings] = useState<PlatformPricingSettings | null>(null);
+
+  // ── Server-calculated delivery quote ─────────────────────────────────
+  // distance + delivery fee come back from create_delivery_quote(); the
+  // browser never decides them and never posts them as money.
+  const [quote, setQuote] = useState<DeliveryQuote | null>(null);
+  const [quoteError, setQuoteError] = useState('');
+  const [isQuoting, setIsQuoting] = useState(false);
+  /** Signed-out preview only (the server quote replaces it after sign-in). */
+  const [preview, setPreview] = useState<{ distanceKm: number; deliveryFee: number } | null>(null);
+  /** Drops replies from an older location as soon as a newer one arrives. */
+  const quoteSeqRef = useRef(0);
+  const geocodeSeqRef = useRef(0);
+  const geocodedTextRef = useRef('');
 
   useEffect(() => {
     if (!isSupabaseConfigured) return;
@@ -104,19 +125,133 @@ export const CartPage: React.FC = () => {
     setErrorMsg(`${err} You can also type your delivery landmark manually.`);
   }, [liveLocation.error]);
 
-  // Calculate real distance if GPS coordinates available
-  const restLat = restaurant?.latitude || 5.6037; // Accra default
-  const restLng = restaurant?.longitude || -0.187;
-  const currentLat = customerLat || 5.635;
-  const currentLng = customerLng || -0.155;
+  // ── Endpoints of the delivery route ───────────────────────────────────
+  // The kitchen's coordinates come from its own record — never a
+  // fabricated city default — and the customer's point must be a real GPS
+  // fix or a geocoded landmark. Without both there is no route, and
+  // without a route there is no honest fee.
+  const restaurantPoint: LatLng | null =
+    restaurant && isValidDeliveryPoint(restaurant.latitude, restaurant.longitude)
+      ? { lat: restaurant.latitude as number, lng: restaurant.longitude as number }
+      : null;
 
-  const distanceKm = calculateDistanceKm(restLat, restLng, currentLat, currentLng);
-  const deliveryFee = restaurant
-    ? calculateDeliveryFee(distanceKm, pricingSettings ?? DEFAULT_PRICING)
-    : 12.0;
-  // Customer pays food + delivery (+ optional tip) — never any commission,
-  // platform or service fee. Restaurant commission is an internal
-  // settlement calculation and never appears on the customer's bill.
+  const deliveryPoint: LatLng | null =
+    customerLat != null && customerLng != null && isValidDeliveryPoint(customerLat, customerLng)
+      ? { lat: customerLat, lng: customerLng }
+      : null;
+
+  // No GPS? Resolve the typed landmark to real coordinates so the route
+  // is measured instead of guessed. A live GPS fix always wins.
+  useEffect(() => {
+    if (liveLocation.point) return;
+    const target = address.trim();
+    if (target.length < 4) return;
+    if (geocodedTextRef.current === target && customerLat != null && customerLng != null) return;
+
+    const seq = ++geocodeSeqRef.current;
+    const timer = window.setTimeout(async () => {
+      const point = await geocodeAddress(target);
+      if (seq !== geocodeSeqRef.current) return;
+      if (point && isValidDeliveryPoint(point.lat, point.lng)) {
+        geocodedTextRef.current = target;
+        setCustomerLat(point.lat);
+        setCustomerLng(point.lng);
+      }
+    }, 900);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [address, customerLat, customerLng, liveLocation.point]);
+
+  // Real-time quote: every time the delivery point (or the kitchen)
+  // changes, the backend re-prices distance + fee before checkout, so a
+  // stale price is never shown after the customer moves.
+  const restaurantId = restaurant?.id;
+  useEffect(() => {
+    if (!restaurantId) return;
+    const seq = ++quoteSeqRef.current;
+
+    if (!deliveryPoint) {
+      setQuote(null);
+      setPreview(null);
+      setIsQuoting(false);
+      setQuoteError(DELIVERY_LOCATION_ERROR);
+      return;
+    }
+
+    if (!user) {
+      // Signed-out preview only — the authoritative quote is the server's
+      // and replaces this as soon as the customer signs in.
+      if (restaurantPoint) {
+        const km = calculateDistanceKm(
+          restaurantPoint.lat,
+          restaurantPoint.lng,
+          deliveryPoint.lat,
+          deliveryPoint.lng
+        );
+        setPreview({
+          distanceKm: km,
+          deliveryFee: calculateDeliveryFee(km, pricingSettings ?? DEFAULT_PRICING),
+        });
+        setQuote(null);
+        setQuoteError('');
+      } else {
+        setPreview(null);
+        setQuoteError(DELIVERY_LOCATION_ERROR);
+      }
+      setIsQuoting(false);
+      return;
+    }
+
+    const timer = window.setTimeout(async () => {
+      setIsQuoting(true);
+      const result = await requestDeliveryQuote({
+        restaurantId,
+        restaurantPoint,
+        deliveryPoint,
+      });
+      if (seq !== quoteSeqRef.current) return; // a newer location already spoke
+      setIsQuoting(false);
+      if (result.ok) {
+        setQuote(result.quote);
+        setPreview(null);
+        setQuoteError('');
+      } else {
+        setQuote(null);
+        setPreview(null);
+        setQuoteError(result.error);
+      }
+    }, 400);
+
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    restaurantId,
+    restaurantPoint?.lat,
+    restaurantPoint?.lng,
+    deliveryPoint?.lat,
+    deliveryPoint?.lng,
+    user?.id,
+    pricingSettings,
+  ]);
+
+  // What the summary renders: the server quote when we have one, otherwise
+  // the signed-out preview. Never a hard-coded distance or price.
+  const quotedDistanceKm = quote?.distanceKm ?? preview?.distanceKm ?? null;
+  const deliveryFee = quote?.deliveryFee ?? preview?.deliveryFee ?? 0;
+  const distanceLabel =
+    quotedDistanceKm != null ? `${quotedDistanceKm.toFixed(1)} km` : isQuoting ? '…' : '—';
+  const distanceHint = quote
+    ? quote.distanceSource === 'ROAD_ROUTE'
+      ? 'actual road route'
+      : 'straight-line route'
+    : isQuoting
+    ? 'measuring route…'
+    : quoteError
+    ? 'location needed'
+    : '';
+
+  // Customer pays food + delivery (+ optional tip) — nothing else. The
+  // breakdown below is the whole story: no hidden lines of any kind.
   const { total: grandTotal } = computeCustomerTotals(subtotal, deliveryFee, tip);
 
   // Use the browser Geolocation API: a live watch that keeps the delivery
@@ -155,6 +290,11 @@ export const CartPage: React.FC = () => {
       return;
     }
 
+    if (!deliveryPoint) {
+      setErrorMsg(DELIVERY_LOCATION_ERROR);
+      return;
+    }
+
     setIsSubmitting(true);
     setErrorMsg('');
 
@@ -162,7 +302,23 @@ export const CartPage: React.FC = () => {
       const orderNumber = `SG-${Math.floor(100000 + Math.random() * 900000)}`;
       const paymentRef = `PAY-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-      // 1. Insert Order
+      // Ask the backend for the quote it will actually charge: a quote
+      // that expired while the customer filled the form is replaced by a
+      // fresh one, never submitted as-is.
+      const freshQuote = await ensureFreshQuote({
+        current: quote,
+        restaurantId: restaurant.id,
+        restaurantPoint,
+        deliveryPoint,
+      });
+      if (!freshQuote.ok) {
+        setErrorMsg(freshQuote.error);
+        return;
+      }
+
+      // 1. Insert Order — the delivery fee is deliberately NOT sent: the
+      //    database prices it from this quote (or recalculates it from the
+      //    coordinates) and re-derives the customer total server-side.
       const { data: orderData, error: orderError } = await supabase
         .from('orders')
         .insert({
@@ -171,12 +327,12 @@ export const CartPage: React.FC = () => {
           restaurant_id: restaurant.id,
           status: 'RESTAURANT_PENDING',
           subtotal,
-          delivery_fee: deliveryFee,
+          delivery_quote_id: freshQuote.quote.quoteId,
           tip,
           total_amount: grandTotal,
           delivery_address: address.trim(),
-          delivery_latitude: customerLat,
-          delivery_longitude: customerLng,
+          delivery_latitude: deliveryPoint.lat,
+          delivery_longitude: deliveryPoint.lng,
           customer_phone: phone.trim(),
           delivery_notes: deliveryNotes.trim() || null,
           payment_method: paymentMethod,
@@ -251,7 +407,13 @@ export const CartPage: React.FC = () => {
       clearCart();
       navigate(`/orders/${orderData.id}`);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Order processing failed';
+      // The database raises the exact copy for a missing/invalid location
+      // ("Please select a valid delivery location to calculate your delivery
+      // fee.") — show it verbatim, unwrapped from any PostgREST envelope.
+      const msg = cleanRpcErrorMessage(
+        err instanceof Error ? err.message : null,
+        'Order processing failed'
+      );
       setErrorMsg(msg);
     } finally {
       setIsSubmitting(false);
@@ -509,13 +671,26 @@ export const CartPage: React.FC = () => {
 
                 <div className="flex justify-between items-center">
                   <div>
-                    <span>Delivery fee</span>
+                    <span>Delivery distance</span>
                     <span className="text-[10px] text-slate-400 block">
-                      ~{distanceKm} km from kitchen
+                      {distanceHint ? `${distanceHint} · kitchen → drop-off` : 'kitchen → drop-off'}
                     </span>
                   </div>
-                  <span className="font-bold text-slate-900">{formatGHS(deliveryFee)}</span>
+                  <span className="font-bold text-slate-900">{distanceLabel}</span>
                 </div>
+
+                <div className="flex justify-between items-center">
+                  <span>Delivery fee</span>
+                  <span className="font-bold text-slate-900">
+                    {deliveryFee > 0 ? formatGHS(deliveryFee) : '—'}
+                  </span>
+                </div>
+
+                {quoteError && (
+                  <p className="text-[11px] font-semibold leading-relaxed text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-2.5 py-2">
+                    {quoteError}
+                  </p>
+                )}
 
                 {/* Optional Courier Tip */}
                 <div className="pt-2 border-t border-slate-100">
