@@ -18,6 +18,32 @@ export type OrderStatus =
   | 'REJECTED'
   | 'FAILED';
 
+/**
+ * Payment lifecycle. `COMPLETED` is the app's "paid" state (equivalent to
+ * PAID); refunds are recorded on the order and never by rewriting history.
+ */
+export type PaymentStatus =
+  | 'PENDING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'REFUNDED'
+  | 'PARTIALLY_REFUNDED';
+
+/**
+ * Restaurant settlement lifecycle — deliberately separate from payment.
+ * Payment success never means "the restaurant has been paid out":
+ * PENDING (not earned yet) -> ELIGIBLE (delivered & paid) ->
+ * PROCESSING -> PAID, or CANCELLED/REVERSED when the order is cancelled
+ * or refunded.
+ */
+export type SettlementStatus =
+  | 'PENDING'
+  | 'ELIGIBLE'
+  | 'PROCESSING'
+  | 'PAID'
+  | 'REVERSED'
+  | 'CANCELLED';
+
 export interface Profile {
   id: string;
   email: string;
@@ -56,7 +82,12 @@ export interface Restaurant {
   opening_time?: string;
   closing_time?: string;
   min_order_amount: number;
-  commission_rate: number;
+  /**
+   * Optional per-restaurant commission override. NULL = "use the
+   * platform-wide rate from platform_settings.commission" (15% in
+   * Phase 1). The effective rate is snapshotted onto each order.
+   */
+  commission_rate: number | null;
   rating: number;
   total_reviews: number;
   created_at: string;
@@ -136,17 +167,35 @@ export interface Order {
   restaurant_id: string;
   courier_id?: string;
   status: OrderStatus;
+  /** Food subtotal only — never includes the delivery fee. */
   subtotal: number;
   delivery_fee: number;
   tip: number;
   total_amount: number;
+  // ---- Immutable order-level financial record (server-computed) ----
+  /** Commission rate snapshotted when the order was created (versioning). */
+  commission_rate?: number | null;
+  /** Food subtotal × commission_rate — the restaurant commission. */
+  commission_amount?: number | null;
+  /** Equals the food subtotal. */
+  restaurant_gross_amount?: number | null;
+  /** Food subtotal minus commission — what the restaurant is owed. */
+  restaurant_net_amount?: number | null;
+  /** Courier's share of the delivery fee (0% commission in Phase 1). */
+  courier_earning?: number | null;
+  /** SamleyGo revenue: restaurant commission (+ delivery share, if any). */
+  platform_revenue?: number | null;
+  currency?: string;
+  settlement_status?: SettlementStatus;
+  commission_calculated_at?: string;
+  settlement_updated_at?: string;
   delivery_address: string;
   delivery_latitude?: number;
   delivery_longitude?: number;
   customer_phone: string;
   delivery_notes?: string;
   payment_method: string;
-  payment_status: 'PENDING' | 'COMPLETED' | 'FAILED';
+  payment_status: PaymentStatus;
   payment_reference?: string;
   estimated_delivery_time?: string;
   created_at: string;
@@ -195,11 +244,32 @@ export interface Payment {
   currency: string;
   provider: string;
   payment_method: string;
-  status: 'PENDING' | 'COMPLETED' | 'FAILED';
+  status: PaymentStatus;
   payment_reference: string;
   transaction_reference?: string;
   paid_at?: string;
   metadata?: Record<string, unknown>;
+  created_at: string;
+}
+
+/**
+ * Append-only refund/reversal record. Never rewrites an order's original
+ * financial record — dashboards net these adjustments against it.
+ * All *_adjustment fields are SIGNED: negative = money moving back out.
+ */
+export interface OrderSettlementAdjustment {
+  id: string;
+  order_id: string;
+  adjustment_type: 'REFUND' | 'PARTIAL_REFUND' | 'CANCELLATION' | 'CORRECTION';
+  refund_amount: number;
+  food_amount_refunded: number;
+  delivery_amount_refunded: number;
+  commission_adjustment: number;
+  restaurant_net_adjustment: number;
+  courier_earning_adjustment: number;
+  platform_revenue_adjustment: number;
+  reason?: string | null;
+  created_by?: string | null;
   created_at: string;
 }
 
@@ -235,8 +305,26 @@ export interface PlatformPricingSettings {
   max_fee: number;
   currency: string;
   surge_multiplier: number;
-  courier_payout_percentage: number;
-  platform_commission_percentage: number;
+  /** @deprecated Legacy delivery split — courier earnings now derive from
+   * CommissionSettings.courier_commission_percentage (0% in Phase 1). */
+  courier_payout_percentage?: number;
+  /** @deprecated Legacy delivery split — not used by the Phase 1 model. */
+  platform_commission_percentage?: number;
+}
+
+/**
+ * Marketplace commission rules (platform_settings key `commission`).
+ * Phase 1: restaurant commission is charged per order on the food
+ * subtotal; the courier commission is 0 (courier receives the delivery
+ * earning). Configurable from the Super Admin dashboard.
+ */
+export interface CommissionSettings {
+  restaurant_commission_percentage: number;
+  courier_commission_percentage: number;
+  max_restaurant_commission_percentage?: number;
+  max_courier_commission_percentage?: number;
+  currency?: string;
+  updated_at?: string;
 }
 
 export interface AuditLog {

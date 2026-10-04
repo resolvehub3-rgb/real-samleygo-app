@@ -7,8 +7,12 @@ export const DEFAULT_PRICING: PlatformPricingSettings = {
   max_fee: 60.0,
   currency: 'GHS',
   surge_multiplier: 1.0,
-  courier_payout_percentage: 80.0,
-  platform_commission_percentage: 20.0,
+  // Deprecated legacy keys (kept for stored JSON compatibility).
+  // Courier earnings are derived from CommissionSettings
+  // .courier_commission_percentage — 0% in Phase 1, i.e. the courier
+  // receives the full delivery fee.
+  courier_payout_percentage: 100.0,
+  platform_commission_percentage: 0.0,
 };
 
 /**

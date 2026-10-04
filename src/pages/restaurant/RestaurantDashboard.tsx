@@ -19,8 +19,13 @@ import {
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
-import { Restaurant, Order, Profile, Review } from '../../types/database';
+import { Restaurant, Order, Profile, Review, OrderSettlementAdjustment } from '../../types/database';
 import { formatGHS } from '../../lib/pricing';
+import {
+  getOrderFinancials,
+  aggregateFinancials,
+  round2,
+} from '../../lib/commission';
 import { RestaurantShell } from '../../components/restaurant/RestaurantShell';
 import { CourierLiveMap, LatLng } from '../../components/courier/CourierLiveMap';
 import { haversineKm } from '../../lib/routing';
@@ -66,6 +71,9 @@ export const RestaurantDashboard: React.FC = () => {
   const [orders, setOrders] = useState<Order[]>([]);
   // Latest customer reviews for this kitchen (written on the order screen)
   const [customerReviews, setCustomerReviews] = useState<Review[]>([]);
+  // Refund / reversal adjustments attached to this kitchen's orders, so the
+  // gross → commission → net math stays truthful after a refund.
+  const [adjustments, setAdjustments] = useState<OrderSettlementAdjustment[]>([]);
   const [activeTab, setActiveTab] = useState<'PENDING' | 'PREPARING' | 'READY' | 'COMPLETED'>('PENDING');
   const [isLoading, setIsLoading] = useState(true);
   const [isUpdatingOpenStatus, setIsUpdatingOpenStatus] = useState(false);
@@ -174,6 +182,20 @@ export const RestaurantDashboard: React.FC = () => {
           .limit(6);
 
         setCustomerReviews((reviewRows || []) as Review[]);
+
+        // 5. Settlement adjustments (refunds / reversals) on this kitchen's
+        //    orders — RLS lets an owner read only their own restaurant's rows.
+        const orderIds = (ordersData as Order[]).map((o) => o.id);
+        if (orderIds.length > 0) {
+          const { data: adjustmentRows } = await supabase
+            .from('order_settlement_adjustments')
+            .select('*')
+            .in('order_id', orderIds)
+            .order('created_at', { ascending: true });
+          setAdjustments((adjustmentRows || []) as OrderSettlementAdjustment[]);
+        } else {
+          setAdjustments([]);
+        }
       }
     } catch {
       // Handled
@@ -677,8 +699,34 @@ export const RestaurantDashboard: React.FC = () => {
     Boolean(o.courier_id && !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REJECTED'].includes(o.status))
   );
 
-  // Financial calculations
+  // Financial calculations — every figure below comes from the DB-computed
+  // snapshot on each order (commission_rate / commission_amount / *_amount),
+  // never from a hard-coded rate. Cancelled & refunded money is netted out.
   const totalRevenue = completedOrders.reduce((sum, o) => sum + o.subtotal, 0);
+
+  // Recognized all-time totals (delivered + paid, net of refund adjustments).
+  const financials = aggregateFinancials(orders, adjustments);
+
+  // Today's food sales → commission → net, for the earnings strip.
+  const todayKey = new Date().toDateString();
+  const todays = orders
+    .filter(
+      (o) =>
+        new Date(o.created_at).toDateString() === todayKey &&
+        !['CANCELLED', 'REJECTED', 'FAILED'].includes(o.status)
+    )
+    .reduce(
+      (acc, o) => {
+        const f = getOrderFinancials(o);
+        acc.gross += f.restaurantGross;
+        acc.commission += f.commissionAmount;
+        return acc;
+      },
+      { gross: 0, commission: 0 }
+    );
+  const todaysGross = round2(todays.gross);
+  const todaysCommission = round2(todays.commission);
+  const todaysNet = round2(todaysGross - todaysCommission);
 
   const tabs: { key: typeof activeTab; label: string; count: number; activeClass: string }[] = [
     { key: 'PENDING', label: 'New Incoming', count: pendingOrders.length, activeClass: 'bg-amber-500 text-white shadow-xs' },
@@ -832,6 +880,76 @@ export const RestaurantDashboard: React.FC = () => {
               {restaurant.total_reviews} customer reviews
             </span>
           </div>
+        </div>
+
+        {/* Earnings — gross → commission → net (real DB snapshots) */}
+        <div className="bg-white rounded-3xl border border-slate-200 shadow-xs p-4 sm:p-5 space-y-4">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Your earnings</h3>
+              <p className="text-[11px] text-slate-400">
+                Food sales minus commission · net of refunds
+              </p>
+            </div>
+            <span className="text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">
+              {financials.recognizedOrders} recognized order{financials.recognizedOrders === 1 ? '' : 's'}
+            </span>
+          </div>
+
+          {financials.recognizedOrders === 0 ? (
+            <div className="py-6 text-center">
+              <TrendingUp className="w-6 h-6 text-slate-300 mx-auto mb-2" />
+              <p className="text-xs font-semibold text-slate-500">No recognized orders yet</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Delivered and paid orders will show their commission and payout here.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="rounded-2xl bg-emerald-50 border border-emerald-100 p-3.5">
+                <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider block">
+                  Food sales
+                </span>
+                <span className="text-lg font-black text-emerald-800 block mt-0.5">
+                  {formatGHS(financials.totalFoodSales)}
+                </span>
+                <span className="text-[10px] text-emerald-700/70 mt-1 block">
+                  Gross before commission
+                </span>
+              </div>
+              <div className="rounded-2xl bg-amber-50 border border-amber-100 p-3.5">
+                <span className="text-[10px] font-bold text-amber-700 uppercase tracking-wider block">
+                  Restaurant commission
+                </span>
+                <span className="text-lg font-black text-amber-700 block mt-0.5">
+                  −{formatGHS(financials.restaurantCommission)}
+                </span>
+                <span className="text-[10px] text-amber-700/70 mt-1 block">
+                  Charged on food subtotal only
+                </span>
+              </div>
+              <div className="rounded-2xl bg-slate-900 p-3.5">
+                <span className="text-[10px] font-bold text-emerald-300 uppercase tracking-wider block">
+                  Net restaurant earnings
+                </span>
+                <span className="text-lg font-black text-white block mt-0.5">
+                  {formatGHS(financials.restaurantPayouts)}
+                </span>
+                <span className="text-[10px] text-slate-400 mt-1 block">
+                  What you keep
+                </span>
+              </div>
+            </div>
+          )}
+
+          {todaysGross > 0 && (
+            <p className="text-[11px] text-slate-500 border-t border-slate-100 pt-3">
+              <span className="font-bold text-slate-700">Today:</span>{' '}
+              {formatGHS(todaysGross)} food ·{' '}
+              {formatGHS(todaysCommission)} commission ·{' '}
+              <span className="font-bold text-emerald-700">{formatGHS(todaysNet)} net</span>
+            </p>
+          )}
         </div>
 
         {/* What customers just said — fed by the order screen's rate form */}
@@ -1263,6 +1381,66 @@ const TabEmptyState: React.FC<{
 );
 
 // Reusable Kitchen Order Card Component
+/**
+ * Per-order money breakdown for the kitchen: what the customer paid for food,
+ * the commission taken on it (rate snapshotted when the order was placed),
+ * and what the restaurant keeps. All numbers are read from the order row —
+ * computed by the database, never by this component.
+ */
+const OrderEarningsBreakdown: React.FC<{ order: Order }> = ({ order }) => {
+  const f = getOrderFinancials(order);
+  const isCancelled = ['CANCELLED', 'REJECTED', 'FAILED'].includes(order.status);
+  const isRefunded =
+    order.payment_status === 'REFUNDED' || order.payment_status === 'PARTIALLY_REFUNDED';
+
+  if (isCancelled) {
+    return (
+      <div className="rounded-xl bg-slate-50 border border-dashed border-slate-200 px-3 py-2.5 flex items-center justify-between gap-3 text-xs">
+        <span className="font-semibold text-slate-500">
+          Food subtotal {formatGHS(f.foodSubtotal)}
+        </span>
+        <span className="font-bold text-slate-400">Cancelled — no commission charged</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2.5 space-y-1.5">
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span className="text-slate-500 font-medium">Food subtotal</span>
+        <span className="font-bold text-slate-700">{formatGHS(f.foodSubtotal)}</span>
+      </div>
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span className="text-slate-500 font-medium">
+          Commission ({f.commissionRate}%)
+        </span>
+        <span className="font-bold text-amber-600">−{formatGHS(f.commissionAmount)}</span>
+      </div>
+      <div className="flex items-center justify-between gap-3 text-xs pt-1.5 border-t border-slate-200">
+        <span className="font-bold text-slate-700">Your earnings</span>
+        <span className="font-black text-emerald-700">{formatGHS(f.restaurantNet)}</span>
+      </div>
+      {f.deliveryFee > 0 && (
+        <p className="text-[10px] text-slate-400">
+          Delivery fee {formatGHS(f.deliveryFee)} goes to the courier
+          {f.tip > 0 ? ` · customer tip ${formatGHS(f.tip)} also goes to the courier` : ''}.
+        </p>
+      )}
+      {isRefunded || f.settlementStatus === 'REVERSED' ? (
+        <p className="text-[10px] font-bold text-rose-600">
+          Refund recorded — commission reversed
+        </p>
+      ) : (
+        !f.recognized && (
+          <p className="text-[10px] text-slate-400">
+            Commission applies once the order is delivered &amp; paid.
+          </p>
+        )
+      )}
+    </div>
+  );
+};
+
 interface OrderCardProps {
   order: Order;
   actionType: 'PENDING' | 'PREPARING' | 'READY' | 'COMPLETED';
@@ -1359,6 +1537,9 @@ const RestaurantOrderCard: React.FC<OrderCardProps> = ({
             </div>
           ))}
         </div>
+
+        {/* Gross → commission → net, straight from this order's DB snapshot */}
+        <OrderEarningsBreakdown order={order} />
 
         {/* Courier Status indicator if assigned (+ live map on dispatched cards) */}
         {order.courier && (

@@ -4,6 +4,7 @@ import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { Order, Review } from '../../types/database';
 import { formatGHS } from '../../lib/pricing';
+import { getOrderFinancials, round2 } from '../../lib/commission';
 
 export const CourierEarningsPage: React.FC = () => {
   const { user } = useAuth();
@@ -46,13 +47,19 @@ export const CourierEarningsPage: React.FC = () => {
     loadCourierData();
   }, [user]);
 
-  // Real calculations
-  const totalEarnings = completedOrders.reduce((sum, order) => {
-    const courierBasePayout = order.delivery_fee * 0.8;
-    return sum + courierBasePayout + (order.tip || 0);
-  }, 0);
+  // Real calculations — courier_earning is computed by the database and is
+  // always 100% of the delivery fee in Phase 1 (0% courier commission).
+  // The tip is separate and always belongs to the courier.
+  const totalEarnings = round2(
+    completedOrders.reduce((sum, order) => {
+      const f = getOrderFinancials(order);
+      return sum + f.courierEarning + f.tip;
+    }, 0)
+  );
 
-  const totalTips = completedOrders.reduce((sum, order) => sum + (order.tip || 0), 0);
+  const totalTips = round2(
+    completedOrders.reduce((sum, order) => sum + (order.tip || 0), 0)
+  );
 
   const avgRating =
     reviews.length > 0
@@ -83,7 +90,7 @@ export const CourierEarningsPage: React.FC = () => {
               <DollarSign className="w-5 h-5 text-emerald-600" />
             </div>
             <span className="text-[10px] text-slate-400 mt-2 block">
-              Includes 80% delivery fee share + customer tips
+              Full delivery fee (0% courier commission) + customer tips
             </span>
           </div>
 
@@ -136,7 +143,7 @@ export const CourierEarningsPage: React.FC = () => {
           ) : (
             <div className="divide-y divide-slate-100">
               {completedOrders.map((order) => {
-                const payout = order.delivery_fee * 0.8 + (order.tip || 0);
+                const f = getOrderFinancials(order);
                 return (
                   <div key={order.id} className="py-3.5 flex items-center justify-between text-xs">
                     <div>
@@ -155,13 +162,16 @@ export const CourierEarningsPage: React.FC = () => {
 
                     <div className="text-right">
                       <span className="font-black text-sm text-emerald-700 block">
-                        {formatGHS(payout)}
+                        {formatGHS(f.courierEarning)}
                       </span>
-                      {order.tip > 0 && (
+                      {f.tip > 0 && (
                         <span className="text-[10px] text-amber-600 font-bold block">
-                          +{formatGHS(order.tip)} Tip
+                          +{formatGHS(f.tip)} Tip
                         </span>
                       )}
+                      <span className="text-[10px] text-slate-400 block">
+                        {formatGHS(round2(f.courierEarning + f.tip))} total
+                      </span>
                     </div>
                   </div>
                 );

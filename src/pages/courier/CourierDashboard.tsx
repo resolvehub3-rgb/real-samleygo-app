@@ -24,6 +24,7 @@ import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import { Courier, CourierDocument, Order } from '../../types/database';
 import { formatGHS } from '../../lib/pricing';
+import { getOrderFinancials, round2 } from '../../lib/commission';
 import { DocumentImage } from '../../components/common/DocumentImage';
 import {
   VERIFICATION_META,
@@ -1183,12 +1184,19 @@ export const CourierDashboard: React.FC = () => {
                       </p>
                     </div>
                     <div className="text-right">
-                      <span className="font-black text-sm text-slate-900">
-                        Payout: {formatGHS(req.delivery_fee * 0.8 + req.tip)}
-                      </span>
-                      <span className="text-[10px] text-slate-400 block">
-                        Fee: {formatGHS(req.delivery_fee)} + Tip: {formatGHS(req.tip)}
-                      </span>
+                      {(() => {
+                        const f = getOrderFinancials(req);
+                        return (
+                          <>
+                            <span className="font-black text-sm text-slate-900">
+                              Payout: {formatGHS(round2(f.courierEarning + f.tip))}
+                            </span>
+                            <span className="text-[10px] text-slate-400 block">
+                              Fee: {formatGHS(f.courierEarning)} + Tip: {formatGHS(f.tip)}
+                            </span>
+                          </>
+                        );
+                      })()}
                     </div>
                   </div>
 

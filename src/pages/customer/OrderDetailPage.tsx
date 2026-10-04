@@ -948,11 +948,11 @@ export const OrderDetailPage: React.FC = () => {
 
             <div className="pt-3 border-t border-slate-100 space-y-1.5 text-xs text-slate-600">
               <div className="flex justify-between">
-                <span>Subtotal</span>
+                <span>Food subtotal</span>
                 <span>{formatGHS(order.subtotal)}</span>
               </div>
               <div className="flex justify-between">
-                <span>Delivery Fee</span>
+                <span>Delivery fee</span>
                 <span>{formatGHS(order.delivery_fee)}</span>
               </div>
               {order.tip > 0 && (

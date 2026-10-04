@@ -16,8 +16,15 @@ import {
 } from 'lucide-react';
 import { useCart } from '../../context/CartContext';
 import { useAuth } from '../../context/AuthContext';
-import { calculateDistanceKm, calculateDeliveryFee, formatGHS } from '../../lib/pricing';
-import { supabase } from '../../lib/supabase';
+import {
+  calculateDistanceKm,
+  calculateDeliveryFee,
+  formatGHS,
+  DEFAULT_PRICING,
+} from '../../lib/pricing';
+import { computeCustomerTotals } from '../../lib/commission';
+import { PlatformPricingSettings } from '../../types/database';
+import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { isGeolocationAvailable } from '../../lib/geolocation';
 import { readDeliverTo } from '../../lib/deliverTo';
 import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
@@ -46,6 +53,31 @@ export const CartPage: React.FC = () => {
   const [momoNumber, setMomoNumber] = useState(profile?.phone || '');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  // Live pricing rules from platform_settings so the delivery fee shown
+  // here is exactly what the server will charge (falls back to defaults).
+  const [pricingSettings, setPricingSettings] = useState<PlatformPricingSettings | null>(null);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('platform_settings')
+          .select('value')
+          .eq('key', 'delivery_pricing')
+          .maybeSingle();
+        if (!cancelled && data?.value) {
+          setPricingSettings(data.value as PlatformPricingSettings);
+        }
+      } catch {
+        // Defaults already cover this.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Live device position resolved to a place NAME — the address box must read
   // "East Legon, Accra", never "GPS ±12m: 5.63500, -0.15500".
@@ -79,8 +111,13 @@ export const CartPage: React.FC = () => {
   const currentLng = customerLng || -0.155;
 
   const distanceKm = calculateDistanceKm(restLat, restLng, currentLat, currentLng);
-  const deliveryFee = restaurant ? calculateDeliveryFee(distanceKm) : 12.0;
-  const grandTotal = subtotal + deliveryFee + tip;
+  const deliveryFee = restaurant
+    ? calculateDeliveryFee(distanceKm, pricingSettings ?? DEFAULT_PRICING)
+    : 12.0;
+  // Customer pays food + delivery (+ optional tip) — never any commission,
+  // platform or service fee. Restaurant commission is an internal
+  // settlement calculation and never appears on the customer's bill.
+  const { total: grandTotal } = computeCustomerTotals(subtotal, deliveryFee, tip);
 
   // Use the browser Geolocation API: a live watch that keeps the delivery
   // coordinates (and the readable address) fresh while the customer checks out.
@@ -175,8 +212,9 @@ export const CartPage: React.FC = () => {
         changed_by: user.id,
       });
 
-      // 4. Record Payment Record
-      await supabase.from('payments').insert({
+      // 4. Record Payment Record (amount is re-derived server-side from
+      //    the order's total — the database never trusts this payload).
+      const { error: paymentError } = await supabase.from('payments').insert({
         order_id: orderData.id,
         customer_id: user.id,
         amount: grandTotal,
@@ -191,13 +229,19 @@ export const CartPage: React.FC = () => {
           items_count: items.length,
         },
       });
+      if (paymentError) {
+        // Non-fatal: the order is already live; surface it for debugging.
+        console.warn('Payment record not saved:', paymentError.message);
+      }
 
       // 5. Create Realtime Notification for Restaurant Owner
       if (restaurant.owner_id) {
         await supabase.from('notifications').insert({
           user_id: restaurant.owner_id,
           title: '🔥 New Food Order Received!',
-          message: `Order #${orderNumber} for ${formatGHS(grandTotal)} is waiting for your kitchen acceptance.`,
+          message: `Order #${orderNumber} for ${formatGHS(
+            orderData.total_amount ?? grandTotal
+          )} is waiting for your kitchen acceptance.`,
           type: 'NEW_ORDER',
           link: `/restaurant/dashboard`,
         });
@@ -459,13 +503,13 @@ export const CartPage: React.FC = () => {
 
               <div className="space-y-2.5 text-xs text-slate-600">
                 <div className="flex justify-between">
-                  <span>Dishes Subtotal</span>
+                  <span>Food subtotal</span>
                   <span className="font-bold text-slate-900">{formatGHS(subtotal)}</span>
                 </div>
 
                 <div className="flex justify-between items-center">
                   <div>
-                    <span>Delivery Fee</span>
+                    <span>Delivery fee</span>
                     <span className="text-[10px] text-slate-400 block">
                       ~{distanceKm} km from kitchen
                     </span>
@@ -497,7 +541,7 @@ export const CartPage: React.FC = () => {
                 </div>
 
                 <div className="pt-3 border-t border-slate-100 flex justify-between items-baseline text-sm">
-                  <span className="font-black text-slate-900">Total Amount</span>
+                  <span className="font-black text-slate-900">Total</span>
                   <span className="font-black text-lg text-emerald-700">
                     {formatGHS(grandTotal)}
                   </span>

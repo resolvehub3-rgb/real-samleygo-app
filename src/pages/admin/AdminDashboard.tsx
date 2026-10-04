@@ -19,9 +19,11 @@ import {
   Map as MapIcon,
   MapPin,
   Menu,
+  Percent,
   Phone,
   Receipt,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   Settings,
@@ -40,6 +42,9 @@ import {
   CourierVerificationStatus,
   Order,
   OrderStatus,
+  OrderSettlementAdjustment,
+  SettlementStatus,
+  CommissionSettings,
   PlatformPricingSettings,
   AuditLog,
 } from '../../types/database';
@@ -48,6 +53,14 @@ import {
   formatGHS,
   DEFAULT_PRICING,
 } from '../../lib/pricing';
+import {
+  aggregateFinancials,
+  getOrderFinancials,
+  validateCommissionPercentage,
+  round2,
+  DEFAULT_COMMISSION_SETTINGS,
+  MAX_RESTAURANT_COMMISSION_PERCENTAGE,
+} from '../../lib/commission';
 import { VERIFICATION_META } from '../../lib/verification';
 import { DocumentImage } from '../../components/common/DocumentImage';
 import { AdminDispatchMap } from '../../components/admin/AdminDispatchMap';
@@ -502,6 +515,30 @@ export const AdminDashboard: React.FC = () => {
   const [expandedCourierId, setExpandedCourierId] = useState<string | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
   const [pricingSettings, setPricingSettings] = useState<PlatformPricingSettings>(DEFAULT_PRICING);
+  // Refund / settlement adjustments on any order (append-only ledger).
+  const [adjustments, setAdjustments] = useState<OrderSettlementAdjustment[]>([]);
+  // Marketplace commission rules (platform_settings key `commission`).
+  const [commissionSettings, setCommissionSettings] = useState<CommissionSettings>(
+    DEFAULT_COMMISSION_SETTINGS
+  );
+  const [commissionDraft, setCommissionDraft] = useState<string>(
+    String(DEFAULT_COMMISSION_SETTINGS.restaurant_commission_percentage)
+  );
+  const [commissionError, setCommissionError] = useState('');
+  const [commissionConfirm, setCommissionConfirm] = useState<number | null>(null);
+  const [isSavingCommission, setIsSavingCommission] = useState(false);
+  // Refund dialog (server-side validated through the record_order_refund RPC).
+  const [refundOrder, setRefundOrder] = useState<Order | null>(null);
+  const [refundAmount, setRefundAmount] = useState('');
+  const [refundReason, setRefundReason] = useState('');
+  const [refundError, setRefundError] = useState('');
+  const [isRecordingRefund, setIsRecordingRefund] = useState(false);
+  // Settlement progression (ELIGIBLE → PROCESSING → PAID) confirmation.
+  const [settlementConfirm, setSettlementConfirm] = useState<{
+    order: Order;
+    status: Extract<SettlementStatus, 'PROCESSING' | 'PAID'>;
+  } | null>(null);
+  const [isAdvancingSettlement, setIsAdvancingSettlement] = useState(false);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -579,9 +616,33 @@ export const AdminDashboard: React.FC = () => {
         .order('created_at', { ascending: false });
       if (ordData) setOrders(ordData as Order[]);
 
+      // 4. Settlement adjustments (refunds / reversals) — append-only, so the
+      //    financial totals below stay truthful after money goes back.
+      const { data: adjData } = await supabase
+        .from('order_settlement_adjustments')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(1000);
+      setAdjustments((adjData || []) as OrderSettlementAdjustment[]);
+
       // 5. Fetch Platform Settings
       const { data: settsData } = await supabase.from('platform_settings').select('*').eq('key', 'delivery_pricing').maybeSingle();
       if (settsData && settsData.value) setPricingSettings(settsData.value as PlatformPricingSettings);
+
+      // 5b. Commission rules (seeded by the Phase 1 migration).
+      const { data: commData } = await supabase
+        .from('platform_settings')
+        .select('*')
+        .eq('key', 'commission')
+        .maybeSingle();
+      if (commData && commData.value) {
+        const merged: CommissionSettings = {
+          ...DEFAULT_COMMISSION_SETTINGS,
+          ...(commData.value as Partial<CommissionSettings>),
+        };
+        setCommissionSettings(merged);
+        setCommissionDraft(String(merged.restaurant_commission_percentage));
+      }
 
       // 6. Fetch Audit Logs
       const { data: logsData } = await supabase.from('audit_logs').select('*, actor:profiles(*)').order('created_at', { ascending: false }).limit(20);
@@ -598,7 +659,8 @@ export const AdminDashboard: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Realtime: courier signups, document uploads and admin decisions refresh live
+  // Realtime: kitchen signups, courier signups, document uploads and admin
+  // decisions all refresh live.
   useEffect(() => {
     if (!isSupabaseConfigured) return;
 
@@ -612,8 +674,11 @@ export const AdminDashboard: React.FC = () => {
       }, 1500);
     };
 
+    // `restaurants` is what a newly registered kitchen writes, so without this
+    // line the console only learns about a new kitchen on the next full reload.
     const channel = supabase
       .channel('admin-courier-verification')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'restaurants' }, scheduleRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'couriers' }, scheduleRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'courier_documents' }, scheduleRefresh)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, scheduleRefresh)
@@ -730,6 +795,161 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
+  // ---- Commission settings -------------------------------------------------
+  // The browser validates first for a fast, friendly message; the database
+  // (set_commission_settings) validates again and is the authority.
+  const handleCommissionInput = (raw: string) => {
+    setCommissionDraft(raw);
+    const check = validateCommissionPercentage(raw, MAX_RESTAURANT_COMMISSION_PERCENTAGE);
+    setCommissionError(check.ok ? '' : check.error);
+  };
+
+  const requestCommissionSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    const check = validateCommissionPercentage(
+      commissionDraft,
+      MAX_RESTAURANT_COMMISSION_PERCENTAGE
+    );
+    if (!check.ok) {
+      setCommissionError(check.error);
+      return;
+    }
+    if (check.value === commissionSettings.restaurant_commission_percentage) {
+      setCommissionError('That is already the current rate.');
+      return;
+    }
+    setCommissionError('');
+    setCommissionConfirm(check.value);
+  };
+
+  const confirmCommissionSave = async () => {
+    if (commissionConfirm === null) return;
+    setIsSavingCommission(true);
+    try {
+      const { error } = await supabase.rpc('set_commission_settings', {
+        p_restaurant_commission_percentage: commissionConfirm,
+        p_courier_commission_percentage:
+          commissionSettings.courier_commission_percentage ??
+          DEFAULT_COMMISSION_SETTINGS.courier_commission_percentage,
+      });
+      if (error) throw error;
+
+      setCommissionSettings((prev) => ({
+        ...prev,
+        restaurant_commission_percentage: commissionConfirm,
+      }));
+      setCommissionDraft(String(commissionConfirm));
+      setCommissionConfirm(null);
+      notify(
+        `Restaurant commission set to ${commissionConfirm}%. Existing orders keep the rate they were placed with.`
+      );
+      await fetchAdminData();
+    } catch (err) {
+      notify(
+        err instanceof Error
+          ? err.message.replace(/^Failed to call RPC '.*': /, '')
+          : 'Failed to update commission settings.',
+        'error'
+      );
+    } finally {
+      setIsSavingCommission(false);
+    }
+  };
+
+  // ---- Refunds -------------------------------------------------------------
+  const priorRefundedOn = (orderId: string) =>
+    round2(
+      adjustments
+        .filter((a) => a.order_id === orderId)
+        .reduce((sum, a) => sum + (a.refund_amount || 0), 0)
+    );
+
+  const openRefundDialog = (order: Order) => {
+    const f = getOrderFinancials(order);
+    const remaining = round2(Math.max(0, f.customerTotal - priorRefundedOn(order.id)));
+    setRefundOrder(order);
+    setRefundAmount(remaining > 0 ? remaining.toFixed(2) : '');
+    setRefundReason('');
+    setRefundError(
+      remaining > 0
+        ? ''
+        : 'This order has already been refunded in full.'
+    );
+  };
+
+  const handleRecordRefund = async () => {
+    if (!refundOrder) return;
+    const raw = refundAmount.trim();
+    const value = Number(raw);
+    const f = getOrderFinancials(refundOrder);
+    const remaining = round2(f.customerTotal - priorRefundedOn(refundOrder.id));
+
+    if (raw === '' || !Number.isFinite(value)) {
+      setRefundError('Enter a refund amount.');
+      return;
+    }
+    if (value <= 0) {
+      setRefundError('The refund amount must be greater than zero.');
+      return;
+    }
+    if (value > remaining) {
+      setRefundError(`At most ${formatGHS(remaining)} is still refundable on this order.`);
+      return;
+    }
+
+    setIsRecordingRefund(true);
+    try {
+      const { error } = await supabase.rpc('record_order_refund', {
+        p_order_id: refundOrder.id,
+        p_refund_amount: round2(value),
+        p_reason: refundReason.trim() === '' ? null : refundReason.trim(),
+      });
+      if (error) throw error;
+
+      notify(
+        `${formatGHS(round2(value))} refunded on #${refundOrder.order_number} — commission reversed by the same amount.`
+      );
+      setRefundOrder(null);
+      await fetchAdminData();
+    } catch (err) {
+      notify(
+        err instanceof Error
+          ? err.message.replace(/^Failed to call RPC '.*': /, '')
+          : 'Failed to record the refund.',
+        'error'
+      );
+    } finally {
+      setIsRecordingRefund(false);
+    }
+  };
+
+  // ---- Settlement (ELIGIBLE → PROCESSING → PAID) ---------------------------
+  const handleAdvanceSettlement = async () => {
+    if (!settlementConfirm) return;
+    const { order, status } = settlementConfirm;
+    setIsAdvancingSettlement(true);
+    try {
+      const { error } = await supabase.rpc('set_order_settlement_status', {
+        p_order_id: order.id,
+        p_status: status,
+      });
+      if (error) throw error;
+      notify(`#${order.order_number} settlement marked ${status}.`);
+      setSettlementConfirm(null);
+      await fetchAdminData();
+    } catch (err) {
+      notify(
+        err instanceof Error
+          ? err.message.replace(/^Failed to call RPC '.*': /, '')
+          : 'Could not advance the settlement.',
+        'error'
+      );
+      setSettlementConfirm(null);
+    } finally {
+      setIsAdvancingSettlement(false);
+    }
+  };
+
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
@@ -739,9 +959,12 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
-  // Real aggregations
-  const totalVolume = orders.reduce((sum, o) => sum + o.total_amount, 0);
-  const totalPlatformCut = orders.reduce((sum, o) => sum + o.delivery_fee * 0.2 + o.subtotal * 0.15, 0);
+  // Real aggregations — every money figure is read from the per-order
+  // financial snapshot the database wrote (commission_rate, commission_amount,
+  // *_amount), net of refund adjustments. No hard-coded percentages anywhere.
+  const financials = aggregateFinancials(orders, adjustments);
+  const totalVolume = round2(orders.reduce((sum, o) => sum + o.total_amount, 0));
+  const totalPlatformCut = financials.platformRevenue;
   const onlineCouriers = couriers.filter((c) => c.is_online).length;
   const pendingRestaurants = restaurants.filter((r) => !r.is_approved).length;
   const pendingCouriers = couriers.filter((c) => !c.is_approved).length;
@@ -759,15 +982,28 @@ export const AdminDashboard: React.FC = () => {
   startOfToday.setHours(0, 0, 0, 0);
   const isToday = (iso: string) => new Date(iso).getTime() >= startOfToday.getTime();
   const ordersToday = orders.filter((o) => isToday(o.created_at)).length;
-  const todayEarnings = orders
-    .filter(
-      (o) =>
-        isToday(o.created_at) &&
-        o.status !== 'CANCELLED' &&
-        o.status !== 'REJECTED' &&
-        o.status !== 'FAILED'
-    )
-    .reduce((sum, o) => sum + o.total_amount, 0);
+  // Today's platform earnings = commission accrued on today's live orders,
+  // minus any refund reversals recorded today. Cancelled orders never count.
+  const todayEarnings = round2(
+    orders
+      .filter(
+        (o) =>
+          isToday(o.created_at) &&
+          o.status !== 'CANCELLED' &&
+          o.status !== 'REJECTED' &&
+          o.status !== 'FAILED'
+      )
+      .reduce((sum, o) => sum + getOrderFinancials(o).commissionAmount, 0) +
+      adjustments
+        .filter((a) => isToday(a.created_at))
+        .reduce((sum, a) => sum + (a.commission_adjustment || 0), 0)
+  );
+  // How much of the platform's recognized money is still awaiting payout.
+  const settlementBreakdown = orders.reduce((acc, o) => {
+    const key = (o.settlement_status ?? 'PENDING') as SettlementStatus;
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {} as Partial<Record<SettlementStatus, number>>);
   // Orders parked on a kitchen that has not accepted them yet — the count
   // behind the header's mail badge.
   const ordersAwaitingKitchen = orders.filter((o) => o.status === 'RESTAURANT_PENDING').length;
@@ -986,10 +1222,12 @@ export const AdminDashboard: React.FC = () => {
 
   // Pricing preview (mirrors the exact fee the customer would be charged)
   const sampleFee = calculateDeliveryFee(SAMPLE_DISTANCE_KM, pricingSettings);
-  const sampleCourierPayout =
-    (sampleFee * (pricingSettings.courier_payout_percentage ?? 80)) / 100;
-  const samplePlatformCut =
-    (sampleFee * (pricingSettings.platform_commission_percentage ?? 20)) / 100;
+  // Phase 1: the courier keeps the whole delivery fee (0% courier commission);
+  // the platform earns the restaurant commission on the FOOD subtotal only.
+  const sampleFoodOrder = 100;
+  const sampleCommission = round2(
+    (sampleFoodOrder * commissionSettings.restaurant_commission_percentage) / 100
+  );
 
   // Single source of truth for the sidebar: desktop rail, mobile drawer and the
   // mobile top bar all render from this list, so a section can never drift.
@@ -1380,13 +1618,13 @@ export const AdminDashboard: React.FC = () => {
                       label="Today's Earnings"
                       value={formatGHS(todayEarnings)}
                       icon={Wallet}
-                      hint={`${ordersToday} order${ordersToday === 1 ? '' : 's'} placed since midnight · Lifetime ${formatGHS(
+                      hint={`${ordersToday} order${ordersToday === 1 ? '' : 's'} placed since midnight · commission accrued today ${formatGHS(
+                        todayEarnings
+                      )} · recognized lifetime ${formatGHS(totalPlatformCut)} across ${
+                        financials.recognizedOrders
+                      } settled orders (≈${takeRatePercent.toFixed(1)}% of ${formatGHS(
                         totalVolume
-                      )} across ${orders.length} orders (avg ${formatGHS(
-                        avgOrderValue
-                      )}) · ≈${takeRatePercent.toFixed(1)}% take rate = ${formatGHS(
-                        totalPlatformCut
-                      )} earned by the platform`}
+                      )} lifetime volume)`}
                       onClick={() => handleSelectNav(navItems[5])}
                     />
                     <OpsStatCard
@@ -1416,6 +1654,129 @@ export const AdminDashboard: React.FC = () => {
                       }}
                     />
                   </div>
+
+                  {/* ===== Financials: gross → commission → net ===== */}
+                  <SectionCard
+                    title="Financials — food sales, commission & payouts"
+                    subtitle="Every figure is computed by the database on each order and netted against refunds"
+                    action={
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-black text-emerald-700 ring-1 ring-emerald-500/20">
+                        <Percent className="h-3.5 w-3.5" />
+                        Restaurant commission{' '}
+                        {commissionSettings.restaurant_commission_percentage}%
+                      </span>
+                    }
+                  >
+                    {financials.recognizedOrders === 0 ? (
+                      <EmptyState
+                        icon={Wallet}
+                        title="No recognized revenue yet"
+                        hint="Revenue is recognized only when an order is delivered and paid. Cancelled, rejected and refunded orders never count."
+                      />
+                    ) : (
+                      <>
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                          <SummaryTile
+                            label="Food sales"
+                            value={formatGHS(financials.totalFoodSales)}
+                            icon={Receipt}
+                            tone="emerald"
+                          />
+                          <SummaryTile
+                            label="Commission earned"
+                            value={formatGHS(financials.platformRevenue)}
+                            icon={Percent}
+                            tone="amber"
+                          />
+                          <SummaryTile
+                            label="Owed to restaurants"
+                            value={formatGHS(financials.restaurantPayouts)}
+                            icon={Store}
+                            tone="sky"
+                          />
+                          <SummaryTile
+                            label="Owed to couriers"
+                            value={formatGHS(financials.courierEarnings)}
+                            icon={Bike}
+                            tone="violet"
+                          />
+                        </div>
+
+                        <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-2 border-t border-slate-100 pt-4 text-xs sm:grid-cols-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <dt className="text-slate-500">Delivery fees collected</dt>
+                            <dd className="font-black tabular-nums text-slate-900">
+                              {formatGHS(financials.deliveryFees)}
+                            </dd>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <dt className="text-slate-500">Refunds recorded</dt>
+                            <dd className="font-black tabular-nums text-rose-600">
+                              −
+                              {formatGHS(
+                                round2(
+                                  adjustments.reduce(
+                                    (sum, a) => sum + (a.refund_amount || 0),
+                                    0
+                                  )
+                                )
+                              )}
+                            </dd>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <dt className="text-slate-500">
+                              Average order value (all orders)
+                            </dt>
+                            <dd className="font-black tabular-nums text-slate-900">
+                              {formatGHS(avgOrderValue)}
+                            </dd>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <dt className="text-slate-500">Commission rate applied</dt>
+                            <dd className="font-black tabular-nums text-slate-900">
+                              {commissionSettings.restaurant_commission_percentage}% on food
+                              subtotal
+                            </dd>
+                          </div>
+                        </dl>
+                      </>
+                    )}
+
+                    {/* Settlement lifecycle — payment states stay separate from payouts */}
+                    <div className="mt-4 border-t border-slate-100 pt-4">
+                      <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                        Settlement status of every order
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {(
+                          [
+                            'PENDING',
+                            'ELIGIBLE',
+                            'PROCESSING',
+                            'PAID',
+                            'REVERSED',
+                            'CANCELLED',
+                          ] as SettlementStatus[]
+                        ).map((state) => {
+                          const count = settlementBreakdown[state] ?? 0;
+                          if (count === 0) return null;
+                          return (
+                            <span
+                              key={state}
+                              className="rounded-full bg-slate-50 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600 ring-1 ring-slate-200"
+                            >
+                              {state.replace(/_/g, ' ')} · {count}
+                            </span>
+                          );
+                        })}
+                      </div>
+                      <p className="mt-2.5 text-[11px] leading-relaxed text-slate-400">
+                        Payment success never marks a restaurant as paid out — an order has to
+                        reach ELIGIBLE, then be advanced to PROCESSING and PAID from its row in
+                        Dispatch.
+                      </p>
+                    </div>
+                  </SectionCard>
 
                   {/* ===== Live kitchen queue + courier dispatch map ===== */}
                   <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
@@ -2225,6 +2586,26 @@ export const AdminDashboard: React.FC = () => {
                       <ul className="divide-y divide-slate-100">
                         {filteredOrders.map((o) => {
                           const inFlight = isActiveOrder(o.status);
+                          // DB-computed financial snapshot for this order.
+                          const fin = getOrderFinancials(o);
+                          const isCancelledOrder = [
+                            'CANCELLED',
+                            'REJECTED',
+                            'FAILED',
+                          ].includes(o.status);
+                          const refundedSoFar = priorRefundedOn(o.id);
+                          const refundable = round2(
+                            Math.max(0, fin.customerTotal - refundedSoFar)
+                          );
+                          const canRefund =
+                            ['COMPLETED', 'PAID'].includes(o.payment_status) &&
+                            refundable > 0;
+                          const canSettleToProcessing =
+                            ['DELIVERED', 'COMPLETED'].includes(o.status) &&
+                            fin.settlementStatus === 'ELIGIBLE';
+                          const canSettleToPaid =
+                            ['DELIVERED', 'COMPLETED'].includes(o.status) &&
+                            ['ELIGIBLE', 'PROCESSING'].includes(fin.settlementStatus);
                           return (
                             <li
                               key={o.id}
@@ -2280,6 +2661,12 @@ export const AdminDashboard: React.FC = () => {
                                       >
                                         {o.payment_status.replace(/_/g, ' ')}
                                       </span>
+                                      <span
+                                        className="rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-slate-600 ring-1 ring-slate-200"
+                                        title="Settlement status — payment success alone never marks a restaurant as paid out"
+                                      >
+                                        {fin.settlementStatus.replace(/_/g, ' ')}
+                                      </span>
                                     </div>
 
                                     <p className="mt-1 flex items-center gap-1 truncate text-[11px] text-slate-500">
@@ -2310,13 +2697,75 @@ export const AdminDashboard: React.FC = () => {
                                   </div>
                                 </div>
 
-                                <div className="flex shrink-0 items-baseline gap-2 sm:flex-col sm:items-end sm:gap-1">
+                                <div className="flex shrink-0 flex-col items-start gap-1 sm:items-end sm:text-right">
                                   <span className="text-base font-black leading-none tabular-nums text-slate-900">
                                     {formatGHS(o.total_amount)}
                                   </span>
                                   <span className="text-[10px] font-bold tabular-nums text-slate-400">
-                                    incl. {formatGHS(o.delivery_fee)} delivery
+                                    food {formatGHS(fin.foodSubtotal)} + delivery{' '}
+                                    {formatGHS(fin.deliveryFee)}
+                                    {fin.tip > 0 ? ` + tip ${formatGHS(fin.tip)}` : ''}
                                   </span>
+                                  {isCancelledOrder ? (
+                                    <span className="text-[10px] font-bold text-slate-400">
+                                      cancelled — no commission charged
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] font-bold tabular-nums text-amber-600">
+                                      commission {formatGHS(fin.commissionAmount)} (
+                                      {fin.commissionRate}%) → restaurant{' '}
+                                      {formatGHS(fin.restaurantNet)}
+                                    </span>
+                                  )}
+                                  {refundedSoFar > 0 && (
+                                    <span className="text-[10px] font-bold tabular-nums text-rose-600">
+                                      refunded {formatGHS(refundedSoFar)} of{' '}
+                                      {formatGHS(fin.customerTotal)}
+                                    </span>
+                                  )}
+
+                                  {(canRefund ||
+                                    canSettleToProcessing ||
+                                    canSettleToPaid) && (
+                                    <div className="mt-1.5 flex flex-wrap gap-1.5 sm:justify-end">
+                                      {canSettleToProcessing && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setSettlementConfirm({
+                                              order: o,
+                                              status: 'PROCESSING',
+                                            })
+                                          }
+                                          className="rounded-lg bg-slate-900 px-2.5 py-1 text-[10px] font-black text-white transition hover:bg-slate-800"
+                                        >
+                                          Start payout
+                                        </button>
+                                      )}
+                                      {canSettleToPaid && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setSettlementConfirm({ order: o, status: 'PAID' })
+                                          }
+                                          className="rounded-lg bg-emerald-600 px-2.5 py-1 text-[10px] font-black text-white transition hover:bg-emerald-700"
+                                        >
+                                          Mark paid
+                                        </button>
+                                      )}
+                                      {canRefund && (
+                                        <button
+                                          type="button"
+                                          onClick={() => openRefundDialog(o)}
+                                          className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-[10px] font-black text-rose-700 transition hover:bg-rose-100"
+                                          title={`Refund up to ${formatGHS(refundable)} — commission reverses with it`}
+                                        >
+                                          <RotateCcw className="h-3 w-3" />
+                                          Refund
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                             </li>
@@ -2329,9 +2778,124 @@ export const AdminDashboard: React.FC = () => {
               )}
               {/* ================= SETTINGS ================= */}
               {activeTab === 'SETTINGS' && (
-                <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+                <div className="space-y-6">
                   <SectionCard
-                    title="Ghana delivery fee & commission"
+                    title="Restaurant commission"
+                    subtitle="Charged per order on the food subtotal only — never on the delivery fee, and never shown to the customer as a fee"
+                    className="max-w-2xl"
+                  >
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
+                      <div className="flex flex-wrap items-end justify-between gap-4">
+                        <div>
+                          <span className="block text-[10px] font-black uppercase tracking-wider text-slate-400">
+                            Current rate
+                          </span>
+                          <span className="block text-3xl font-black leading-tight text-slate-900">
+                            {commissionSettings.restaurant_commission_percentage}%
+                          </span>
+                          <span className="block text-[11px] text-slate-500">
+                            Applied to every new order's food subtotal
+                          </span>
+                        </div>
+                        <div className="text-right text-[11px] text-slate-500">
+                          <p>
+                            Courier commission:{' '}
+                            <strong className="text-slate-700">
+                              {commissionSettings.courier_commission_percentage}%
+                            </strong>{' '}
+                            (keeps the full delivery fee)
+                          </p>
+                          <p>
+                            Allowed range: 0–{MAX_RESTAURANT_COMMISSION_PERCENTAGE}%
+                          </p>
+                        </div>
+                      </div>
+
+                      <form onSubmit={requestCommissionSave} className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-start">
+                        <div className="flex-1">
+                          <label
+                            htmlFor="commission_rate"
+                            className="mb-1.5 block text-xs font-bold text-slate-600"
+                          >
+                            New restaurant commission (%)
+                          </label>
+                          <input
+                            id="commission_rate"
+                            type="number"
+                            min={0}
+                            max={MAX_RESTAURANT_COMMISSION_PERCENTAGE}
+                            step="0.5"
+                            inputMode="decimal"
+                            value={commissionDraft}
+                            onChange={(e) => handleCommissionInput(e.target.value)}
+                            aria-invalid={Boolean(commissionError)}
+                            aria-describedby="commission_rate_hint"
+                            className={INPUT_CLASS}
+                          />
+                          <p
+                            id="commission_rate_hint"
+                            className={`mt-1.5 text-[11px] font-bold ${
+                              commissionError ? 'text-rose-600' : 'text-slate-400'
+                            }`}
+                          >
+                            {commissionError ||
+                              `A number between 0 and ${MAX_RESTAURANT_COMMISSION_PERCENTAGE}%.`}
+                          </p>
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={isSavingCommission}
+                          className="mt-0.5 inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-bold text-white shadow-lg shadow-emerald-600/20 transition hover:bg-emerald-700 disabled:opacity-50"
+                        >
+                          <CheckCircle className="h-4 w-4" />
+                          Review change
+                        </button>
+                      </form>
+                    </div>
+
+                    <div className="mt-4 rounded-2xl border border-emerald-100 bg-emerald-50/60 p-4 text-xs leading-relaxed text-emerald-900">
+                      <p className="font-black">
+                        Example: a GH₵100.00 food order
+                      </p>
+                      <p className="mt-1 text-emerald-800">
+                        Commission{' '}
+                        {formatGHS(
+                          round2(
+                            (100 * commissionSettings.restaurant_commission_percentage) / 100
+                          )
+                        )}{' '}
+                        · restaurant keeps{' '}
+                        {formatGHS(
+                          round2(
+                            100 -
+                              (100 * commissionSettings.restaurant_commission_percentage) / 100
+                          )
+                        )}{' '}
+                        · customer still pays only food + delivery fee.
+                      </p>
+                    </div>
+
+                    <ul className="mt-4 space-y-2 border-t border-slate-100 pt-4 text-[11px] leading-relaxed text-slate-500">
+                      <li className="flex gap-2">
+                        <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                        A rate change applies to new orders only — every existing order keeps
+                        the rate it was placed with.
+                      </li>
+                      <li className="flex gap-2">
+                        <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                        Cancelled and refunded orders never recognize commission.
+                      </li>
+                      <li className="flex gap-2">
+                        <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                        The database re-validates the value, so an out-of-range number is
+                        rejected even if it reaches the API.
+                      </li>
+                    </ul>
+                  </SectionCard>
+
+                  <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+                  <SectionCard
+                    title="Ghana delivery fee rules"
                     subtitle="Controls dynamic distance-based pricing across Accra, Kumasi and other operational hubs"
                     className="max-w-2xl"
                   >
@@ -2424,50 +2988,6 @@ export const AdminDashboard: React.FC = () => {
                             className={INPUT_CLASS}
                           />
                         </div>
-
-                        <div>
-                          <label
-                            htmlFor="courier_payout"
-                            className="mb-1.5 block text-xs font-bold text-slate-600"
-                          >
-                            Courier payout share (%)
-                          </label>
-                          <input
-                            id="courier_payout"
-                            type="number"
-                            value={pricingSettings.courier_payout_percentage}
-                            onChange={(e) =>
-                              setPricingSettings({
-                                ...pricingSettings,
-                                courier_payout_percentage:
-                                  parseFloat(e.target.value) || 80,
-                              })
-                            }
-                            className={INPUT_CLASS}
-                          />
-                        </div>
-
-                        <div>
-                          <label
-                            htmlFor="platform_commission"
-                            className="mb-1.5 block text-xs font-bold text-slate-600"
-                          >
-                            Platform commission (%)
-                          </label>
-                          <input
-                            id="platform_commission"
-                            type="number"
-                            value={pricingSettings.platform_commission_percentage}
-                            onChange={(e) =>
-                              setPricingSettings({
-                                ...pricingSettings,
-                                platform_commission_percentage:
-                                  parseFloat(e.target.value) || 20,
-                              })
-                            }
-                            className={INPUT_CLASS}
-                          />
-                        </div>
                       </div>
 
                       <div className="flex flex-wrap items-center gap-3 pt-1">
@@ -2496,29 +3016,35 @@ export const AdminDashboard: React.FC = () => {
                       </p>
                       <div className="mt-4 space-y-2.5 text-xs">
                         <div className="flex items-center justify-between gap-3">
-                          <span className="text-slate-500">Customer pays</span>
+                          <span className="text-slate-500">Delivery fee (customer pays)</span>
                           <span className="font-black tabular-nums text-slate-900">
                             {formatGHS(sampleFee)}
                           </span>
                         </div>
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-slate-500">
-                            Courier payout ({pricingSettings.courier_payout_percentage}%)
+                            Courier keeps (0% commission)
                           </span>
                           <span className="font-black tabular-nums text-emerald-700">
-                            {formatGHS(sampleCourierPayout)}
+                            {formatGHS(sampleFee)}
                           </span>
                         </div>
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-slate-500">
-                            Platform share ({pricingSettings.platform_commission_percentage}%)
+                            Commission on a GH₵{sampleFoodOrder}.00 food order (
+                            {commissionSettings.restaurant_commission_percentage}%)
                           </span>
                           <span className="font-black tabular-nums text-sky-700">
-                            {formatGHS(samplePlatformCut)}
+                            {formatGHS(sampleCommission)}
                           </span>
                         </div>
                       </div>
                       <p className="mt-4 border-t border-slate-100 pt-3 text-[11px] leading-relaxed text-slate-400">
+                        The customer pays food + delivery fee only. The delivery fee goes
+                        entirely to the courier; SamleyGo's revenue is the commission on the
+                        food subtotal.
+                      </p>
+                      <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
                         Fees are clamped between {formatGHS(pricingSettings.min_fee)} and{' '}
                         {formatGHS(pricingSettings.max_fee)} with a ×
                         {pricingSettings.surge_multiplier ?? 1} surge multiplier.
@@ -2545,6 +3071,7 @@ export const AdminDashboard: React.FC = () => {
                       </ul>
                     </div>
                   </aside>
+                  </div>
                 </div>
               )}
 
@@ -2604,6 +3131,202 @@ export const AdminDashboard: React.FC = () => {
           )}
         </main>
       </div>
+
+      {/* ===== Confirmation dialogs (commission / refund / settlement) ===== */}
+      {commissionConfirm !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/60 p-4 backdrop-blur-sm sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="commission_confirm_title"
+        >
+          <div className={`${CARD} w-full max-w-md p-5 sm:p-6`}>
+            <p className="text-[10px] font-black uppercase tracking-wider text-emerald-600">
+              Confirm change
+            </p>
+            <h3
+              id="commission_confirm_title"
+              className="mt-1 text-base font-black text-slate-900"
+            >
+              Set restaurant commission to {commissionConfirm}%?
+            </h3>
+            <p className="mt-2 text-xs leading-relaxed text-slate-500">
+              It replaces the current {commissionSettings.restaurant_commission_percentage}%
+              rate on <strong className="text-slate-800">new orders only</strong>. Every order
+              already placed keeps the rate snapshotted on it, so historical payouts never
+              change.
+            </p>
+            <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+              <div className="flex items-center justify-between gap-3">
+                <span>Commission on a GH₵100.00 food order</span>
+                <span className="font-black tabular-nums text-amber-600">
+                  {formatGHS(round2((100 * commissionConfirm) / 100))}
+                </span>
+              </div>
+              <div className="mt-1.5 flex items-center justify-between gap-3">
+                <span>Restaurant keeps</span>
+                <span className="font-black tabular-nums text-emerald-700">
+                  {formatGHS(round2(100 - (100 * commissionConfirm) / 100))}
+                </span>
+              </div>
+            </div>
+            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setCommissionConfirm(null)}
+                disabled={isSavingCommission}
+                className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmCommissionSave}
+                disabled={isSavingCommission}
+                className="rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-black text-white transition hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {isSavingCommission ? 'Saving…' : `Yes, set ${commissionConfirm}%`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {refundOrder && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/60 p-4 backdrop-blur-sm sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="refund_dialog_title"
+        >
+          <div className={`${CARD} w-full max-w-md p-5 sm:p-6`}>
+            <p className="text-[10px] font-black uppercase tracking-wider text-rose-600">
+              Refund customer
+            </p>
+            <h3 id="refund_dialog_title" className="mt-1 text-base font-black text-slate-900">
+              Order #{refundOrder.order_number}
+            </h3>
+            <p className="mt-2 text-xs leading-relaxed text-slate-500">
+              Paid {formatGHS(getOrderFinancials(refundOrder).customerTotal)} ·{' '}
+              {formatGHS(priorRefundedOn(refundOrder.id))} already refunded. Commission and
+              restaurant payouts reverse proportionally — history is never rewritten.
+            </p>
+
+            <div className="mt-4 space-y-3">
+              <div>
+                <label
+                  htmlFor="refund_amount"
+                  className="mb-1.5 block text-xs font-bold text-slate-600"
+                >
+                  Refund amount (GH₵)
+                </label>
+                <input
+                  id="refund_amount"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  inputMode="decimal"
+                  value={refundAmount}
+                  onChange={(e) => {
+                    setRefundAmount(e.target.value);
+                    setRefundError('');
+                  }}
+                  aria-invalid={Boolean(refundError)}
+                  className={INPUT_CLASS}
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="refund_reason"
+                  className="mb-1.5 block text-xs font-bold text-slate-600"
+                >
+                  Reason (optional)
+                </label>
+                <input
+                  id="refund_reason"
+                  type="text"
+                  value={refundReason}
+                  onChange={(e) => setRefundReason(e.target.value)}
+                  placeholder="e.g. Cold food on arrival"
+                  className={INPUT_CLASS}
+                />
+              </div>
+              {refundError && (
+                <p className="text-[11px] font-bold text-rose-600">{refundError}</p>
+              )}
+            </div>
+
+            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setRefundOrder(null)}
+                disabled={isRecordingRefund}
+                className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRecordRefund}
+                disabled={isRecordingRefund || Boolean(refundError)}
+                className="rounded-xl bg-rose-600 px-5 py-2.5 text-xs font-black text-white transition hover:bg-rose-700 disabled:opacity-50"
+              >
+                {isRecordingRefund ? 'Recording…' : 'Record refund'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {settlementConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/60 p-4 backdrop-blur-sm sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="settlement_dialog_title"
+        >
+          <div className={`${CARD} w-full max-w-md p-5 sm:p-6`}>
+            <p className="text-[10px] font-black uppercase tracking-wider text-emerald-600">
+              Settlement
+            </p>
+            <h3 id="settlement_dialog_title" className="mt-1 text-base font-black text-slate-900">
+              {settlementConfirm.status === 'PAID'
+                ? 'Mark this payout as paid?'
+                : 'Start processing this payout?'}
+            </h3>
+            <p className="mt-2 text-xs leading-relaxed text-slate-500">
+              Order #{settlementConfirm.order.order_number} ·{' '}
+              {formatGHS(getOrderFinancials(settlementConfirm.order).restaurantNet)} to{' '}
+              {settlementConfirm.order.restaurant?.name ?? 'the restaurant'} (after{' '}
+              {formatGHS(getOrderFinancials(settlementConfirm.order).commissionAmount)}{' '}
+              commission). This
+              advances the settlement from{' '}
+              {settlementConfirm.order.settlement_status ?? 'PENDING'} — payment success alone
+              never marks a restaurant as paid out.
+            </p>
+            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setSettlementConfirm(null)}
+                disabled={isAdvancingSettlement}
+                className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleAdvanceSettlement}
+                disabled={isAdvancingSettlement}
+                className="rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-black text-white transition hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {isAdvancingSettlement
+                  ? 'Saving…'
+                  : `Yes, mark ${settlementConfirm.status}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Confirmation toast — replaces the old blocking window.alert() */}
       {notice && (
