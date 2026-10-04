@@ -123,6 +123,31 @@ export function loadGoogleMaps(): Promise<void> {
   return pending;
 }
 
+// ── Places (address search) ─────────────────────────────────────────────────
+
+let placesLibrary: Promise<google.maps.PlacesLibrary | null> | null = null;
+
+/**
+ * Loads the Places library on demand — only the address search box needs it,
+ * so no other map pays for it.
+ *
+ * Resolves `null` (never rejects) when the key or project cannot use Places:
+ * the caller then falls back to the keyless OpenStreetMap search instead of
+ * showing an empty suggestion box.
+ */
+export function loadGooglePlaces(): Promise<google.maps.PlacesLibrary | null> {
+  if (!placesLibrary) {
+    placesLibrary = (async () => {
+      await loadGoogleMaps();
+      return (await google.maps.importLibrary('places')) as google.maps.PlacesLibrary;
+    })().catch(() => {
+      placesLibrary = null; // a transient failure must not poison the session
+      return null;
+    });
+  }
+  return placesLibrary;
+}
+
 // ── Camera helpers ──────────────────────────────────────────────────────────
 // Google's own `panTo` only animates short jumps (anything further snaps), so
 // the "camera follows the rider" pan is tweened here to keep the motion as

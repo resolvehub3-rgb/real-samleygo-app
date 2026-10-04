@@ -30,12 +30,13 @@ import {
   ensureFreshQuote,
   requestDeliveryQuote,
 } from '../../lib/deliveryQuote';
-import { geocodeAddress, LatLng } from '../../lib/routing';
+import { fetchRoadDistanceKm, geocodeAddress, LatLng } from '../../lib/routing';
 import { PlatformPricingSettings } from '../../types/database';
 import { supabase, isSupabaseConfigured, cleanRpcErrorMessage } from '../../lib/supabase';
 import { isGeolocationAvailable } from '../../lib/geolocation';
 import { readDeliverTo } from '../../lib/deliverTo';
 import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
+import { DeliveryLocationPicker } from '../../components/common/DeliveryLocationPicker';
 
 const PAYMENT_METHODS = [
   { id: 'MTN_MOMO', name: 'MTN Mobile Money (*170#)', color: 'border-yellow-400 bg-yellow-50/50' },
@@ -140,6 +141,13 @@ export const CartPage: React.FC = () => {
       ? { lat: customerLat, lng: customerLng }
       : null;
 
+  // One funnel for every way the drop-off moves: the map pin, a chosen search
+  // result, or a "no usable coordinates" reset. Never a fabricated fallback.
+  const applyPoint = (next: LatLng | null) => {
+    setCustomerLat(next ? next.lat : null);
+    setCustomerLng(next ? next.lng : null);
+  };
+
   // No GPS? Resolve the typed landmark to real coordinates so the route
   // is measured instead of guessed. A live GPS fix always wins.
   useEffect(() => {
@@ -180,25 +188,39 @@ export const CartPage: React.FC = () => {
 
     if (!user) {
       // Signed-out preview only — the authoritative quote is the server's
-      // and replaces this as soon as the customer signs in.
+      // and replaces this as soon as the customer signs in. It prices the SAME
+      // road route the map draws (straight-line only while that is measuring),
+      // so the line and the summary never disagree.
       if (restaurantPoint) {
-        const km = calculateDistanceKm(
+        const settings = pricingSettings ?? DEFAULT_PRICING;
+        const straightKm = calculateDistanceKm(
           restaurantPoint.lat,
           restaurantPoint.lng,
           deliveryPoint.lat,
           deliveryPoint.lng
         );
         setPreview({
-          distanceKm: km,
-          deliveryFee: calculateDeliveryFee(km, pricingSettings ?? DEFAULT_PRICING),
+          distanceKm: straightKm,
+          deliveryFee: calculateDeliveryFee(straightKm, settings),
         });
         setQuote(null);
         setQuoteError('');
+        setIsQuoting(true);
+
+        fetchRoadDistanceKm(restaurantPoint, deliveryPoint).then((roadKm) => {
+          if (seq !== quoteSeqRef.current) return; // a newer location already spoke
+          setIsQuoting(false);
+          if (!roadKm || !Number.isFinite(roadKm)) return; // straight-line stays
+          setPreview({
+            distanceKm: roadKm,
+            deliveryFee: calculateDeliveryFee(roadKm, settings),
+          });
+        });
       } else {
         setPreview(null);
         setQuoteError(DELIVERY_LOCATION_ERROR);
+        setIsQuoting(false);
       }
-      setIsQuoting(false);
       return;
     }
 
@@ -551,24 +573,31 @@ export const CartPage: React.FC = () => {
                 </button>
               </div>
 
-              <div>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. House No. 24, Boundary Road, East Legon, Accra"
-                  value={address}
-                  onChange={(e) => {
-                    addressEditedRef.current = true;
-                    setAddress(e.target.value);
-                  }}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white"
-                />
-                <p className="mt-1 text-[10px] text-slate-400">
-                  {liveLocation.isWatching && !addressEditedRef.current
-                    ? 'Live GPS area name — add your house or gate number for rapid delivery.'
-                    : 'Accurate landmarks ensure rapid delivery by our motorcycle couriers.'}
-                </p>
-              </div>
+              <DeliveryLocationPicker
+                address={address}
+                point={deliveryPoint}
+                pickup={restaurantPoint}
+                onAddressChange={(next) => {
+                  addressEditedRef.current = true;
+                  setAddress(next);
+                }}
+                onPointChange={applyPoint}
+                onResolved={(next, nextPoint) => {
+                  addressEditedRef.current = true;
+                  setAddress(next);
+                  // This label already carries coordinates — the typed-landmark
+                  // geocoder below must not fetch a second, different point.
+                  geocodedTextRef.current = next.trim();
+                  applyPoint(nextPoint);
+                }}
+                hint={
+                  <p className="text-[10px] text-slate-400">
+                    {liveLocation.isWatching && !addressEditedRef.current
+                      ? 'Live GPS area name — add your house or gate number for rapid delivery.'
+                      : 'Accurate landmarks ensure rapid delivery by our motorcycle couriers.'}
+                  </p>
+                }
+              />
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">

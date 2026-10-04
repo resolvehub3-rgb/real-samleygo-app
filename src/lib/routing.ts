@@ -30,6 +30,7 @@ export interface RoadRoute {
 
 const OSRM_URL = 'https://router.project-osrm.org/route/v1/driving';
 const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
+const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
 
 const REQUEST_TIMEOUT_MS = 8000;
 const ROUTE_CACHE_TTL_MS = 45_000;
@@ -47,6 +48,8 @@ interface CacheEntry<T> {
 
 const routeCache = new Map<string, CacheEntry<RoadRoute | null>>();
 const geocodeCache = new Map<string, CacheEntry<LatLng | null>>();
+const searchCache = new Map<string, CacheEntry<AddressSuggestion[]>>();
+const reverseCache = new Map<string, CacheEntry<string | null>>();
 const inFlight = new Map<string, Promise<unknown>>();
 
 /** Drops expired entries and caps growth so long-lived pages don't leak memory. */
@@ -231,6 +234,151 @@ export async function geocodeAddress(query: string): Promise<LatLng | null> {
   } finally {
     inFlight.delete(flightKey);
   }
+}
+
+/**
+ * One row of the address search box — a selectable place with coordinates.
+ *
+ * `source` records which service produced it: Google Places when the Maps key
+ * can use Places, otherwise the keyless OpenStreetMap lookup. Either way the
+ * customer ends up with the same thing: a name to read and a point to price.
+ */
+export interface AddressSuggestion {
+  id: string;
+  /** Primary line, e.g. "East Legon" or "24 Boundary Road". */
+  mainText: string;
+  /** Everything after it, e.g. "Accra, Greater Accra Region, Ghana". */
+  secondaryText: string;
+  point: LatLng;
+  source: 'GOOGLE' | 'OSM';
+}
+
+/** Shared cache bookkeeping: run a loader once, remember its answer. */
+async function cached<T>(
+  cache: Map<string, CacheEntry<T>>,
+  key: string,
+  flightKey: string,
+  ttlOnHit: number,
+  ttlOnMiss: number,
+  load: () => Promise<T>,
+  isEmpty: (value: T) => boolean
+): Promise<T> {
+  prune(cache as Map<string, CacheEntry<unknown>>);
+
+  const cachedValue = cache.get(key);
+  if (cachedValue && cachedValue.expires > Date.now()) return cachedValue.value;
+
+  const pending = inFlight.get(flightKey);
+  if (pending) return pending as Promise<T>;
+
+  const request = (async (): Promise<T> => {
+    const value = await load();
+    cache.set(key, {
+      value,
+      expires: Date.now() + (isEmpty(value) ? ttlOnMiss : ttlOnHit),
+    });
+    return value;
+  })();
+
+  inFlight.set(flightKey, request);
+  try {
+    return await request;
+  } finally {
+    inFlight.delete(flightKey);
+  }
+}
+
+const splitDisplayName = (displayName: string, fallback: string): [string, string] => {
+  const parts = displayName
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return [fallback, ''];
+  return [parts[0], parts.slice(1).join(', ')];
+};
+
+/**
+ * Address-as-you-type search (Ghana first, then worldwide).
+ *
+ * Never throws and never returns garbage: an empty array simply means the
+ * customer keeps typing and the text is geocoded on its own (see
+ * `geocodeAddress`). Results are cached, and identical in-flight queries are
+ * de-duplicated, so a fast typist costs one request per distinct query.
+ */
+export async function searchAddresses(query: string): Promise<AddressSuggestion[]> {
+  const normalized = query.trim().replace(/\s+/g, ' ');
+  if (normalized.length < 3) return [];
+
+  const key = normalized.toLowerCase();
+  return cached(
+    searchCache,
+    key,
+    `search:${key}`,
+    GEOCODE_HIT_TTL_MS,
+    GEOCODE_MISS_TTL_MS,
+    async () => {
+      const encoded = encodeURIComponent(normalized);
+      const attempts = [
+        `${NOMINATIM_URL}?format=jsonv2&limit=6&countrycodes=gh&q=${encoded}`,
+        `${NOMINATIM_URL}?format=jsonv2&limit=6&q=${encoded}`,
+      ];
+
+      for (const url of attempts) {
+        const json = await getJson(url);
+        if (!Array.isArray(json) || json.length === 0) continue;
+
+        const found: AddressSuggestion[] = [];
+        const rows = json as Array<Record<string, unknown>>;
+        rows.forEach((row, index) => {
+          const lat = Number(row.lat);
+          const lng = Number(row.lon);
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+          const [mainText, secondaryText] = splitDisplayName(
+            String(row.display_name ?? ''),
+            normalized
+          );
+          found.push({
+            id: `${lat.toFixed(5)},${lng.toFixed(5)}:${index}`,
+            mainText,
+            secondaryText,
+            point: { lat, lng },
+            source: 'OSM',
+          });
+        });
+        if (found.length > 0) return found;
+      }
+
+      return [];
+    },
+    (value) => value.length === 0
+  );
+}
+
+/**
+ * Turns a pin dropped on the map into an address the customer can read and
+ * edit. `null` means "no name for this spot" — the order then keeps whatever
+ * the customer typed, never a fabricated label.
+ */
+export async function reverseGeocodeAddress(point: LatLng): Promise<string | null> {
+  if (!isCoordinate(point)) return null;
+
+  const key = `${round(point.lat, 5)},${round(point.lng, 5)}`;
+  return cached(
+    reverseCache,
+    key,
+    `reverse:${key}`,
+    GEOCODE_HIT_TTL_MS,
+    GEOCODE_MISS_TTL_MS,
+    async () => {
+      const json = await getJson(
+        `${NOMINATIM_BASE}/reverse?format=jsonv2&zoom=18&lat=${point.lat}&lon=${point.lng}`
+      );
+      const name = (json as { display_name?: unknown } | null)?.display_name;
+      return typeof name === 'string' && name.trim() ? name.trim() : null;
+    },
+    (value) => value === null
+  );
 }
 
 /** Great-circle distance between two coordinates, in kilometres. */

@@ -17,6 +17,9 @@
  *   6. Source scans — checkout posts a quote id (never money), admin saves
  *      pricing through the database RPC, the UI shows the required rows,
  *      and the migration carries the server contract.
+ *   7. The delivery location picker — typing a place, dropping the pin on the
+ *      map and the real road route line it draws (and the fact that it never
+ *      touches a price).
  *
  * IMPORTANT: the database is still the authority. These tests lock down the
  * client helpers that render those numbers, the reporting aggregation, and
@@ -663,6 +666,86 @@ test('delivery quote rows are never written from the browser', () => {
   };
   walk(srcDir);
   assert.deepEqual(offenders, [], `quotes must only be created by the server: ${offenders.join(', ')}`);
+});
+
+// ---------------------------------------------------------------------------
+// 7. Delivery location picker — search, drop the pin, draw the REAL route
+// ---------------------------------------------------------------------------
+
+console.log('\n7. Delivery location picker');
+
+const stripComments = (source: string): string =>
+  source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+const PICKER_PATH = ['src', 'components', 'common', 'DeliveryLocationPicker.tsx'] as const;
+const readPicker = (): string => read(...PICKER_PATH);
+
+test('checkout lets the customer place the drop-off on the map', () => {
+  const cart = read('src', 'pages', 'customer', 'CartPage.tsx');
+
+  assert.ok(/<DeliveryLocationPicker/.test(cart), 'the checkout renders the picker');
+  assert.ok(/point=\{deliveryPoint\}/.test(cart), 'it shows the chosen drop-off');
+  assert.ok(/pickup=\{restaurantPoint\}/.test(cart), 'the route starts at the kitchen');
+  assert.ok(/onAddressChange=\{/.test(cart), 'the page keeps owning the address text');
+  assert.ok(/onPointChange=\{/.test(cart), 'the page keeps owning the coordinates');
+  assert.ok(/onResolved=\{/.test(cart), 'a resolved label reaches the page with its point');
+
+  // The typed-landmark geocoder must not overwrite coordinates the picker
+  // already supplied for the very same label.
+  assert.ok(
+    /geocodedTextRef\.current = next\.trim\(\)/.test(cart),
+    'a resolved label is never geocoded a second time'
+  );
+});
+
+test('the map draws the real road route to the drop-off', () => {
+  const picker = stripComments(readPicker());
+
+  assert.ok(/fetchRoadRoute\(/.test(picker), 'the line is the routed road path');
+  assert.ok(/gmpDraggable/.test(picker), 'the customer can drag the pin to fine-tune');
+  assert.ok(/gmp-dragend/.test(picker), 'the route redraws after a drag');
+  assert.ok(/reverseGeocodeAddress\(/.test(picker), 'a dropped pin becomes a readable address');
+  assert.ok(/· road route/.test(picker), 'the chip says when the line is the real route');
+  assert.ok(/· straight line/.test(picker), 'the fallback admits it is straight');
+  assert.equal(/5\.6037/.test(picker), false, 'no fabricated kitchen default');
+  assert.equal(
+    /\|\|\s*5\.6\d/.test(picker),
+    false,
+    'a coordinate is never defaulted into existence'
+  );
+});
+
+test('typing the delivery location searches real places', () => {
+  const picker = readPicker();
+
+  assert.ok(/loadGooglePlaces\(/.test(picker), 'Google Places when the key allows it');
+  assert.ok(/AutocompleteSuggestion/.test(picker), 'a suggestion list, not a blind geocode');
+  assert.ok(/searchAddresses\(/.test(picker), 'keyless OpenStreetMap fallback underneath');
+  assert.ok(/geocodeAddress\(/.test(picker), 'a chosen place always resolves to coordinates');
+  assert.ok(
+    /fetchFields\(/.test(picker),
+    'coordinates come from the selected place, never from the typed guess'
+  );
+});
+
+test('the picker never prices, labels or records money', () => {
+  const picker = stripComments(readPicker());
+
+  assert.equal(
+    /delivery_fee|calculateDeliveryFee|formatGHS/i.test(picker),
+    false,
+    'the map only reports a place, never a price'
+  );
+  assert.equal(
+    /commission|platform fee|service fee/i.test(picker),
+    false,
+    'no fee wording anywhere near the customer'
+  );
+  assert.equal(
+    /from\(['"]orders['"]\)/.test(picker),
+    false,
+    'the picker does not touch order rows'
+  );
 });
 
 // ---------------------------------------------------------------------------
