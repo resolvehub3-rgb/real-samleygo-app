@@ -252,11 +252,31 @@ export function synthesizeCourierRequestSound(): void {
 }
 
 /**
+ * Broadcast on `window` right before a notification chime plays. Navigation
+ * voice listens for it (courier screens only) so a bell can duck the
+ * turn-by-turn speech and re-announce the instruction afterwards — the bell
+ * itself is untouched: same sounds, same timing, same mute preference.
+ */
+export const AUDIO_ALERT_EVENT = 'samleygo:audio-alert';
+
+/** Notify audio listeners that a notification chime is about to play. */
+function announceAudioAlert(source: string): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(AUDIO_ALERT_EVENT, { detail: { source } }));
+    }
+  } catch {
+    // Coordination is best-effort — the chime must play either way.
+  }
+}
+
+/**
  * Triggers the ringing alert for couriers when an order is assigned to them by a restaurant.
  * Plays the custom courier sound shipped in /public; if the asset cannot be
  * fetched or autoplay is blocked, it degrades to the synthesized driver chime.
  */
 export function playCourierAssignedAlert(): void {
+  if (!isSoundMuted()) announceAudioAlert('COURIER_REQUEST');
   playAudioWithFallback('/courier-sound.mp3', synthesizeCourierRequestSound, 1.0);
 }
 

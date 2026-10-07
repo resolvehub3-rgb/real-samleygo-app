@@ -9,9 +9,10 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx scripts/commission.test.ts && tsx scripts/delivery_pricing.test.ts && tsx scripts/navigation.test.ts",
+    "test": "tsx scripts/commission.test.ts && tsx scripts/delivery_pricing.test.ts && tsx scripts/navigation.test.ts && tsx scripts/navigation_voice.test.ts",
     "test:delivery": "tsx scripts/delivery_pricing.test.ts",
-    "test:navigation": "tsx scripts/navigation.test.ts"
+    "test:navigation": "tsx scripts/navigation.test.ts",
+    "test:navigation_voice": "tsx scripts/navigation_voice.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

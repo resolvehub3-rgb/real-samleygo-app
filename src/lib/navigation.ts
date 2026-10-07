@@ -271,6 +271,13 @@ export interface NavigationStep {
   maneuverModifier?: string;
   /** Road name the maneuver leads onto (empty when the engine has none). */
   roadName?: string;
+  /**
+   * Roundabout/rotary exit number, when the engine reported one — voice
+   * guidance says "take the second exit", which cannot be derived otherwise.
+   */
+  maneuverExit?: number;
+  /** Bearing after the maneuver (degrees) — powers "Head east on …". */
+  maneuverBearingAfter?: number;
   /** Where the maneuver happens. */
   location: NavPoint;
   /** Distance from the route origin to this maneuver (metres). */
@@ -505,6 +512,26 @@ export function isOffRoute(
 }
 
 /**
+ * Index of the step the courier is currently driving (`alongMeters` metres
+ * into the route). Shared by the upcoming-maneuver lookup, the road-name
+ * readout and the voice engine so exactly one loop answers "which step am I
+ * on?" everywhere.
+ */
+export function currentStepIndex(
+  route: Pick<NavigationRoute, 'steps'> | null | undefined,
+  alongMeters: number
+): number {
+  const steps = route?.steps;
+  if (!steps || steps.length === 0) return 0;
+  let current = 0;
+  for (let i = 0; i < steps.length; i += 1) {
+    if (steps[i].cumulativeMeters <= alongMeters + 1) current = i;
+    else break;
+  }
+  return current;
+}
+
+/**
  * The next maneuver ahead of `alongMeters` (the departure maneuver counts as
  * passed once the courier has started moving).
  */
@@ -515,11 +542,7 @@ export function nextManeuver(
   const steps = route?.steps;
   if (!steps || steps.length === 0) return null;
 
-  let current = 0;
-  for (let i = 0; i < steps.length; i += 1) {
-    if (steps[i].cumulativeMeters <= alongMeters + 1) current = i;
-    else break;
-  }
+  const current = currentStepIndex(route, alongMeters);
   const upcomingIndex = Math.min(current + 1, steps.length - 1);
   const upcoming = steps[upcomingIndex];
   return {
@@ -536,12 +559,7 @@ export function currentRoadName(
 ): string | null {
   const steps = route?.steps;
   if (!steps || steps.length === 0) return null;
-  let current = steps[0];
-  for (const step of steps) {
-    if (step.cumulativeMeters <= alongMeters + 1) current = step;
-    else break;
-  }
-  return current.roadName?.trim() || null;
+  return steps[currentStepIndex(route, alongMeters)].roadName?.trim() || null;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -937,7 +955,9 @@ export type NavigationLogEvent =
   | 'NAVIGATION_REROUTE'
   | 'NAVIGATION_DESTINATION_CHANGED'
   | 'NAVIGATION_SESSION_STARTED'
-  | 'NAVIGATION_SESSION_ENDED';
+  | 'NAVIGATION_SESSION_ENDED'
+  | 'NAVIGATION_VOICE_ANNOUNCEMENT'
+  | 'NAVIGATION_VOICE_ERROR';
 
 /** Vite inlines `import.meta.env`; in plain Node (tests) it is simply absent. */
 const isDevBuild = (): boolean => {

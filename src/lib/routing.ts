@@ -241,6 +241,11 @@ const parseSteps = (route: OsrmRouteRaw): NavigationStep[] => {
         maneuverType: type,
         maneuverModifier: modifier,
         roadName: name || undefined,
+        // Normalised extras: voice guidance needs the roundabout exit number
+        // ("take the second exit") and the departure bearing ("head east"),
+        // neither of which can be recovered from the instruction text.
+        maneuverExit: exit ?? undefined,
+        maneuverBearingAfter: bearingAfter ?? undefined,
         location:
           lat !== null && lng !== null && Math.abs(lat) <= 90 && Math.abs(lng) <= 180
             ? { lat, lng }

@@ -1,5 +1,13 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { ArrowUp, CornerUpLeft, CornerUpRight, LocateFixed, MapPin } from 'lucide-react';
+import React, { useEffect, useId, useRef, useState } from 'react';
+import {
+  ArrowUp,
+  CornerUpLeft,
+  CornerUpRight,
+  LocateFixed,
+  MapPin,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
 import {
   ACCRA,
   MAP_ID,
@@ -34,6 +42,10 @@ import {
   type NavigationStep,
   type UpcomingManeuver,
 } from '../../lib/navigation';
+import {
+  navigationVoice,
+  type NavigationVoiceUiState,
+} from '../../lib/navigationVoice';
 
 // Re-exported as a type only: exporting runtime values alongside components
 // would break React Fast Refresh (dev HMR falls back to full reloads).
@@ -393,7 +405,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const [resolvedPickup, setResolvedPickup] = useState<LatLng | null>(null);
   const [resolvedDestination, setResolvedDestination] = useState<LatLng | null>(null);
   const [roadRoute, setRoadRoute] = useState<
-    (NavigationRoute & { leg: RouteLeg; phase: NavigationPhase }) | null
+    (NavigationRoute & { leg: RouteLeg; phase: NavigationPhase; targetKey: string }) | null
   >(null);
   /** Lifecycle of the current route request, surfaced on the HUD. */
   const [routeStatus, setRouteStatus] = useState<
@@ -407,6 +419,15 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const [mapReady, setMapReady] = useState(false);
   /** Human-readable reason the map could not be shown, if any. */
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // ── Voice guidance (courier screens only — customers never attach) ────
+  /** Stable identity for THIS map instance (the inline map and the modal
+   * can both be mounted; the engine lets exactly one session speak). */
+  const voiceOwnerId = useId();
+  /** Voice button state — updates on toggle/block events, never per GPS fix. */
+  const [voiceUi, setVoiceUi] = useState<NavigationVoiceUiState>(() =>
+    navigationVoice.getState()
+  );
 
   // Always call the newest callback without re-running effects that depend on it.
   useEffect(() => {
@@ -700,6 +721,22 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     onRouteUpdateRef.current?.(info);
   };
 
+  // ── Voice: attach this screen to the single voice session ─────────────
+  // Declared BEFORE the progress effect so the owner is attached before the
+  // first sample arrives. Customers/restaurants never set `showNavigationHud`
+  // and therefore never attach — they can never hear courier navigation.
+  useEffect(() => {
+    if (!showNavigationHud) return;
+    navigationVoice.attach(voiceOwnerId);
+    const unsubscribe = navigationVoice.subscribe(setVoiceUi);
+    setVoiceUi(navigationVoice.getState());
+    return () => {
+      // Unsubscribe first so the final detach-notify can't hit unmounted state.
+      unsubscribe();
+      navigationVoice.detach(voiceOwnerId);
+    };
+  }, [showNavigationHud, voiceOwnerId]);
+
   // ── A changed phase/destination invalidates every in-flight request ───
   // Bump the request id FIRST: a response from the previous destination
   // (restaurant → customer, or an old customer pin) must never overwrite the
@@ -710,7 +747,16 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     attemptRef.current = null;
     failuresRef.current = 0;
     offRouteStreakRef.current = 0;
-    setRoadRoute((current) => (current && leg && current.leg !== leg.kind ? null : current));
+    // A route drawn to the previous target is not this journey's route: drop
+    // it at once so its instructions can never drive the HUD or the voice.
+    setRoadRoute(
+      (current) =>
+        (current &&
+        leg &&
+        (current.leg !== leg.kind || current.targetKey !== targetKey)
+          ? null
+          : current)
+    );
     setRouteStatus('idle');
     setNavProgress(null);
     if (leg) {
@@ -731,12 +777,18 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       return;
     }
 
-    // The trip changed legs (food picked up) — drop the stale route at once.
-    if (roadRoute && roadRoute.leg !== leg.kind) setRoadRoute(null);
+    // The trip changed legs (food picked up) or the target moved — drop the
+    // stale route at once.
+    if (roadRoute && (roadRoute.leg !== leg.kind || roadRoute.targetKey !== targetKey)) {
+      setRoadRoute(null);
+    }
 
     const now = Date.now();
     const attempt = attemptRef.current;
-    const activeRoute = roadRoute && roadRoute.leg === leg.kind ? roadRoute : null;
+    const activeRoute =
+      roadRoute && roadRoute.leg === leg.kind && roadRoute.targetKey === targetKey
+        ? roadRoute
+        : null;
 
     // Deviation: where does the LIVE fix sit relative to the drawn road route?
     const projection = activeRoute ? projectOnRoute(activeRoute, courierPosition) : null;
@@ -779,6 +831,9 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         streak: offRouteStreakRef.current,
       });
       navLog('NAVIGATION_REROUTE', { reason: decision.reason, origin: courierPosition });
+      // The next route that lands is a genuine recalculation: the voice
+      // engine cancels the old instruction and says so (debounced).
+      if (showNavigationHud) navigationVoice.noteDeviationReroute();
     }
 
     routeInFlightRef.current = true;
@@ -808,7 +863,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         }
 
         failuresRef.current = 0;
-        setRoadRoute({ ...route, leg: leg.kind, phase: leg.phase });
+        setRoadRoute({ ...route, leg: leg.kind, phase: leg.phase, targetKey });
         setRouteStatus('ready');
         recordSessionRoute(route);
         notifyRouteUpdate({
@@ -833,35 +888,74 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
   // ── Live progress: remaining distance/ETA, next maneuver, arrival ─────
   useEffect(() => {
-    if (!roadRoute || !courierPosition || !leg) {
+    // A route drawn for another leg/target belongs to a different journey:
+    // neither the HUD card nor the voice engine may quote its maneuvers.
+    const activeRoute =
+      roadRoute && leg && roadRoute.leg === leg.kind && roadRoute.targetKey === targetKey
+        ? roadRoute
+        : null;
+
+    if (!activeRoute || !courierPosition || !leg) {
       setNavProgress(null);
       notifyRouteUpdate(null);
+      if (showNavigationHud) {
+        // Keep the voice engine's journey in sync ('' = no destination).
+        navigationVoice.update({
+          owner: voiceOwnerId,
+          sessionKey: leg ? targetKey : '',
+          phase: leg?.phase ?? 'IDLE',
+          route: null,
+          maneuver: null,
+          alongMeters: 0,
+          offRouteMeters: 0,
+          arrived: false,
+          accuracyMeters: courierFixRef.current?.accuracy ?? null,
+          speedMps: courierFixRef.current?.speed ?? null,
+        });
+      }
       return;
     }
 
-    const projection = projectOnRoute(roadRoute, courierPosition);
+    const projection = projectOnRoute(activeRoute, courierPosition);
     if (!projection) return;
 
-    const total = Math.max(1, roadRoute.distanceMeters);
+    const total = Math.max(1, activeRoute.distanceMeters);
     const travelled = Math.min(projection.alongMeters, total);
     const remainingMeters = Math.max(0, Math.round(total - travelled));
     const remainingSeconds = Math.max(
       0,
-      Math.round(Math.max(1, roadRoute.durationSeconds) * (remainingMeters / total))
+      Math.round(Math.max(1, activeRoute.durationSeconds) * (remainingMeters / total))
     );
     const offRouteMeters = Math.round(projection.offRouteMeters);
-    const maneuver = nextManeuver(roadRoute, travelled);
-    const currentRoad = currentRoadName(roadRoute, travelled);
+    const maneuver = nextManeuver(activeRoute, travelled);
+    const currentRoad = currentRoadName(activeRoute, travelled);
     const arrived = haversineKm(courierPosition, leg.target) * 1000 <= ARRIVAL_RADIUS_M;
 
     notifyRouteUpdate({
-      leg: roadRoute.leg,
-      distanceMeters: roadRoute.distanceMeters,
-      durationSeconds: roadRoute.durationSeconds,
+      leg: activeRoute.leg,
+      distanceMeters: activeRoute.distanceMeters,
+      durationSeconds: activeRoute.durationSeconds,
       remainingMeters,
       remainingSeconds,
-      phase: roadRoute.phase,
+      phase: activeRoute.phase,
     });
+
+    // Voice consumes the SAME sample the HUD just rendered (same maneuver,
+    // same distances) — one projection, one instruction, zero extra renders.
+    if (showNavigationHud) {
+      navigationVoice.update({
+        owner: voiceOwnerId,
+        sessionKey: targetKey,
+        phase: leg.phase,
+        route: activeRoute,
+        maneuver,
+        alongMeters: travelled,
+        offRouteMeters,
+        arrived,
+        accuracyMeters: courierFixRef.current?.accuracy ?? null,
+        speedMps: courierFixRef.current?.speed ?? null,
+      });
+    }
 
     setNavProgress((previous) => {
       if (
@@ -1303,6 +1397,18 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         })
       : null;
 
+  /**
+   * Voice ON/OFF. The tap itself is the user gesture that arms speech (browsers
+   * refuse to start talking without one) — on a blocked session the first tap
+   * re-arms instead of switching off, and the next announcement verifies it.
+   */
+  const handleVoiceToggle = () => {
+    const state = navigationVoice.getState();
+    navigationVoice.unlock();
+    if (state.blocked && state.enabled) return;
+    navigationVoice.setEnabled(!state.enabled);
+  };
+
   return (
     <div
       className={`relative w-full ${className} rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 z-0`}
@@ -1355,6 +1461,39 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
                   : 'At the drop-off — complete the delivery in your order screen.'}
               </p>
             </div>
+          )}
+
+          {/* Voice control (§31) — one tap toggles spoken guidance; the same
+              gesture is what lets the browser start speech at all. */}
+          {voiceUi.supported ? (
+            <button
+              type="button"
+              onClick={handleVoiceToggle}
+              aria-pressed={voiceUi.enabled}
+              aria-label={voiceUi.enabled ? 'Turn voice navigation off' : 'Turn voice navigation on'}
+              title="Voice navigation"
+              className={`pointer-events-auto flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-black shadow transition active:scale-95 ${
+                voiceUi.enabled
+                  ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+                  : 'bg-white/95 text-slate-600 ring-1 ring-slate-300 hover:bg-white'
+              }`}
+            >
+              {voiceUi.enabled ? (
+                <Volume2 className="h-3.5 w-3.5" />
+              ) : (
+                <VolumeX className="h-3.5 w-3.5" />
+              )}
+              {voiceUi.enabled ? 'Voice ON' : 'Voice OFF'}
+            </button>
+          ) : (
+            <span className="w-fit rounded-full bg-white/95 px-2.5 py-1 text-[11px] font-bold text-slate-500 shadow ring-1 ring-slate-200">
+              Voice navigation unavailable on this device
+            </span>
+          )}
+          {voiceUi.supported && voiceUi.enabled && voiceUi.blocked && (
+            <span className="w-fit rounded-full bg-amber-100/95 px-2.5 py-1 text-[11px] font-bold text-amber-800 shadow">
+              Tap Voice to allow spoken directions
+            </span>
           )}
 
           {/* Dev-only diagnostics HUD (spec §40): raw GPS + route telemetry.
