@@ -23,6 +23,7 @@ import {
   getCourierMovementState,
   loadMotorcycleSheet,
   makeMotorcycleContent,
+  MOVING_SPEED_MPS,
   motorcycleGeometry,
   motorcycleRotationDeg,
   motorcycleScaleFor,
@@ -188,10 +189,18 @@ const bearingDeg = (from: LatLng, to: LatLng): number => {
   return (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360;
 };
 
-/** Only ride the drawn road when the marker is this close to it (≤ ~30 m). */
-const ROUTE_SNAP_KM = 0.03;
+/**
+ * Pull the marker onto the drawn road whenever a fix sits within this of it
+ * (≤ ~60 m — ordinary phone GPS accuracy on a city street; the old 30 m gate
+ * tripped often enough that the ride fell back to a straight hop which
+ * visibly left the route). Beyond it the courier is genuinely off-road, so
+ * the raw fix is shown — deviations are the reroute's job, never a lie.
+ */
+const ROUTE_SNAP_KM = 0.06;
 /** …and the road detour this far from the straight chord before we give up on it. */
 const ROUTE_DETOUR_RATIO = 4;
+/** Sample gap (km) either side of the marker when reading the road's direction. */
+const ROUTE_HEADING_SAMPLE_KM = 0.004;
 
 /**
  * The road-snapped route, flattened into an arc-length track so the marker can
@@ -316,6 +325,23 @@ const HEADING_MIN_KM = 0.02;
 /** Two fixes closer than this are the same fix re-sent by a re-render. */
 const SAME_FIX_EPS = 1e-7;
 /**
+ * A displacement smaller than this while the marker rides is GPS noise, not
+ * travel — but a RIDING marker has no deadband at all (every fix glides);
+ * this floor only applies before the first ride, so the initial fixes can't
+ * jitter the freshly placed marker.
+ */
+const GLIDE_MIN_M = 12;
+/**
+ * A PARKED marker only re-opens for a gap this big: consecutive stationary
+ * fixes rarely differ by more than ~2× the GPS noise radius, so anything
+ * below this is jitter and the marker holds absolutely still — stop = stop,
+ * with no wiggle of its own. A rolling courier covers this much between
+ * published fixes easily, so riding resumes after at most one held fix.
+ */
+const UNPARK_M = 25;
+/** How fast a settle (courier repositioned while parked) covers its gap. */
+const CATCH_UP_MS = 1_000;
+/**
  * The camera follows the rider until he drifts into the outer quarter of the
  * frame (then it re-centres over the next ping). Keeping a comfortable margin
  * means the trip pins stay on screen as long as possible — the same rule a
@@ -333,11 +359,13 @@ const OUTSIDE_FOLLOW_ZONE = 0.25;
  * Live delivery map showing the courier's real-time position together with the
  * restaurant pickup pin and the customer drop-off pin.
  *
- * - the courier marker rides along at a constant speed derived from the GPS
- *   cadence (requestAnimationFrame), sliding along the drawn road route so it
- *   follows the streets instead of cutting straight across them; it keeps
- *   moving between pings, points the way the rider is heading, and the camera
- *   follows until the user pans away (a "Follow" button brings it back)
+ * - the courier marker only ever moves because the courier moved: while the
+ *   fix says he is rolling it rides the drawn road route at a constant speed
+ *   (requestAnimationFrame) — on the street line, never cutting the blocks —
+ *   and a stopped courier settles it exactly onto the last fix, where it then
+ *   holds still. It faces the direction of the road under it (counter-rotated
+ *   by the camera heading, so nose-right/nose-up stay true on screen), and the
+ *   camera follows until the user pans away (a "Follow" button brings it back)
  * - the active leg is the only line on the map: a road-snapped OSRM route
  *   that re-routes as the courier moves (on failure the last good line stays
  *   up and is retried with backoff)
@@ -391,6 +419,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const lastFixAtRef = useRef(0);
   /** Marker speed in km/ms, derived from (gap distance ÷ gap time). */
   const speedRef = useRef(0);
+  /**
+   * Hysteresis: set the moment a fix says the courier has stopped, so
+   * stationary jitter (up to `UNPARK_M` between consecutive fixes) can never
+   * wiggle the marker — only a decisive displacement re-opens the ride.
+   */
+  const parkedRef = useRef(false);
   /** Timestamp of the previous animation frame (for dt). */
   const lastFrameRef = useRef(0);
   /**
@@ -411,7 +445,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const actionRefs = useRef<{
     setFollow: (on: boolean) => void;
     openPopup: (marker: PinMarker) => void;
-  }>({ setFollow: () => {}, openPopup: () => {} });
+    repaintHeading: () => void;
+  }>({ setFollow: () => {}, openPopup: () => {}, repaintHeading: () => {} });
 
   // ── Map bootstrap state ───────────────────────────────────────────────
   /** Guards the async loader against React StrictMode's double effect. */
@@ -620,7 +655,20 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     const normalized = ((Math.round(degrees) % 360) + 360) % 360;
     if (normalized === headingRef.current) return;
     headingRef.current = normalized;
-    applyHeading(courierContentRef.current, normalized);
+    applyScreenHeading();
+  };
+
+  /**
+   * Write the stored travel heading onto the marker for the camera's CURRENT
+   * rotation: a two-finger gesture can spin the map (the compass control),
+   * so the bike counter-rotates by `map.getHeading()` — the drawn road and
+   * the bike nose then turn together, and "facing the way I'm going" stays
+   * true on screen at every camera angle.
+   */
+  const applyScreenHeading = () => {
+    const travel = headingRef.current;
+    if (travel < 0) return; // nothing stored yet (or brand-new content)
+    applyHeading(courierContentRef.current, travel - (mapRef.current?.getHeading() ?? 0));
   };
 
   /**
@@ -695,13 +743,48 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     };
   };
 
+  /**
+   * Where the marker is DRAWN for a fix: pulled onto the drawn road while the
+   * fix sits within GPS noise of it — the bike then rides the exact route
+   * line, and lateral jitter collapses to the same point (it can never nudge
+   * the marker around on its own). A fix genuinely off-road (past the gate)
+   * stays raw: deviations are shown truthfully, never invented.
+   */
+  const restOnRoute = (point: LatLng): LatLng => {
+    const track = trackRef.current;
+    if (!track) return point;
+    const projection = projectOnTrack(track, point);
+    if (projection.perpKm > ROUTE_SNAP_KM) return point;
+    return trackPointAt(track, projection.sKm);
+  };
+
+  /**
+   * Direction of the drawn road AT a point — the bearing of the segment the
+   * marker sits on, sampled ±4 m along the track. Null when there is no route
+   * yet or the point is off it: callers then fall back to the device heading
+   * and finally the raw travel bearing / leg target.
+   */
+  const headingAlongRoute = (point: LatLng): number | null => {
+    const track = trackRef.current;
+    if (!track || track.totalKm <= 0) return null;
+    const { sKm, perpKm } = projectOnTrack(track, point);
+    if (perpKm > ROUTE_SNAP_KM) return null;
+    const from = trackPointAt(track, Math.max(0, sKm - ROUTE_HEADING_SAMPLE_KM));
+    const to = trackPointAt(track, Math.min(track.totalKm, sKm + ROUTE_HEADING_SAMPLE_KM));
+    if (haversineKm(from, to) < 1e-7) return null;
+    return bearingDeg(from, to);
+  };
+
   const tick = (now: number) => {
     const marker = courierMarkerRef.current;
-    const target = targetRef.current;
-    if (!mapRef.current || !marker || !target) {
+    const fix = targetRef.current;
+    if (!mapRef.current || !marker || !fix) {
       animFrameRef.current = null;
       return;
     }
+    // The ride always ends where the fix belongs on screen: on the drawn road
+    // when it projects onto it, at the raw coordinate when it doesn't.
+    const target = restOnRoute(fix);
 
     const dt = lastFrameRef.current ? Math.min(80, now - lastFrameRef.current) : 16;
     lastFrameRef.current = now;
@@ -710,10 +793,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     const remainingKm = haversineKm(current, target);
     const stepKm = speedRef.current * dt;
 
-    // Arrived, no speed, or the screen went off — park on the latest fix.
+    // Arrived, no speed, or the screen went off — park exactly on the fix
+    // (resting on the route line) and hold still until the courier moves again.
     if (document.hidden || speedRef.current <= 0 || stepKm >= remainingKm) {
       currentLatLngRef.current = target;
       marker.position = target;
+      speedRef.current = 0;
       drawRefs.current.route(target);
       animFrameRef.current = null;
       // Glide over: re-check whether the rider is still rolling (a fresh
@@ -731,11 +816,13 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       lastRouteDrawRef.current = now;
       drawRefs.current.route(next);
     }
-    // Point the pin where the rider is actually driving: a trustworthy GPS
-    // heading wins over the geometry of the animated hop (which lags a fix
-    // behind), and the leg bearing stays the fallback while moving slowly.
-    const gpsHeading = gpsHeadingRef.current;
-    if (gpsHeading !== null) setHeading(gpsHeading);
+    // Face the road under the wheels: the drawn route's own direction first
+    // (stable, compass-free, exactly the path being followed), then a
+    // trustworthy GPS heading, then the animated hop's bearing while the
+    // move is big enough to mean one.
+    const routeHeading = headingAlongRoute(next);
+    if (routeHeading !== null) setHeading(routeHeading);
+    else if (gpsHeadingRef.current !== null) setHeading(gpsHeadingRef.current);
     else if (remainingKm > HEADING_MIN_KM) setHeading(bearingDeg(current, next));
 
     animFrameRef.current = requestAnimationFrame(tick);
@@ -765,6 +852,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   useEffect(() => {
     actionRefs.current.setFollow = setFollow;
     actionRefs.current.openPopup = openPopup;
+    actionRefs.current.repaintHeading = applyScreenHeading;
   });
 
   // ── Route bookkeeping ─────────────────────────────────────────────────
@@ -1088,6 +1176,9 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         // button appears. Programmatic pans and fits are never gestures, so
         // they keep following.
         map.addListener('dragstart', () => actionRefs.current.setFollow(false));
+        // A two-finger gesture can spin the camera — re-lay the bike's
+        // rotation so it keeps facing along the road AS SEEN ON SCREEN.
+        map.addListener('heading_changed', () => actionRefs.current.repaintHeading());
         map.addListener('zoom_changed', () => {
           if (Date.now() < ignoreZoomUntilRef.current) return;
           if (Date.now() - userGestureAtRef.current > 1000) return;
@@ -1332,13 +1423,18 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         // Moving/Idle states, transparent-keyed once per session and pivoted
         // on the wheel contact point that sits on this coordinate — no pin,
         // no bubble (spec §15: the bike itself is the location indicator).
+        // `place` puts it on the drawn road when one is already up, and the
+        // headingRef reset forces the next setHeading() onto this FRESH
+        // content — a recycled value would be deduped away and leave the
+        // bike painted facing due east, whatever the route does.
+        const place = restOnRoute(target);
         const geometry = motorcycleGeometry(
           motorcycleScaleFor(containerRef.current?.clientWidth ?? 0)
         );
         const content = makeMotorcycleContent(geometry);
         const marker = new google.maps.marker.AdvancedMarkerElement({
           map,
-          position: target,
+          position: place,
           content,
           title: courierName || 'Your courier',
           zIndex: 1000,
@@ -1348,9 +1444,10 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         marker.addEventListener('gmp-click', () => actionRefs.current.openPopup(marker));
         courierMarkerRef.current = marker;
         courierContentRef.current = content;
+        headingRef.current = -1;
         setPopupText(marker, popupText);
-        currentLatLngRef.current = target;
-        drawRoadRoute(target);
+        currentLatLngRef.current = place;
+        drawRoadRoute(place);
 
         // Key the sheet (checkerboard → alpha) once per session; every map
         // instance shares the resulting object URL. If it can never load,
@@ -1389,13 +1486,13 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         lastFixAtRef.current = now;
         targetRef.current = target;
 
+        // Measure the gap to where the fix belongs ON SCREEN (on the drawn
+        // road when it projects onto it): lateral GPS noise collapses to the
+        // same point, so a parked courier's jitter can never wander the
+        // marker around — only real progress along the route moves it.
+        const goal = restOnRoute(target);
         const animatedFrom = currentLatLngRef.current;
-        const distKm = animatedFrom
-          ? haversineKm(
-              { lat: animatedFrom.lat, lng: animatedFrom.lng },
-              { lat: target.lat, lng: target.lng }
-            )
-          : Number.POSITIVE_INFINITY;
+        const distKm = animatedFrom ? haversineKm(animatedFrom, goal) : Number.POSITIVE_INFINITY;
 
         if (!animatedFrom || distKm > SNAP_THRESHOLD_KM || document.hidden) {
           // Huge jump (page refresh, courier reassignment, stale fix) — snap.
@@ -1405,23 +1502,54 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           // on an old coordinate until the customer came back.
           speedRef.current = 0;
           stopLoop();
-          currentLatLngRef.current = target;
-          courierMarkerRef.current!.position = target;
-          drawRoadRoute(target);
-        } else if (distKm > 0) {
-          // Normal ping — cover the gap at the speed the rider is actually
-          // moving (gap distance ÷ gap time), so the marker glides along
-          // continuously and lands on the fix as the next one is due.
-          speedRef.current = distKm / gapMs;
-          ensureLoop();
+          parkedRef.current = false; // fresh authoritative placement — re-open the ride
+          currentLatLngRef.current = goal;
+          courierMarkerRef.current!.position = goal;
+          drawRoadRoute(goal);
+        } else {
+          const distM = distKm * 1000;
+          const animating = animFrameRef.current !== null;
+          const reported = courierFixRef.current?.speed ?? null;
+          const rolling =
+            typeof reported === 'number' && Number.isFinite(reported)
+              ? reported >= MOVING_SPEED_MPS
+              : distM / (gapMs / 1000) >= MOVING_SPEED_MPS;
+          // While riding there is no deadband — every real fix glides along
+          // the route at the cadence it arrived on. A PARKED marker is the
+          // opposite: only a displacement beyond GPS noise re-opens it, so
+          // a stopped courier's jitter can never wiggle it on its own.
+          const floorM = parkedRef.current ? UNPARK_M : GLIDE_MIN_M;
+
+          if (rolling && (!parkedRef.current || distM >= UNPARK_M)) {
+            // Rolling — ride the gap along the route at the real cadence,
+            // landing on the fix as the next one is due. A decisive gap
+            // also resumes a marker that had parked.
+            parkedRef.current = false;
+            speedRef.current = distKm / gapMs;
+            ensureLoop();
+          } else if (!rolling && (animating || distM >= floorM)) {
+            // He stopped — caught mid-ride or parked beside the fix.
+            // Settle straight onto it (fast and truthful: the marker can
+            // never coast past where he actually is), and treat every
+            // smaller wobble from here on as stationary noise.
+            parkedRef.current = true;
+            speedRef.current = distKm / CATCH_UP_MS;
+            ensureLoop();
+          } else {
+            // Below the noise floor: hold absolutely still — stop = stop,
+            // no wiggle and no drift of its own.
+            if (!rolling) parkedRef.current = true;
+            speedRef.current = 0;
+            stopLoop();
+          }
         }
 
         // Camera: re-centre when the rider drifts into the outer band of the
         // frame (unless the user took over by dragging/zooming). The pan runs
         // over the same window as the marker, so camera and pin travel
         // together instead of snapping.
-        if (followRef.current && outsideCenterZone(map, target, OUTSIDE_FOLLOW_ZONE)) {
-          panToAnimated(map, target, Math.min(6000, Math.max(600, gapMs)));
+        if (followRef.current && outsideCenterZone(map, goal, OUTSIDE_FOLLOW_ZONE)) {
+          panToAnimated(map, goal, Math.min(6000, Math.max(600, gapMs)));
         }
       }
 
@@ -1432,10 +1560,14 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       drawRoadRoute(at);
       lastRouteDrawRef.current = performance.now();
 
-      // Stationary (or just snapped): keep the real driving direction when the
-      // GPS still knows it, otherwise aim down the leg he's driving to.
-      if (gpsHeadingRef.current !== null) setHeading(gpsHeadingRef.current);
-      else if (speedRef.current === 0) aimAtLeg(target, leg);
+      // Face the road under the wheels: the route's direction at the marker
+      // first (stable and exactly the path being followed), then a
+      // trustworthy device heading — and with neither driving the heading
+      // and no ride running, aim down the leg he's driving to.
+      const routeHeading = headingAlongRoute(at);
+      if (routeHeading !== null) setHeading(routeHeading);
+      else if (gpsHeadingRef.current !== null) setHeading(gpsHeadingRef.current);
+      else if (animFrameRef.current === null) aimAtLeg(target, leg);
 
       // Same fix stream drives the Moving/Idle art (§13) — created content
       // starts on Idle, a glide or rolling fix flips it to Moving.
