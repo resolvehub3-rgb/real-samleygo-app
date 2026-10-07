@@ -140,6 +140,12 @@ interface CourierLiveMapProps {
    * position + route overview + ETA, never turn-by-turn instructions.
    */
   showNavigationHud?: boolean;
+  /**
+   * Render without the card frame (rounded corners + border) — for surfaces
+   * that are intentionally edge-to-edge, like the courier hub's full-bleed
+   * map. Radius/size then come from `className` alone.
+   */
+  flat?: boolean;
 }
 
 /** An Advanced Marker: an HTMLElement the Maps API positions on the map. */
@@ -356,6 +362,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   onRouteUpdate,
   courierFix,
   showNavigationHud = false,
+  flat = false,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
@@ -1060,6 +1067,15 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           zoom: 13,
           mapId: MAP_ID, // Advanced Markers refuse to draw without one
           zoomControl: true,
+          // Keep the overlay stack clear: zoom rides the right edge (above the
+          // ETA strip), the style switcher parks top-right — the HUD owns the
+          // top-left corner. Street View's pegman only gets in a rider's way.
+          zoomControlOptions: { position: google.maps.ControlPosition.RIGHT_CENTER },
+          mapTypeControlOptions: { position: google.maps.ControlPosition.TOP_RIGHT },
+          // §13: keep the map to its minimal control set — no pegman, no
+          // fullscreen corner (recent API defaults turn it on by itself).
+          streetViewControl: false,
+          fullscreenControl: false,
           scrollwheel: false, // prevent page-scroll hijack; the map is clicked first
           gestureHandling: 'greedy', // touches pan the map, like Leaflet did
           maxZoom: 19,
@@ -1497,7 +1513,9 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
   return (
     <div
-      className={`relative w-full ${className} rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 z-0`}
+      className={`relative w-full ${className} overflow-hidden bg-slate-100 z-0 ${
+        flat ? '' : 'rounded-2xl border border-slate-200'
+      }`}
     >
       {/* The API owns its container's children, so the map gets a dedicated
           empty div and every overlay below stays a sibling. */}
@@ -1505,19 +1523,21 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
       {/* ── Navigation HUD — courier-only turn-by-turn overlay ──────────── */}
       {showNavigationHud && mapReady && (
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-[900] flex flex-col items-start gap-1.5 p-2">
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-[900] flex flex-col items-start gap-2 p-3">
           {/* Next maneuver, straight from the routing engine's steps */}
           {!navProgress?.arrived && maneuver && (
-            <div className="flex max-w-full items-center gap-3 rounded-xl bg-slate-900/90 px-3 py-2 text-white shadow-lg ring-1 ring-white/10 backdrop-blur-sm">
-              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-emerald-500 text-white">
+            <div className="flex max-w-full items-center gap-2.5 rounded-[14px] bg-slate-900/92 px-3 py-2.5 shadow-lg ring-1 ring-black/20 backdrop-blur-sm">
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-[10px] bg-emerald-600 text-white">
                 {maneuverIcon(maneuver.step)}
               </span>
               <div className="min-w-0">
-                <p className="truncate text-sm font-black leading-tight">
+                <p className="truncate text-[13px] font-bold leading-tight text-white">
                   {maneuver.step.instruction}
                 </p>
-                <p className="truncate text-[11px] text-slate-300">
-                  {formatRouteDistance(maneuver.distanceMeters) || '0 m'}
+                <p className="truncate text-[11px] leading-tight text-slate-300">
+                  <span className="font-bold text-white">
+                    {formatRouteDistance(maneuver.distanceMeters) || '0 m'}
+                  </span>
                   {navProgress?.currentRoad ? ` · on ${navProgress.currentRoad}` : ''}
                 </p>
               </div>
@@ -1526,12 +1546,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
           {/* Route/GPS lifecycle, so a blank line is never mistaken for a route */}
           {routeStatusText && (
-            <span className="w-fit rounded-full bg-amber-100/95 px-2.5 py-1 text-[11px] font-bold text-amber-800 shadow">
+            <span className="w-fit rounded-[10px] border border-amber-200 bg-amber-50/95 px-2.5 py-1 text-[11px] font-semibold text-amber-800 shadow-sm">
               {routeStatusText}
             </span>
           )}
           {weakGps && !routeStatusText && (
-            <span className="w-fit rounded-full bg-amber-100/95 px-2.5 py-1 text-[11px] font-bold text-amber-800 shadow">
+            <span className="w-fit rounded-[10px] border border-amber-200 bg-amber-50/95 px-2.5 py-1 text-[11px] font-semibold text-amber-800 shadow-sm">
               GPS signal is weak
             </span>
           )}
@@ -1539,8 +1559,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           {/* Arrival prompt — it never confirms anything by itself: pickup and
               delivery still go through the existing confirmation/OTP flow. */}
           {navProgress?.arrived && (
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50/95 px-3 py-2 shadow-lg backdrop-blur-sm">
-              <p className="text-xs font-black text-emerald-800">You have arrived</p>
+            <div className="max-w-full rounded-[14px] border border-emerald-200 bg-emerald-50/95 px-3 py-2.5 shadow-lg backdrop-blur-sm">
+              <p className="text-[12px] font-bold text-emerald-900">You have arrived</p>
               <p className="text-[11px] leading-snug text-emerald-700">
                 {leg?.phase === 'TO_RESTAURANT'
                   ? 'At the restaurant — confirm the pickup in your order screen.'
@@ -1550,7 +1570,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           )}
 
           {/* Voice control (§31) — one tap toggles spoken guidance; the same
-              gesture is what lets the browser start speech at all. */}
+              gesture is what lets the browser start speech at all. Sized for a
+              gloved thumb (44 px) without dominating the map. */}
           {voiceUi.supported ? (
             <button
               type="button"
@@ -1558,26 +1579,26 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
               aria-pressed={voiceUi.enabled}
               aria-label={voiceUi.enabled ? 'Turn voice navigation off' : 'Turn voice navigation on'}
               title="Voice navigation"
-              className={`pointer-events-auto flex w-fit items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-black shadow transition active:scale-95 ${
+              className={`pointer-events-auto flex w-fit min-h-[44px] items-center gap-1.5 rounded-[12px] px-3.5 text-[12px] font-bold shadow-md transition active:scale-95 ${
                 voiceUi.enabled
-                  ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+                  ? 'bg-emerald-600 text-white hover:bg-emerald-700'
                   : 'bg-white/95 text-slate-600 ring-1 ring-slate-300 hover:bg-white'
               }`}
             >
               {voiceUi.enabled ? (
-                <Volume2 className="h-3.5 w-3.5" />
+                <Volume2 className="h-4 w-4" />
               ) : (
-                <VolumeX className="h-3.5 w-3.5" />
+                <VolumeX className="h-4 w-4" />
               )}
               {voiceUi.enabled ? 'Voice ON' : 'Voice OFF'}
             </button>
           ) : (
-            <span className="w-fit rounded-full bg-white/95 px-2.5 py-1 text-[11px] font-bold text-slate-500 shadow ring-1 ring-slate-200">
+            <span className="w-fit rounded-[10px] border border-slate-200 bg-white/95 px-2.5 py-1 text-[11px] font-semibold text-slate-500 shadow-sm">
               Voice navigation unavailable on this device
             </span>
           )}
           {voiceUi.supported && voiceUi.enabled && voiceUi.blocked && (
-            <span className="w-fit rounded-full bg-amber-100/95 px-2.5 py-1 text-[11px] font-bold text-amber-800 shadow">
+            <span className="w-fit rounded-[10px] border border-amber-200 bg-amber-50/95 px-2.5 py-1 text-[11px] font-semibold text-amber-800 shadow-sm">
               Tap Voice to allow spoken directions
             </span>
           )}
@@ -1611,23 +1632,32 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         </div>
       )}
 
-      {/* Bottom strip: how far/long the rest of this leg is (courier screen) */}
+      {/* Bottom strip: the navigation information panel for this leg —
+          visually attached to the map, never a floating card (§12). */}
       {showNavigationHud && mapReady && navProgress && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-[900] flex items-end justify-between gap-3 border-t border-slate-200/80 bg-white/95 px-3 py-1.5">
-          <div className="min-w-0">
-            <p className="truncate text-[10px] font-bold uppercase tracking-wide text-slate-500">
-              {leg?.kind === 'TO_PICKUP' ? 'To pickup' : 'To drop-off'} · {destinationLabel}
-            </p>
-            <p className="truncate text-sm font-black text-slate-900">
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-[900] border-t border-slate-200 bg-white px-4 pt-2 pb-2.5 shadow-[0_-2px_10px_rgba(15,23,42,0.07)]">
+          <p className="truncate text-[11px] leading-tight text-slate-500">
+            <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-700">
+              {leg?.kind === 'TO_PICKUP' ? 'To pickup' : 'To customer'}
+            </span>
+            <span className="mx-1.5 text-slate-300" aria-hidden="true">
+              ·
+            </span>
+            <span className="font-semibold text-slate-800">{destinationLabel}</span>
+          </p>
+          <div className="mt-1 flex items-baseline justify-between gap-3">
+            <p className="min-w-0 truncate text-[17px] font-bold leading-tight tabular-nums text-slate-900">
               {formatRouteDistance(navProgress.remainingMeters) || '0 m'}
-              {navProgress.remainingSeconds > 0
-                ? ` · ${formatRouteDuration(navProgress.remainingSeconds)}`
-                : ''}
+              {navProgress.remainingSeconds > 0 && (
+                <span className="ml-2 text-[12px] font-medium text-slate-500">
+                  {formatRouteDuration(navProgress.remainingSeconds)}
+                </span>
+              )}
             </p>
+            {etaAt && (
+              <p className="shrink-0 text-[12px] font-bold text-slate-700">ETA {etaAt}</p>
+            )}
           </div>
-          {etaAt && (
-            <p className="shrink-0 text-[11px] font-bold text-slate-600">ETA {etaAt}</p>
-          )}
         </div>
       )}
 
@@ -1641,16 +1671,17 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         </div>
       )}
 
-      {/* Camera-follow: shown only after the user drags/zooms away from the rider */}
+      {/* Camera-follow: the current-location control. Shown only after the
+          user drags/zooms away from the rider. */}
       {courierPosition && !following && (
         <button
           type="button"
           onClick={() => setFollow(true)}
-          className={`absolute right-2 z-[1000] flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white/95 px-3 py-1.5 text-[11px] font-black uppercase tracking-wide text-emerald-700 shadow-md transition active:scale-95 hover:bg-emerald-50 ${
-            showNavigationHud && navProgress ? 'bottom-14' : 'bottom-6'
+          className={`absolute right-3 z-[1000] flex min-h-[44px] items-center gap-1.5 rounded-[12px] border border-slate-200 bg-white px-3.5 text-[12px] font-bold text-slate-700 shadow-md transition hover:bg-slate-50 active:scale-95 ${
+            showNavigationHud && navProgress ? 'bottom-16' : 'bottom-4'
           }`}
         >
-          <LocateFixed className="w-3.5 h-3.5" />
+          <LocateFixed className="w-4 h-4 text-emerald-600" />
           Follow
         </button>
       )}

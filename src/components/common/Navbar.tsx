@@ -55,7 +55,7 @@ export const Navbar: React.FC = () => {
 
   return (
     <>
-      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-100 transition">
+      <header className="sticky top-0 z-40 border-b border-slate-100 bg-white/95 pt-safe backdrop-blur-md transition">
         <div className="max-w-7xl mx-auto px-2.5 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-2 sm:gap-4">
           
           {/* Brand Logo — real SamleyGo logo mark + wordmark */}
@@ -136,7 +136,7 @@ export const Navbar: React.FC = () => {
                     setShowNotifications(!showNotifications);
                     setShowUserMenu(false);
                   }}
-                  className="p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition relative"
+                  className="rounded-xl p-3 text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 relative sm:p-2"
                   aria-label="Notifications"
                 >
                   <Bell className="w-5 h-5" />
