@@ -18,6 +18,17 @@ import {
   panToAnimated,
 } from '../../lib/googleMaps';
 import { escapeHtml, makePinContent, pinAnchor } from '../../lib/mapMarkers';
+import {
+  applyMotorcycleSheet,
+  getCourierMovementState,
+  loadMotorcycleSheet,
+  makeMotorcycleContent,
+  motorcycleGeometry,
+  motorcycleRotationDeg,
+  motorcycleScaleFor,
+  setMotorcycleState,
+  type MotorcycleState,
+} from '../../lib/motorcycleMarker';
 import type { RestaurantMapPin } from '../../lib/restaurantPins';
 import {
   calculateRoute,
@@ -135,12 +146,25 @@ interface CourierLiveMapProps {
 type PinMarker = google.maps.marker.AdvancedMarkerElement;
 
 /**
- * Rotates the pin so its tip points at `headingDeg` (degrees clockwise from
- * north), like a navigation arrow — the emoji counter-rotates to stay upright.
- * The pin's tip starts at due south (180°), so the body turns by
- * `heading - 225`.
+ * Rotates the courier marker so its front points at `headingDeg` (degrees
+ * clockwise from north).
+ *
+ * Primary content is the SamleyGo motorcycle sprite: its side view faces east,
+ * so the rotation is `heading − 90°` pivoted on the wheel contact point that
+ * Advanced Markers anchor to the coordinate — the bike stays planted on the
+ * road at every angle (invalid headings leave the last rotation in place).
+ *
+ * Legacy fallback: if the sprite sheet could not load, the old teardrop pin
+ * takes over — its tip starts at due south (180°), so the body turns by
+ * `heading − 225` and the emoji counter-rotates to stay upright.
  */
 const applyHeading = (content: HTMLDivElement | null, headingDeg: number) => {
+  const bike = content?.querySelector('.sg-motorcycle') as HTMLElement | null;
+  if (bike) {
+    const rotation = motorcycleRotationDeg(headingDeg);
+    if (Number.isFinite(rotation)) bike.style.transform = `rotate(${rotation}deg)`;
+    return;
+  }
   const pin = content?.querySelector('.sg-pin') as HTMLElement | null;
   if (!pin) return;
   pin.style.transform = `rotate(${headingDeg - 225}deg)`;
@@ -338,6 +362,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const courierMarkerRef = useRef<PinMarker | null>(null);
   /** The courier marker's DOM node — heading rotation happens on this. */
   const courierContentRef = useRef<HTMLDivElement | null>(null);
+  /** Which motorcycle art (Moving / Idle) the content currently shows. */
+  const motorcycleStateRef = useRef<MotorcycleState>('idle');
   const destinationMarkerRef = useRef<PinMarker | null>(null);
   const pickupMarkerRef = useRef<PinMarker | null>(null);
   const roadPolylineRef = useRef<google.maps.Polyline | null>(null);
@@ -360,8 +386,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const speedRef = useRef(0);
   /** Timestamp of the previous animation frame (for dt). */
   const lastFrameRef = useRef(0);
-  /** Degrees clockwise from north the pin tip points (180 = due south). */
-  const headingRef = useRef(180);
+  /**
+   * Degrees clockwise from north the marker points. Starts at −1 (a value no
+   * normalized heading can equal) so the very first `setHeading()` always
+   * writes the rotation onto freshly created content.
+   */
+  const headingRef = useRef(-1);
   /** Throttle for re-drawing the (much heavier) road polyline while riding. */
   const lastRouteDrawRef = useRef(0);
   /** Camera-follow: on until the user drags/zooms, then off until re-centred. */
@@ -606,6 +636,29 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   };
 
   /**
+   * Moving vs Idle motorcycle art (spec §13). MOVING while the marker is
+   * actually gliding between two real fixes or a fresh fix says the rider is
+   * rolling; IDLE once the glide parks or the fix goes stale — `watchPosition`
+   * falls silent when the rider stops, so a stale speed reading can never
+   * keep the bike "moving". The setter is idempotent, so this is safe to call
+   * per frame and after every fix.
+   */
+  const refreshMotorcycleState = () => {
+    const root = courierContentRef.current;
+    if (!root) return;
+    const fix = courierFixRef.current;
+    const state = getCourierMovementState({
+      animating: animFrameRef.current !== null,
+      speedMps: fix?.speed ?? null,
+      fixAgeMs: fix?.timestamp ? Date.now() - fix.timestamp : null,
+      previous: motorcycleStateRef.current,
+    });
+    if (state === motorcycleStateRef.current) return;
+    motorcycleStateRef.current = state;
+    setMotorcycleState(root, state);
+  };
+
+  /**
    * One frame of the ride: advance toward the latest fix at the speed implied
    * by the previous gap (distance ÷ time), **sliding along the drawn road
    * route** so the rider follows the streets instead of cutting through the
@@ -656,6 +709,9 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       marker.position = target;
       drawRefs.current.route(target);
       animFrameRef.current = null;
+      // Glide over: re-check whether the rider is still rolling (a fresh
+      // fast fix keeps the Moving art; a parked rider settles on Idle).
+      refreshMotorcycleState();
       return;
     }
 
@@ -1100,6 +1156,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       speedRef.current = 0;
       headingRef.current = -1;
       gpsHeadingRef.current = null;
+      motorcycleStateRef.current = 'idle';
       offRouteStreakRef.current = 0;
       lastRouteDrawRef.current = 0;
       userGestureAtRef.current = 0;
@@ -1254,8 +1311,15 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       );
 
       if (!courierMarkerRef.current) {
-        // First fix — place the marker directly (no glide from nowhere)
-        const content = makePinContent('🛵', '#059669', 34, true);
+        // First fix — place the marker directly (no glide from nowhere). The
+        // courier marker IS the motorcycle: the supplied sprite sheet's
+        // Moving/Idle states, transparent-keyed once per session and pivoted
+        // on the wheel contact point that sits on this coordinate — no pin,
+        // no bubble (spec §15: the bike itself is the location indicator).
+        const geometry = motorcycleGeometry(
+          motorcycleScaleFor(containerRef.current?.clientWidth ?? 0)
+        );
+        const content = makeMotorcycleContent(geometry);
         const marker = new google.maps.marker.AdvancedMarkerElement({
           map,
           position: target,
@@ -1263,7 +1327,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           title: courierName || 'Your courier',
           zIndex: 1000,
           gmpClickable: true,
-          ...pinAnchor(34),
+          ...geometry.anchors,
         });
         marker.addEventListener('gmp-click', () => actionRefs.current.openPopup(marker));
         courierMarkerRef.current = marker;
@@ -1271,6 +1335,23 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         setPopupText(marker, popupText);
         currentLatLngRef.current = target;
         drawRoadRoute(target);
+
+        // Key the sheet (checkerboard → alpha) once per session; every map
+        // instance shares the resulting object URL. If it can never load,
+        // swap in the old pin — with its anchors — so the courier is never
+        // invisible on a live map.
+        loadMotorcycleSheet().then((sheetUrl) => {
+          if (courierContentRef.current !== content) return; // torn down / replaced
+          if (applyMotorcycleSheet(content, sheetUrl)) return;
+          const fallback = makePinContent('🛵', '#059669', 34, true);
+          const legacyAnchor = pinAnchor(34);
+          marker.anchorLeft = legacyAnchor.anchorLeft;
+          marker.anchorTop = legacyAnchor.anchorTop;
+          marker.content = fallback;
+          courierContentRef.current = fallback;
+          headingRef.current = -1; // force the next setHeading() onto this content
+          motorcycleStateRef.current = 'idle';
+        });
       } else {
         setPopupText(courierMarkerRef.current, popupText);
         courierMarkerRef.current.title = courierName || 'Your courier';
@@ -1339,9 +1420,14 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       // GPS still knows it, otherwise aim down the leg he's driving to.
       if (gpsHeadingRef.current !== null) setHeading(gpsHeadingRef.current);
       else if (speedRef.current === 0) aimAtLeg(target, leg);
+
+      // Same fix stream drives the Moving/Idle art (§13) — created content
+      // starts on Idle, a glide or rolling fix flips it to Moving.
+      refreshMotorcycleState();
     } else {
       // No courier fix yet — no rider, so there is no leg to route
       stopLoop();
+      refreshMotorcycleState();
       targetRef.current = null;
       lastFixAtRef.current = 0;
       speedRef.current = 0;

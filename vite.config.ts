@@ -44,6 +44,12 @@ export default defineConfig(() => {
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          // The courier motorcycle sprite sheet is 2.1 MB — over workbox's
+          // 2 MiB precache cap, and pointless to force on every install
+          // (customers/restaurants never render it, and offline maps have no
+          // tiles regardless). It is fetched once on demand the first time a
+          // live map opens, then sits in the HTTP cache.
+          globIgnores: ['**/motors.png'],
         },
         devOptions: {
           enabled: true,
