@@ -30,8 +30,11 @@ import { RegisterPage } from './pages/auth/RegisterPage';
 import { ForgotPasswordPage } from './pages/auth/ForgotPasswordPage';
 import { ProfilePage } from './pages/auth/ProfilePage';
 
-import { TermsPage, PrivacyPage } from './pages/public/TermsPage';
 import { SupportPage } from './pages/public/SupportPage';
+
+// Legal document centre — one layout, one route per published document.
+import { LegalDocumentLayout } from './components/legal/LegalDocumentLayout';
+import { LEGAL_DOCUMENTS } from './legal/registry';
 
 export default function App() {
   return (
@@ -143,9 +146,16 @@ export default function App() {
                 <Route path="/register" element={<RegisterPage />} />
                 <Route path="/forgot-password" element={<ForgotPasswordPage />} />
 
-                {/* Legal & Support */}
-                <Route path="/terms" element={<TermsPage />} />
-                <Route path="/privacy" element={<PrivacyPage />} />
+                {/* Legal & Support — /terms and /privacy keep their original
+                    URLs; the rest of the legal centre is generated from the
+                    document registry so links and routes never drift. */}
+                {LEGAL_DOCUMENTS.map((document) => (
+                  <Route
+                    key={document.key}
+                    path={document.path}
+                    element={<LegalDocumentLayout document={document} />}
+                  />
+                ))}
                 <Route path="/support" element={<SupportPage />} />
 
                 {/* Catch-all */}

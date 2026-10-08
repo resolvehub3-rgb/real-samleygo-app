@@ -1,5 +1,8 @@
 import React, { useState } from 'react';
-import { Mail, Phone, MessageSquare, Check, HelpCircle } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Mail, Phone, Check } from 'lucide-react';
+import { SUPPORT_EMAIL, SUPPORT_PHONE } from '../../legal/contact';
+import { LEGAL_DOCUMENTS } from '../../legal/registry';
 
 export const SupportPage: React.FC = () => {
   const [name, setName] = useState('');
@@ -33,7 +36,7 @@ export const SupportPage: React.FC = () => {
             </div>
             <div>
               <span className="text-[10px] font-bold text-slate-400 uppercase">Emergency Dispatch Hotline</span>
-              <p className="text-sm font-bold text-slate-900">+233 (0) 30 200 4567</p>
+              <p className="text-sm font-bold text-slate-900">{SUPPORT_PHONE}</p>
             </div>
           </div>
 
@@ -43,7 +46,7 @@ export const SupportPage: React.FC = () => {
             </div>
             <div>
               <span className="text-[10px] font-bold text-slate-400 uppercase">Email Support</span>
-              <p className="text-sm font-bold text-slate-900">support@samleygo.com.gh</p>
+              <p className="text-sm font-bold text-slate-900">{SUPPORT_EMAIL}</p>
             </div>
           </div>
         </div>
@@ -112,6 +115,26 @@ export const SupportPage: React.FC = () => {
               </button>
             </form>
           )}
+        </div>
+
+        {/* Legal & policies — the support screen is where people look for them */}
+        <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-xs space-y-3">
+          <h2 className="text-lg font-bold text-slate-900">Legal &amp; Policies</h2>
+          <p className="text-xs text-slate-500">
+            Terms, privacy, and how we handle orders, payments, delivery and partner accounts.
+          </p>
+          <ul className="grid gap-1.5 sm:grid-cols-2">
+            {LEGAL_DOCUMENTS.map((doc) => (
+              <li key={doc.key}>
+                <Link
+                  to={doc.path}
+                  className="inline-flex min-h-6 items-center text-xs font-semibold text-slate-600 underline-offset-4 transition hover:text-brand-dark hover:underline"
+                >
+                  {doc.navTitle}
+                </Link>
+              </li>
+            ))}
+          </ul>
         </div>
 
       </div>
