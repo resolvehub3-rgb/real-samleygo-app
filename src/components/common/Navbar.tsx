@@ -56,22 +56,18 @@ export const Navbar: React.FC = () => {
   return (
     <>
       <header className="sticky top-0 z-40 border-b border-slate-100 bg-white/95 pt-safe backdrop-blur-md transition">
-        <div className="max-w-7xl mx-auto px-2.5 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-2 sm:gap-4">
-          
-          {/* Brand Logo — real SamleyGo logo mark + wordmark */}
-          <Link to="/" className="flex items-center gap-2.5 group flex-shrink-0 min-w-0">
-            <span className="w-9 h-9 sm:w-10 sm:h-10 shrink-0 rounded-xl overflow-hidden bg-white ring-1 ring-slate-200 shadow-sm group-hover:shadow-md group-hover:-translate-y-0.5 transition flex">
-              <img src="/logo-mark.png" alt="" className="w-full h-full object-cover" />
+        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between gap-2 px-2 sm:h-16 sm:gap-4 sm:px-6 lg:px-8">
+          {/* Brand — the real SamleyGo logo mark plus the brand wordmark */}
+          <Link to="/" className="group flex h-11 min-w-0 flex-shrink-0 items-center gap-2" aria-label="SamleyGo home">
+            <span className="h-9 w-9 shrink-0 overflow-hidden rounded-xl bg-white ring-1 ring-slate-200 shadow-sm transition group-hover:shadow-md sm:h-10 sm:w-10">
+              <img src="/logo-mark.png" alt="" className="h-full w-full object-cover" />
             </span>
-            <span className="flex flex-col min-w-0">
-              <span className="text-base sm:text-xl font-extrabold tracking-tight text-[#02472d] leading-none">
-                Samley<span className="text-[#fd6902]">Go</span>
+            <span className="flex min-w-0 flex-col">
+              <span className="text-[15px] font-extrabold leading-none tracking-tight text-brand-deep sm:text-xl">
+                Samley<span className="text-accent">Go</span>
               </span>
-              <span className="hidden sm:flex items-center gap-1.5 text-[9px] font-bold tracking-[0.16em] text-slate-500 uppercase leading-none mt-1.5">
-                <span
-                  className="w-3 h-px bg-gradient-to-r from-emerald-600 to-orange-500"
-                  aria-hidden="true"
-                ></span>
+              <span className="mt-1.5 hidden items-center gap-1.5 text-[9px] font-bold uppercase leading-none tracking-[0.16em] text-slate-500 sm:flex">
+                <span className="h-px w-3 bg-slate-300" aria-hidden="true"></span>
                 Fast. Reliable. Always There.
               </span>
             </span>
@@ -79,7 +75,7 @@ export const Navbar: React.FC = () => {
 
           {/* Desktop Navigation Links & Quick Search */}
           <nav className="hidden md:flex items-center gap-4 lg:gap-6 text-sm font-semibold text-slate-600">
-            <Link to="/restaurants" className="hover:text-emerald-600 transition whitespace-nowrap">
+            <Link to="/restaurants" className="flex h-11 items-center whitespace-nowrap transition hover:text-emerald-600">
               Explore
             </Link>
 
@@ -88,15 +84,16 @@ export const Navbar: React.FC = () => {
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 pointer-events-none" />
               <input
                 type="text"
-                placeholder="Search food in realtime..."
+                placeholder="Search food, dishes or kitchens"
                 value={headerSearch}
                 onChange={(e) => setHeaderSearch(e.target.value)}
-                className="w-full pl-8 pr-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200/70 focus:bg-white border border-slate-200 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500 transition"
+                aria-label="Search food, dishes or kitchens"
+                className="h-11 w-full rounded-xl border border-slate-200 bg-slate-100 pl-8 pr-2.5 py-0 text-xs font-medium transition hover:bg-slate-200/70 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
               />
             </form>
 
             {user && role === 'CUSTOMER' && (
-              <Link to="/orders" className="hover:text-emerald-600 transition">
+              <Link to="/orders" className="flex h-11 items-center transition hover:text-emerald-600">
                 Track Orders
               </Link>
             )}
@@ -136,12 +133,16 @@ export const Navbar: React.FC = () => {
                     setShowNotifications(!showNotifications);
                     setShowUserMenu(false);
                   }}
-                  className="rounded-xl p-3 text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 relative sm:p-2"
-                  aria-label="Notifications"
+                  className="relative flex h-11 w-11 items-center justify-center rounded-xl text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+                  aria-label={
+                    unreadCount > 0
+                      ? `Notifications, ${unreadCount} unread`
+                      : 'Notifications'
+                  }
                 >
-                  <Bell className="w-5 h-5" />
+                  <Bell className="h-5 w-5" />
                   {unreadCount > 0 && (
-                    <span className="absolute top-1 right-1 w-4 h-4 rounded-full bg-emerald-600 text-white text-[10px] font-bold flex items-center justify-center animate-pulse">
+                    <span className="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-[9px] font-bold leading-none text-white">
                       {unreadCount}
                     </span>
                   )}
@@ -203,16 +204,24 @@ export const Navbar: React.FC = () => {
               </div>
             )}
 
-            {/* Cart Button (For Customers / Guests) */}
+            {/* Cart Button (For Customers / Guests) — a small count chip, never a heavy badge */}
             {role !== 'COURIER' && (
               <Link
                 to="/cart"
-                className="relative p-2 rounded-xl text-slate-700 hover:text-slate-900 hover:bg-slate-100 transition"
-                aria-label="View Cart"
+                className={`relative flex h-11 w-11 items-center justify-center rounded-xl transition ${
+                  totalCount > 0
+                    ? 'text-brand-dark hover:bg-emerald-50'
+                    : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+                aria-label={
+                  totalCount > 0
+                    ? `View cart, ${totalCount} item${totalCount === 1 ? '' : 's'}`
+                    : 'View cart'
+                }
               >
-                <ShoppingBag className="w-5 h-5" />
+                <ShoppingBag className="h-5 w-5" />
                 {totalCount > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 min-w-[20px] h-5 rounded-full bg-emerald-600 text-white text-[11px] font-extrabold flex items-center justify-center px-1 shadow-sm">
+                  <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-[9.5px] font-bold leading-none text-white">
                     {totalCount}
                   </span>
                 )}
@@ -371,16 +380,16 @@ export const Navbar: React.FC = () => {
                 )}
               </div>
             ) : (
-              <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+              <div className="flex flex-shrink-0 items-center gap-1.5 sm:gap-2">
                 <Link
                   to="/login"
-                  className="px-2 sm:px-3 py-1.5 sm:py-2 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-100 transition whitespace-nowrap flex-shrink-0"
+                  className="flex h-11 items-center whitespace-nowrap rounded-xl px-2.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 sm:px-3.5"
                 >
                   Sign In
                 </Link>
                 <Link
                   to="/register"
-                  className="px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-xl text-xs font-black bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition whitespace-nowrap active:scale-95 flex-shrink-0"
+                  className="flex h-11 items-center whitespace-nowrap rounded-xl bg-brand px-3 text-xs font-bold text-white shadow-xs transition hover:bg-brand-dark active:scale-95 sm:px-4"
                 >
                   <span className="hidden sm:inline">Join SamleyGo</span>
                   <span className="sm:hidden">Join</span>

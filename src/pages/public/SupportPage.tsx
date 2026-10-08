@@ -14,7 +14,7 @@ export const SupportPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen pb-28 md:pb-12 bg-slate-50">
+    <div className="min-h-screen pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-12 bg-canvas">
       <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-8">
         
         <div>

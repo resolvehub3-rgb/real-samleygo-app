@@ -13,7 +13,6 @@ import {
   Utensils,
   X,
   Check,
-  Sparkles,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { Restaurant, MenuItem, RestaurantCategory } from '../../types/database';
@@ -101,10 +100,10 @@ export const RestaurantDetailPage: React.FC = () => {
           (payload) => {
             loadRestaurant();
             if (payload.eventType === 'INSERT') {
-              setMenuLiveToast('✨ A new dish was just added to the menu in realtime!');
+              setMenuLiveToast('A new dish was just added to this menu.');
               setTimeout(() => setMenuLiveToast(null), 4000);
             } else if (payload.eventType === 'UPDATE') {
-              setMenuLiveToast('🔄 Menu item price/availability updated live!');
+              setMenuLiveToast('A dish price or availability just changed.');
               setTimeout(() => setMenuLiveToast(null), 3000);
             }
           }
@@ -131,7 +130,7 @@ export const RestaurantDetailPage: React.FC = () => {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 py-12 px-4 max-w-5xl mx-auto space-y-6">
+      <div className="min-h-screen bg-canvas py-12 px-4 max-w-5xl mx-auto space-y-6">
         <div className="h-64 bg-slate-200 rounded-3xl animate-pulse" />
         <div className="h-8 bg-slate-200 rounded w-1/3 animate-pulse" />
         <div className="h-4 bg-slate-200 rounded w-1/4 animate-pulse" />
@@ -141,7 +140,7 @@ export const RestaurantDetailPage: React.FC = () => {
 
   if (!restaurant) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-canvas flex items-center justify-center p-4">
         <div className="bg-white rounded-3xl p-8 max-w-md w-full text-center border border-slate-200 shadow-xs">
           <Utensils className="w-12 h-12 text-slate-400 mx-auto mb-3" />
           <h2 className="text-lg font-bold text-slate-900">Restaurant Not Found</h2>
@@ -163,7 +162,7 @@ export const RestaurantDetailPage: React.FC = () => {
   const uncategorizedItems = menuItems.filter((i) => !i.category_id);
 
   return (
-    <div className="min-h-screen pb-28 md:pb-12 bg-slate-50">
+    <div className="min-h-screen pb-[calc(7.5rem+env(safe-area-inset-bottom))] md:pb-14 bg-canvas">
       
       {/* Added Toast Notification */}
       {addedToast && (
@@ -175,9 +174,11 @@ export const RestaurantDetailPage: React.FC = () => {
 
       {/* Realtime Menu Update Toast */}
       {menuLiveToast && (
-        <div className="fixed top-20 left-4 right-4 sm:left-auto sm:right-4 z-50 bg-gradient-to-r from-emerald-700 to-teal-700 text-white px-4 py-2.5 rounded-2xl shadow-2xl border border-emerald-400/40 flex items-center gap-2 text-xs font-bold animate-in fade-in slide-in-from-top-4">
-          <Sparkles className="w-4 h-4 text-amber-300 animate-spin" />
-          <span>{menuLiveToast}</span>
+        <div className="fixed inset-x-3 top-20 z-50 animate-sg-in rounded-xl border border-slate-700 bg-slate-900/95 px-4 py-2.5 text-xs font-semibold text-white shadow-lg sm:inset-x-auto sm:right-4 sm:max-w-sm">
+          <span className="flex items-center gap-2">
+            <span className="h-2 w-2 flex-shrink-0 rounded-full bg-brand" aria-hidden="true" />
+            <span>{menuLiveToast}</span>
+          </span>
         </div>
       )}
 
@@ -190,14 +191,14 @@ export const RestaurantDetailPage: React.FC = () => {
             className="w-full h-full object-cover opacity-80"
           />
         ) : (
-          <div className="w-full h-full bg-gradient-to-r from-emerald-800 to-teal-900 opacity-90" />
+          <div className="w-full h-full bg-brand-deep" />
         )}
         <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-transparent to-black/30" />
 
         <div className="absolute top-4 left-4 z-10">
           <Link
             to="/restaurants"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/90 text-slate-900 text-xs font-bold shadow-md hover:bg-white transition"
+            className="flex h-11 items-center gap-1.5 rounded-xl bg-white/90 px-3.5 text-xs font-bold text-slate-900 shadow-md transition hover:bg-white"
           >
             <ArrowLeft className="w-4 h-4" />
             <span>Back</span>
@@ -216,9 +217,9 @@ export const RestaurantDetailPage: React.FC = () => {
             )}
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xl sm:text-3xl font-black tracking-tight">{restaurant.name}</h1>
+                <h1 className="text-xl sm:text-3xl font-bold tracking-tight">{restaurant.name}</h1>
                 <span
-                  className={`text-[9px] uppercase font-black px-2 py-0.5 rounded ${
+                  className={`text-[9px] uppercase font-bold px-2 py-0.5 rounded ${
                     restaurant.is_open ? 'bg-emerald-500' : 'bg-rose-500'
                   }`}
                 >
@@ -281,7 +282,7 @@ export const RestaurantDetailPage: React.FC = () => {
 
               return (
                 <section key={category.id} className="space-y-4">
-                  <h2 className="text-lg font-black text-slate-900 tracking-tight border-b border-slate-200 pb-2">
+                  <h2 className="text-lg font-bold text-slate-900 tracking-tight border-b border-slate-200 pb-2">
                     {category.name}
                   </h2>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -303,7 +304,7 @@ export const RestaurantDetailPage: React.FC = () => {
             {/* Uncategorized Items */}
             {uncategorizedItems.length > 0 && (
               <section className="space-y-4">
-                <h2 className="text-lg font-black text-slate-900 tracking-tight border-b border-slate-200 pb-2">
+                <h2 className="text-lg font-bold text-slate-900 tracking-tight border-b border-slate-200 pb-2">
                   Chef&apos;s Specials &amp; Dishes
                 </h2>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -355,7 +356,7 @@ export const RestaurantDetailPage: React.FC = () => {
                 />
                 <button
                   onClick={() => setSelectedItem(null)}
-                  className="absolute top-3 right-3 p-1.5 rounded-full bg-black/50 text-white hover:bg-black/70"
+                  className="absolute right-3 top-3 flex h-11 w-11 items-center justify-center rounded-full bg-black/60 text-white transition hover:bg-black/80"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -373,7 +374,7 @@ export const RestaurantDetailPage: React.FC = () => {
                 {!selectedItem.image_url && (
                   <button
                     onClick={() => setSelectedItem(null)}
-                    className="p-1 rounded-full text-slate-400 hover:text-slate-600"
+                    className="flex h-11 w-11 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
                   >
                     <X className="w-5 h-5" />
                   </button>
@@ -401,18 +402,18 @@ export const RestaurantDetailPage: React.FC = () => {
               </div>
 
               {/* Quantity Controls & Action */}
-              <div className="mt-6 flex items-center justify-between gap-4 pt-4 border-t border-slate-100">
-                <div className="flex items-center gap-3 border border-slate-200 rounded-xl p-1 bg-slate-50">
+              <div className="mt-6 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                <div className="flex items-center gap-2 self-start rounded-xl border border-slate-200 bg-slate-50 p-1">
                   <button
                     onClick={() => setItemQuantity(Math.max(1, itemQuantity - 1))}
-                    className="w-8 h-8 rounded-lg bg-white shadow-xs flex items-center justify-center text-slate-700 hover:bg-slate-100"
+                    className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-slate-700 shadow-xs transition hover:bg-slate-100 active:scale-95"
                   >
                     <Minus className="w-4 h-4" />
                   </button>
                   <span className="font-bold text-sm w-6 text-center">{itemQuantity}</span>
                   <button
                     onClick={() => setItemQuantity(itemQuantity + 1)}
-                    className="w-8 h-8 rounded-lg bg-white shadow-xs flex items-center justify-center text-slate-700 hover:bg-slate-100"
+                    className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-slate-700 shadow-xs transition hover:bg-slate-100 active:scale-95"
                   >
                     <Plus className="w-4 h-4" />
                   </button>
@@ -421,7 +422,7 @@ export const RestaurantDetailPage: React.FC = () => {
                 <button
                   onClick={handleAddToCart}
                   disabled={!selectedItem.is_available}
-                  className="flex-1 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md transition disabled:opacity-50 flex items-center justify-center gap-2"
+                  className="flex h-12 w-full flex-1 items-center justify-center gap-2 rounded-xl bg-brand px-4 text-xs font-bold text-white shadow-md transition hover:bg-brand-dark disabled:opacity-50 active:scale-[0.98]"
                 >
                   <ShoppingBag className="w-4 h-4" />
                   <span>
@@ -440,15 +441,15 @@ export const RestaurantDetailPage: React.FC = () => {
           <div className="max-w-md mx-auto pointer-events-auto">
             <Link
               to="/cart"
-              className="w-full py-3.5 px-5 rounded-2xl bg-gradient-to-r from-emerald-600 via-emerald-500 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-black text-sm shadow-2xl shadow-emerald-700/50 flex items-center justify-between transition active:scale-[0.98] border border-emerald-400/30"
+              className="w-full py-3.5 px-5 rounded-2xl bg-brand hover:bg-brand-dark text-white font-bold text-sm shadow-xl shadow-brand/30 flex items-center justify-between transition active:scale-[0.98]"
             >
               <div className="flex items-center gap-2.5">
-                <span className="w-6 h-6 rounded-full bg-white/25 flex items-center justify-center text-xs font-black">
+                <span className="w-6 h-6 rounded-full bg-white/25 flex items-center justify-center text-xs font-bold">
                   {totalCount}
                 </span>
                 <span>View Cart &amp; Checkout</span>
               </div>
-              <div className="flex items-center gap-1.5 font-black">
+              <div className="flex items-center gap-1.5 font-bold">
                 <span>{formatGHS(subtotal)}</span>
                 <ArrowRight className="w-4 h-4" />
               </div>
@@ -467,11 +468,19 @@ const MenuItemCard: React.FC<{ item: MenuItem; onSelect: () => void }> = ({
 }) => {
   return (
     <div
+      role="button"
+      tabIndex={item.is_available ? 0 : -1}
+      aria-label={item.is_available ? `View ${item.name} options` : `${item.name} is sold out`}
       onClick={() => item.is_available && onSelect()}
-      className={`bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs flex items-center justify-between gap-4 transition ${
-        item.is_available
-          ? 'cursor-pointer hover:border-emerald-500/50 hover:shadow-md'
-          : 'opacity-50 cursor-not-allowed'
+      onKeyDown={(event) => {
+        if (!item.is_available) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
+      className={`flex cursor-pointer items-center justify-between gap-4 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-xs transition focus-visible:outline-2 focus-visible:outline-brand ${
+        item.is_available ? 'hover:border-emerald-500/50 hover:shadow-md' : 'cursor-not-allowed opacity-50'
       }`}
     >
       <div className="flex-1 min-w-0">
@@ -501,14 +510,14 @@ const MenuItemCard: React.FC<{ item: MenuItem; onSelect: () => void }> = ({
             className="w-full h-full object-cover"
           />
           {item.is_available && (
-            <div className="absolute bottom-1 right-1 w-6 h-6 rounded-lg bg-emerald-600 text-white flex items-center justify-center shadow-md">
+            <div aria-hidden="true" className="absolute bottom-1 right-1 flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-600 text-white shadow-md">
               <Plus className="w-3.5 h-3.5" />
             </div>
           )}
         </div>
       ) : (
         item.is_available && (
-          <button className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center hover:bg-emerald-600 hover:text-white transition flex-shrink-0">
+          <button className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 transition hover:bg-emerald-600 hover:text-white">
             <Plus className="w-4 h-4" />
           </button>
         )

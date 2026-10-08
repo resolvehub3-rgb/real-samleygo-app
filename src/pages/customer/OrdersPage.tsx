@@ -228,7 +228,7 @@ export const OrdersPage: React.FC = () => {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-canvas flex items-center justify-center p-4">
         <div className="bg-white rounded-3xl p-8 max-w-md w-full text-center border border-slate-200 shadow-xs">
           <AlertCircle className="w-12 h-12 text-slate-400 mx-auto mb-3" />
           <h2 className="text-lg font-bold text-slate-900">Sign in to view orders</h2>
@@ -247,11 +247,11 @@ export const OrdersPage: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen pb-28 md:pb-12 bg-slate-50">
+    <div className="min-h-screen pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-12 bg-canvas">
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
               My Orders
             </h1>
             <p className="text-xs text-slate-500 mt-0.5">
@@ -261,7 +261,7 @@ export const OrdersPage: React.FC = () => {
           <div className="flex items-center gap-2">
             <TestRingBellButton
               tone="customer"
-              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 shadow-xs"
+              className="h-11 px-3 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 shadow-xs hover:bg-slate-100"
               iconClassName="text-emerald-600"
             />
             <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-1 rounded-xl">
@@ -291,7 +291,7 @@ export const OrdersPage: React.FC = () => {
             </p>
             <Link
               to="/restaurants"
-              className="mt-6 inline-block px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition"
+              className="mt-6 inline-flex h-11 items-center rounded-xl bg-brand px-5 text-xs font-bold text-white transition hover:bg-brand-dark"
             >
               Order Food Now
             </Link>
@@ -320,7 +320,7 @@ export const OrdersPage: React.FC = () => {
                           #{order.order_number}
                         </span>
                         <span
-                          className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md ${
+                          className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md ${
                             isActive
                               ? 'bg-amber-500 text-white animate-pulse'
                               : order.status === 'COMPLETED' || order.status === 'DELIVERED'
@@ -337,7 +337,7 @@ export const OrdersPage: React.FC = () => {
                     </div>
 
                     <div className="text-left sm:text-right">
-                      <span className="font-black text-sm text-emerald-700 block">
+                      <span className="font-bold text-sm text-emerald-700 block">
                         {formatGHS(order.total_amount)}
                       </span>
                       <span className="text-[11px] text-slate-400">

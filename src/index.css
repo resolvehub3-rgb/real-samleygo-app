@@ -5,12 +5,56 @@
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
     -webkit-tap-highlight-color: transparent;
   }
+
+  /* One consistent, visible focus treatment for keyboard users. */
+  :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
 }
 
-/* Auth screens: soft rise-in for the two columns + slow drifting blobs. */
+/* SamleyGo design tokens + screen animations. */
 @theme {
+  /* Brand palette — taken from the shipped SamleyGo logo, never re-invented.
+     --color-brand      : primary actions, active navigation, live/success
+     --color-brand-deep : dark-green discovery surfaces
+     --color-accent     : subtle Ghanaian/food accent (logo orange)
+     --color-canvas     : warm off-white page background */
+  --color-brand: #059669;
+  --color-brand-dark: #047857;
+  --color-brand-deep: #02472d;
+  --color-accent: #fd6902;
+  --color-canvas: #f6f5f1;
+
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04);
+
+  --animate-sg-in: sg-in 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-sg-pop: sg-pop 0.16s cubic-bezier(0.22, 1, 0.36, 1) both;
   --animate-fade-up: fade-up 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
   --animate-blob: blob 20s ease-in-out infinite;
+
+  @keyframes sg-in {
+    from {
+      opacity: 0;
+      transform: translateY(-8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes sg-pop {
+    from {
+      opacity: 0;
+      transform: scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
 
   @keyframes fade-up {
     from {
@@ -39,12 +83,19 @@
 
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-up,
-  .animate-blob {
+  .animate-blob,
+  .animate-sg-in,
+  .animate-sg-pop {
     animation: none !important;
   }
   .sg-courier-halo {
     animation: none !important;
     opacity: 0;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
   }
 }
 

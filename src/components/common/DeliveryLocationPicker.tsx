@@ -513,7 +513,7 @@ export const DeliveryLocationPicker: React.FC<DeliveryLocationPickerProps> = ({
             }}
             onBlur={() => setListOpen(false)}
             onKeyDown={handleKeyDown}
-            className="w-full pl-9 pr-9 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white"
+            className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-9 pr-9 py-0 text-slate-900 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white sm:text-sm"
           />
           {(searching || resolvingPin) && (
             <Loader2 className="w-3.5 h-3.5 text-emerald-600 animate-spin absolute right-3 top-1/2 -translate-y-1/2" />

@@ -2,7 +2,7 @@ import React from 'react';
 
 export const TermsPage: React.FC = () => {
   return (
-    <div className="min-h-screen pb-28 md:pb-12 bg-slate-50">
+    <div className="min-h-screen pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-12 bg-canvas">
       <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-6 bg-white my-8 rounded-3xl p-8 border border-slate-200">
         <h1 className="text-2xl font-black text-slate-900">Terms of Service — SamleyGo Ghana</h1>
         <p className="text-xs text-slate-500">Effective Date: September 2026</p>
@@ -34,7 +34,7 @@ export const TermsPage: React.FC = () => {
 
 export const PrivacyPage: React.FC = () => {
   return (
-    <div className="min-h-screen pb-28 md:pb-12 bg-slate-50">
+    <div className="min-h-screen pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-12 bg-canvas">
       <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-6 bg-white my-8 rounded-3xl p-8 border border-slate-200">
         <h1 className="text-2xl font-black text-slate-900">Privacy Policy — SamleyGo Ghana</h1>
         <p className="text-xs text-slate-500">Effective Date: September 2026</p>

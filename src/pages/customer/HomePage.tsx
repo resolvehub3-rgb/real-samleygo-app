@@ -3,23 +3,16 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Search,
   MapPin,
-  Clock,
-  Star,
+  ChevronDown,
   ChevronRight,
-  Sparkles,
-  ShoppingBag,
   Store,
   Navigation,
   X,
   Check,
-  Zap,
   Bike,
-  Plus,
   Utensils,
   RefreshCw,
   AlertCircle,
-  ArrowRight,
-  Flame,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { Restaurant, Order, MenuItem } from '../../types/database';
@@ -36,33 +29,38 @@ import {
 import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
 import { playCustomerStatusAlert } from '../../lib/soundAlerts';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
+import {
+  FOOD_CATEGORIES,
+  ALL_CATEGORIES,
+  findCategory,
+  keywordOrFilter,
+  sanitizeSearchTerm,
+} from '../../lib/categories';
+import { getPlatformPricing } from '../../lib/platformPricing';
+import { FoodCard } from '../../components/customer/FoodCard';
+import { RestaurantCard } from '../../components/customer/RestaurantCard';
+import { CategoryScroller } from '../../components/customer/CategoryScroller';
+import {
+  SectionHeading,
+  EmptyState,
+  ErrorState,
+  FoodGridSkeleton,
+  RestaurantGridSkeleton,
+} from '../../components/customer/States';
 
 export interface SearchMenuItem extends MenuItem {
   restaurant?: Restaurant;
 }
 
-const GHANA_CUISINES = [
-  { name: 'All', icon: '🍽️', keyword: '' },
-  { name: 'Jollof & Fried Rice', icon: '🍛', keyword: 'jollof' },
-  { name: 'Waakye Special', icon: '🍱', keyword: 'waakye' },
-  { name: 'Banku & Tilapia', icon: '🐟', keyword: 'banku' },
-  { name: 'Fufu & Light Soup', icon: '🍲', keyword: 'fufu' },
-  { name: 'Kelewele & Plantain', icon: '🍌', keyword: 'kelewele' },
-  { name: 'Kenkey & Fried Fish', icon: '🌽', keyword: 'kenkey' },
-  { name: 'Grills & Shawarma', icon: '🌯', keyword: 'shawarma' },
-  { name: 'Continental & Pastries', icon: '🥐', keyword: 'pastry' },
-  { name: 'Fresh Juices & Drinks', icon: '🥤', keyword: 'sobolo' },
-];
-
 /** Copy shown with the customer milestone chimes (customer-sound.mp3). */
 const HOME_STATUS_TOASTS: Record<string, string> = {
-  RESTAURANT_PENDING: '🔔 Realtime: Your order just reached the kitchen!',
-  PREPARING: '🍳 Realtime: The kitchen is cooking your order now!',
-  READY_FOR_PICKUP: '📦 Realtime: Your order is packed and ready for dispatch!',
-  PICKED_UP: '🛵 Realtime: Your courier started the trip to you!',
-  ARRIVED: '🛵 Realtime: Your courier has arrived at your destination!',
-  DELIVERED: '🎉 Realtime: Your order has been delivered safely!',
-  COMPLETED: '🎉 Realtime: Your order is complete!',
+  RESTAURANT_PENDING: 'The kitchen just received your order.',
+  PREPARING: 'Your kitchen is cooking your order now.',
+  READY_FOR_PICKUP: 'Your order is packed and ready for pickup.',
+  PICKED_UP: 'Your courier has started the trip to you.',
+  ARRIVED: 'Your courier has arrived.',
+  DELIVERED: 'Your order has been delivered. Enjoy!',
+  COMPLETED: 'Your order is complete.',
 };
 
 const POPULAR_LOCATIONS = [
@@ -83,28 +81,15 @@ const QUICK_SEARCH_SUGGESTIONS = [
   'Banku & Tilapia',
   'Grilled Chicken',
   'Kelewele',
-  'Shawarma',
-  'Fufu',
-  'Fried Plantain',
-  'Sobolo',
 ];
 
-function getCuisineEmoji(name: string, description?: string): string {
-  const text = `${name} ${description || ''}`.toLowerCase();
-  if (text.includes('jollof') || text.includes('fried rice') || text.includes('rice')) return '🍛';
-  if (text.includes('waakye')) return '🍱';
-  if (text.includes('banku') || text.includes('tilapia') || text.includes('fish') || text.includes('salmon')) return '🐟';
-  if (text.includes('fufu') || text.includes('soup') || text.includes('goat') || text.includes('groundnut')) return '🍲';
-  if (text.includes('kelewele') || text.includes('plantain') || text.includes('red red')) return '🍌';
-  if (text.includes('kenkey') || text.includes('shito')) return '🌽';
-  if (text.includes('shawarma') || text.includes('grill') || text.includes('khebab') || text.includes('suya')) return '🌯';
-  if (text.includes('chicken') || text.includes('wings') || text.includes('turkey')) return '🍗';
-  if (text.includes('juice') || text.includes('sobolo') || text.includes('drink') || text.includes('smoothie')) return '🥤';
-  if (text.includes('pastry') || text.includes('pie') || text.includes('cake') || text.includes('bread')) return '🥐';
-  if (text.includes('burger')) return '🍔';
-  if (text.includes('pizza')) return '🍕';
-  return '🍽️';
-}
+/** `COURIER_ASSIGNED` → `Courier Assigned` for customer-facing copy. */
+const humanizeStatus = (status: string): string =>
+  status
+    .split('_')
+    .map((word) => word.charAt(0) + word.slice(1).toLowerCase())
+    .join(' ');
+
 
 export const HomePage: React.FC = () => {
   const { user } = useAuth();
@@ -115,7 +100,7 @@ export const HomePage: React.FC = () => {
   // Search query from URL or state
   const initialQuery = searchParams.get('q') || searchParams.get('search') || '';
   const [searchQuery, setSearchQuery] = useState(initialQuery);
-  const [selectedCuisine, setSelectedCuisine] = useState('All');
+  const [selectedCuisine, setSelectedCuisine] = useState(ALL_CATEGORIES);
 
   // Database records
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
@@ -126,16 +111,31 @@ export const HomePage: React.FC = () => {
   const [freshDishes, setFreshDishes] = useState<SearchMenuItem[]>([]);
   const [isLoadingDishes, setIsLoadingDishes] = useState(true);
 
-  // Realtime search results
+  // Realtime search / category-filter results
   const [foodResults, setFoodResults] = useState<SearchMenuItem[]>([]);
   const [restaurantResults, setRestaurantResults] = useState<Restaurant[]>([]);
   const [isSearchingFood, setIsSearchingFood] = useState(false);
   const [searchTab, setSearchTab] = useState<'all' | 'dishes' | 'restaurants'>('all');
 
+  // Honest failure states — a failed request shows a retry, never fake rows.
+  const [restaurantsError, setRestaurantsError] = useState(false);
+  const [dishesError, setDishesError] = useState(false);
+  const [searchError, setSearchError] = useState(false);
+
+  // Real delivery "from" fee, read from platform_settings (never invented).
+  const [deliveryFrom, setDeliveryFrom] = useState<number | undefined>(undefined);
+
   // Realtime toast & indicator states
   const [realtimeNotice, setRealtimeNotice] = useState<string | null>(null);
-  const [realtimePulse, setRealtimePulse] = useState(false);
   const [addedToast, setAddedToast] = useState<string | null>(null);
+
+  /** Short, non-blocking customer notice (sold out, kitchen still loading…). */
+  const noticeTimerRef = useRef<number | null>(null);
+  const showNotice = useCallback((message: string) => {
+    setRealtimeNotice(message);
+    if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = window.setTimeout(() => setRealtimeNotice(null), 3500);
+  }, []);
 
   // Location selector state — seeded from the customer's own last choice (or
   // from nothing at all): a refresh must never fall back to a fabricated
@@ -175,6 +175,7 @@ export const HomePage: React.FC = () => {
       return;
     }
 
+    setRestaurantsError(false);
     try {
       const { data, error } = await supabase
         .from('restaurants')
@@ -183,7 +184,8 @@ export const HomePage: React.FC = () => {
         .order('is_open', { ascending: false })
         .order('rating', { ascending: false });
 
-      if (!error && data) {
+      if (error) throw error;
+      if (data) {
         setRestaurants(data as Restaurant[]);
         const map: Record<string, Restaurant> = {};
         (data as Restaurant[]).forEach((r) => {
@@ -223,7 +225,9 @@ export const HomePage: React.FC = () => {
         }
       }
     } catch {
-      // Handled
+      // The kitchens section renders an ErrorState with a retry instead of
+      // pretending the marketplace is empty.
+      setRestaurantsError(true);
     } finally {
       setIsLoading(false);
     }
@@ -236,6 +240,7 @@ export const HomePage: React.FC = () => {
       return;
     }
 
+    setDishesError(false);
     try {
       const { data, error } = await supabase
         .from('menu_items')
@@ -256,7 +261,9 @@ export const HomePage: React.FC = () => {
       }
       setFreshDishes(processed);
     } catch {
-      // Keep previous dishes on transient errors
+      // Previous dishes stay on screen when we already have some; otherwise
+      // the section shows a retry instead of an invented menu.
+      setDishesError(true);
     } finally {
       setIsLoadingDishes(false);
     }
@@ -275,13 +282,17 @@ export const HomePage: React.FC = () => {
   // 2. Realtime Food & Restaurant Search Core Function
   const executeRealtimeSearch = useCallback(
     async (queryText: string, cuisineName: string) => {
-      const trimmed = queryText.trim();
-      const hasCuisineFilter = cuisineName !== 'All';
+      const safeText = sanitizeSearchTerm(queryText);
+      const category = findCategory(cuisineName);
+      const keywords = category?.keywords ?? [];
+      const hasText = safeText.length > 0;
+      const hasCategory = keywords.length > 0;
 
-      // If user cleared search and no cuisine filter, reset live search results
-      if (!trimmed && !hasCuisineFilter) {
+      // If the customer cleared search and picked "All", reset live results.
+      if (!hasText && !hasCategory) {
         setFoodResults([]);
         setRestaurantResults([]);
+        setSearchError(false);
         setIsSearchingFood(false);
         return;
       }
@@ -292,73 +303,68 @@ export const HomePage: React.FC = () => {
       }
 
       setIsSearchingFood(true);
+      setSearchError(false);
 
       try {
-        // Query dishes from menu_items table in Supabase
+        // Dishes: menu item name/description OR (when a category chip is on)
+        // any of that category's real keywords. Each `.or()` is its own
+        // PostgREST parameter, so text and category narrow each other down.
         let dishQuery = supabase
           .from('menu_items')
           .select('*, restaurant:restaurants(*)')
           .order('is_available', { ascending: false })
           .limit(40);
 
-        if (trimmed) {
-          // Search dish name or description in realtime
+        if (hasText) {
           dishQuery = dishQuery.or(
-            `name.ilike.%${trimmed}%,description.ilike.%${trimmed}%`
+            `name.ilike.%${safeText}%,description.ilike.%${safeText}%`
           );
         }
+        if (hasCategory) {
+          dishQuery = dishQuery.or(keywordOrFilter(['name', 'description'], keywords));
+        }
 
-        // Query restaurants from restaurants table in Supabase
+        // Kitchens: name, cuisine and area, plus the same category keywords.
         let restQuery = supabase
           .from('restaurants')
           .select('*')
           .eq('is_approved', true)
           .order('is_open', { ascending: false })
+          .order('rating', { ascending: false })
           .limit(20);
 
-        if (trimmed) {
+        if (hasText) {
           restQuery = restQuery.or(
-            `name.ilike.%${trimmed}%,cuisine_type.ilike.%${trimmed}%,address.ilike.%${trimmed}%`
+            `name.ilike.%${safeText}%,cuisine_type.ilike.%${safeText}%,address.ilike.%${safeText}%`
           );
         }
-
-        if (hasCuisineFilter) {
-          const selectedObj = GHANA_CUISINES.find((c) => c.name === cuisineName);
-          const keyword = selectedObj?.keyword || cuisineName.split(' ')[0];
-          restQuery = restQuery.ilike('cuisine_type', `%${keyword}%`);
-
-          // If no text query, filter dishes matching this cuisine category
-          if (!trimmed && keyword) {
-            dishQuery = dishQuery.or(`name.ilike.%${keyword}%,description.ilike.%${keyword}%`);
-          }
+        if (hasCategory) {
+          restQuery = restQuery.or(
+            keywordOrFilter(['name', 'cuisine_type', 'description'], keywords)
+          );
         }
 
         const [dishesRes, restRes] = await Promise.all([dishQuery, restQuery]);
 
-        if (dishesRes.data) {
-          // Filter to dishes from approved restaurants and assign restaurant fallback if needed
-          const processedDishes: SearchMenuItem[] = [];
-          for (const item of dishesRes.data as SearchMenuItem[]) {
-            const rest = item.restaurant || restaurantsMap[item.restaurant_id];
-            if (!rest || rest.is_approved) {
-              processedDishes.push({
-                ...item,
-                restaurant: rest,
-              });
-            }
-          }
-          setFoodResults(processedDishes);
-        } else {
-          setFoodResults([]);
-        }
+        if (dishesRes.error || restRes.error) throw dishesRes.error || restRes.error;
 
-        if (restRes.data) {
-          setRestaurantResults(restRes.data as Restaurant[]);
-        } else {
-          setRestaurantResults([]);
+        // Only dishes that belong to an approved kitchen are orderable here,
+        // so anything without its kitchen is left out instead of shown as a
+        // card the cart would reject.
+        const processedDishes: SearchMenuItem[] = [];
+        for (const item of (dishesRes.data || []) as SearchMenuItem[]) {
+          const rest = item.restaurant || restaurantsMap[item.restaurant_id];
+          if (rest && rest.is_approved) {
+            processedDishes.push({ ...item, restaurant: rest });
+          }
         }
+        setFoodResults(processedDishes);
+        setRestaurantResults((restRes.data as Restaurant[]) || []);
       } catch {
-        // Handled gracefully
+        // A failed query shows a retry in the results view — never fake rows.
+        setFoodResults([]);
+        setRestaurantResults([]);
+        setSearchError(true);
       } finally {
         setIsSearchingFood(false);
       }
@@ -394,15 +400,12 @@ export const HomePage: React.FC = () => {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'menu_items' },
         (payload) => {
-          setRealtimePulse(true);
-          setTimeout(() => setRealtimePulse(false), 2000);
-
           if (payload.eventType === 'INSERT') {
-            setRealtimeNotice('⚡ Realtime: New dish added by partner kitchen!');
+            setRealtimeNotice('A partner kitchen just added a new dish.');
           } else if (payload.eventType === 'UPDATE') {
-            setRealtimeNotice('⚡ Realtime: Dish details/availability updated!');
+            setRealtimeNotice('A kitchen just updated its menu.');
           } else {
-            setRealtimeNotice('⚡ Realtime: Kitchen menu updated!');
+            setRealtimeNotice('A kitchen menu has just changed.');
           }
           setTimeout(() => setRealtimeNotice(null), 3500);
 
@@ -415,11 +418,8 @@ export const HomePage: React.FC = () => {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'restaurants' },
         (payload) => {
-          setRealtimePulse(true);
-          setTimeout(() => setRealtimePulse(false), 2000);
-
           if (payload.eventType === 'UPDATE') {
-            setRealtimeNotice('⚡ Realtime: Restaurant status updated live!');
+            setRealtimeNotice('A kitchen just updated its opening status.');
             setTimeout(() => setRealtimeNotice(null), 3500);
           }
 
@@ -513,7 +513,7 @@ export const HomePage: React.FC = () => {
           if (!playCustomerStatusAlert(next.status)) return;
 
           setRealtimeNotice(
-            HOME_STATUS_TOASTS[next.status] ?? '🔔 Realtime: Your order status just changed!'
+            HOME_STATUS_TOASTS[next.status] ?? 'Your order status just changed.'
           );
           setTimeout(() => setRealtimeNotice(null), 6000);
         }
@@ -533,12 +533,12 @@ export const HomePage: React.FC = () => {
 
     const rest = dish.restaurant || restaurantsMap[dish.restaurant_id];
     if (!rest) {
-      alert('Restaurant details are loading. Please try again.');
+      showNotice('This kitchen is still loading — try again in a moment.');
       return;
     }
 
     if (!dish.is_available) {
-      alert(`"${dish.name}" is currently sold out at this kitchen.`);
+      showNotice(`${dish.name} is sold out at this kitchen right now.`);
       return;
     }
 
@@ -638,191 +638,201 @@ export const HomePage: React.FC = () => {
     }
   }, [isLoading, startLiveLocation]);
 
-  // Determine active search state
-  const isSearchActive = Boolean(searchQuery.trim() || selectedCuisine !== 'All');
+  // Delivery "from" fee — the platform's real base fee from platform_settings,
+  // fetched once per session and reused by every kitchen card.
+  useEffect(() => {
+    let cancelled = false;
+    void getPlatformPricing().then((settings) => {
+      if (!cancelled && typeof settings.base_fee === 'number') {
+        setDeliveryFrom(settings.base_fee);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  // Filter regular restaurants when no search is active
-  const filteredHomeRestaurants = restaurants.filter((r) => {
-    if (selectedCuisine === 'All') return true;
-    return r.cuisine_type.toLowerCase().includes(selectedCuisine.toLowerCase());
-  });
+  /* ------------------------------------------------------------------
+     Which data is on screen:
+     · a typed query owns the results view (dishes + kitchens)
+     · a category chip narrows the home feed itself
+     · neither → the normal fresh-dishes / kitchens feed
+     ------------------------------------------------------------------ */
+  const hasTextQuery = Boolean(searchQuery.trim());
+  const hasCategoryFilter = selectedCuisine !== ALL_CATEGORIES;
+  const isSearchActive = hasTextQuery;
+  const isCategoryFeed = !hasTextQuery && hasCategoryFilter;
 
-  const openCount = restaurants.filter((r) => r.is_open).length;
+  const feedDishes: SearchMenuItem[] = isCategoryFeed ? foodResults : freshDishes;
+  const feedRestaurants: Restaurant[] = isCategoryFeed ? restaurantResults : restaurants;
+  const feedDishesLoading = isCategoryFeed ? isSearchingFood : isLoadingDishes;
+  const feedRestaurantsLoading = isCategoryFeed ? isSearchingFood : isLoading;
+  const feedDishesError = isCategoryFeed ? searchError : dishesError;
+  const feedRestaurantsError = isCategoryFeed ? searchError : restaurantsError;
+
+  /** The saved place, without the live-tracking emoji prefix. */
+  const displayLocation = locationName.replace(/^📍\s*/, '').trim();
+
+  /** "12 dishes" / "1 dish" — never "1 Dishes". */
+  const dishCountLabel =
+    `${feedDishes.length} ${feedDishes.length === 1 ? 'dish' : 'dishes'}`;
+  const restaurantCountLabel =
+    `${feedRestaurants.length} ${feedRestaurants.length === 1 ? 'Restaurant' : 'Restaurants'}`;
 
   return (
-    <div className="min-h-screen pb-24 md:pb-12 bg-slate-50">
-      
-      {/* Realtime Sync Flash Toast */}
+    <div className="min-h-screen bg-canvas pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-12">
+      {/* Live sync notice (kitchen menu changed while browsing) */}
       {realtimeNotice && (
-        <div className="fixed top-18 right-4 z-50 bg-slate-900/95 text-white text-xs font-bold px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-2.5 border border-emerald-500/40 backdrop-blur-md animate-in fade-in slide-in-from-top-3">
-          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
-          <span>{realtimeNotice}</span>
+        <div
+          role="status"
+          className="fixed inset-x-3 top-3 z-50 animate-sg-in rounded-xl border border-slate-700 bg-slate-900/95 px-4 py-2.5 text-xs font-semibold text-white shadow-lg sm:inset-x-auto sm:right-4 sm:max-w-sm"
+        >
+          <span className="flex items-center gap-2">
+            <span className="h-2 w-2 flex-shrink-0 rounded-full bg-brand" aria-hidden="true" />
+            <span>{realtimeNotice}</span>
+          </span>
         </div>
       )}
 
-      {/* Added to Cart Feedback Toast */}
+      {/* Added-to-cart confirmation */}
       {addedToast && (
-        <div className="fixed top-18 left-1/2 -translate-x-1/2 z-50 bg-emerald-600 text-white text-xs sm:text-sm font-black px-5 py-3 rounded-2xl shadow-2xl flex items-center gap-2 border border-emerald-400 shadow-emerald-600/30 animate-in fade-in slide-in-from-top-4">
-          <Check className="w-4 h-4 stroke-[3]" />
-          <span>{addedToast}</span>
+        <div
+          role="status"
+          className="fixed inset-x-3 top-3 z-50 animate-sg-in rounded-xl bg-brand-deep px-4 py-2.5 text-xs font-semibold text-white shadow-lg sm:inset-x-auto sm:left-1/2 sm:max-w-sm sm:-translate-x-1/2"
+        >
+          <span className="flex items-center justify-center gap-2">
+            <Check className="h-4 w-4 flex-shrink-0" aria-hidden="true" />
+            <span>{addedToast}</span>
+          </span>
         </div>
       )}
 
-      {/* Top Mobile Location Header with Native App Feel */}
-      <div className="bg-white border-b border-slate-200/80 px-4 py-2.5 sticky top-0 z-30 shadow-xs">
-        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
-          {/* Location Selector Pill */}
-          <button
-            onClick={() => setShowLocationModal(true)}
-            className="flex items-center gap-2 text-left min-w-0 flex-1 hover:opacity-80 active:scale-[0.99] transition"
-          >
-            <div className="w-8 h-8 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center flex-shrink-0">
-              <MapPin className="w-4 h-4" />
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700">
-                  Deliver To
-                </span>
-                <span className="text-[9px] text-slate-400">▼</span>
-              </div>
-              <span
-                className={`text-xs font-extrabold truncate block ${
-                  locationName ? 'text-slate-800' : 'text-slate-400'
-                }`}
-              >
-                {locationName || 'Choose your location'}
-              </span>
-              {isUsingDeviceLocation && liveLocation.isWatching && (
-                <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-wider text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded mt-0.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  Live location
-                </span>
-              )}
-            </div>
-          </button>
+      {/* ---------------------------- Delivery location ---------------------------- */}
+      <div className="border-b border-slate-200/70 bg-white">
+        <button
+          type="button"
+          onClick={() => setShowLocationModal(true)}
+          aria-label="Change delivery location"
+          className="mx-auto flex w-full max-w-7xl items-center gap-2.5 px-4 py-2.5 text-left transition active:bg-slate-50 sm:px-6 lg:px-8"
+        >
+          <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-emerald-50 text-brand-dark">
+            <MapPin className="h-4 w-4" aria-hidden="true" />
+          </span>
 
-          {/* Realtime Live Pulse & Install Indicator */}
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <div
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border transition-colors ${
-                realtimePulse
-                  ? 'bg-emerald-500 text-white border-emerald-400'
-                  : 'bg-emerald-50 text-emerald-700 border-emerald-200/60'
+          <span className="min-w-0 flex-1">
+            <span className="block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">
+              Deliver to
+            </span>
+            <span
+              className={`block truncate text-[13px] font-semibold ${
+                locationName ? 'text-slate-900' : 'text-slate-400'
               }`}
-              title="Realtime Supabase sync connected"
             >
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span className="hidden sm:inline">
-                {isSupabaseConfigured ? 'Realtime Connected' : 'Ready'}
-              </span>
-              <span className="sm:hidden">{openCount} Live</span>
-            </div>
-            <PWAInstallButton />
-          </div>
-        </div>
+              {displayLocation || 'Choose your location'}
+            </span>
+          </span>
+
+          {isUsingDeviceLocation && liveLocation.isWatching && (
+            <span className="hidden flex-shrink-0 items-center gap-1.5 rounded-lg bg-emerald-50 px-2 py-1 text-[10px] font-bold text-brand-dark sm:inline-flex">
+              <span className="h-1.5 w-1.5 rounded-full bg-brand" aria-hidden="true" />
+              Live location
+            </span>
+          )}
+
+          <span className="flex flex-shrink-0 items-center gap-0.5 text-xs font-bold text-brand-dark">
+            Change
+            <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+          </span>
+        </button>
       </div>
 
-      {/* Ongoing Active Order Alert (if any) */}
+            {/* --------------------------- Order in progress --------------------------- */}
       {activeOrders.length > 0 && (
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-3">
-          <div
+        <div className="mx-auto max-w-7xl px-4 pt-3 sm:px-6 lg:px-8">
+          <button
+            type="button"
             onClick={() => navigate(`/orders/${activeOrders[0].id}`)}
-            className="p-3.5 sm:p-4 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-700 text-white shadow-lg shadow-emerald-600/20 flex items-center justify-between cursor-pointer hover:opacity-95 active:scale-[0.99] transition"
+            className="flex w-full items-center gap-3 rounded-2xl border border-emerald-200/80 bg-emerald-50 px-3.5 py-3 text-left transition hover:bg-emerald-100/70 active:scale-[0.99]"
           >
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center animate-pulse">
-                <Bike className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <span className="text-[10px] uppercase font-black tracking-wider text-amber-300">
-                  Live Active Order · Track Now
-                </span>
-                <h4 className="text-xs sm:text-sm font-bold">
-                  Order #{activeOrders[0].order_number}: {activeOrders[0].status.replace(/_/g, ' ')}
-                </h4>
-              </div>
-            </div>
-            <div className="flex items-center gap-1 text-xs font-extrabold bg-white text-emerald-800 px-3 py-1.5 rounded-xl shadow-xs">
-              <span>View Map</span>
-              <ChevronRight className="w-4 h-4" />
-            </div>
-          </div>
+            <span className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-brand text-white">
+              <Bike className="h-4 w-4" aria-hidden="true" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.08em] text-brand-dark">
+                <span className="h-1.5 w-1.5 rounded-full bg-brand" aria-hidden="true" />
+                Order in progress
+              </span>
+              <span className="mt-0.5 block truncate text-[13px] font-semibold text-slate-900">
+                #{activeOrders[0].order_number} · {humanizeStatus(activeOrders[0].status)} ·{' '}
+                {formatGHS(activeOrders[0].total_amount)}
+              </span>
+            </span>
+            <span className="flex flex-shrink-0 items-center gap-1 text-xs font-bold text-brand-dark">
+              Track
+              <ChevronRight className="h-4 w-4" aria-hidden="true" />
+            </span>
+          </button>
         </div>
       )}
 
-      {/* Mobile-First Hero Banner with Realtime Food Search */}
-      <section className="relative overflow-hidden bg-gradient-to-br from-emerald-800 via-emerald-900 to-slate-950 text-white pt-6 pb-10 px-4 sm:px-6 lg:px-8 shadow-inner">
-        <div className="max-w-4xl mx-auto text-center space-y-3">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-[11px] font-bold border border-emerald-400/30 backdrop-blur-xs">
-            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-            <span>Fast, Fresh Ghanaian Dishes to Your Door 🇬🇭</span>
-          </div>
-
-          <h1 className="text-xl sm:text-3xl md:text-4xl font-black tracking-tight leading-tight">
-            Order Jollof, Waakye, Banku &amp; More
-          </h1>
-          <p className="text-xs sm:text-sm text-emerald-200/80 max-w-lg mx-auto">
-            Realtime food search directly across partner Ghanaian kitchen menus and restaurants.
-          </p>
-
-          {/* Realtime Food Search Input Box with Live Clear */}
-          <div className="max-w-xl mx-auto pt-2 relative">
-            <div className="relative flex items-center">
-              <Search className="w-4 h-4 sm:w-5 sm:h-5 text-slate-400 absolute left-4 pointer-events-none" />
-              <input
-                type="text"
-                placeholder="Search food (e.g. Jollof, Waakye, Tilapia, Shawarma, Chicken)..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-11 pr-24 py-3.5 rounded-2xl bg-white text-slate-900 placeholder-slate-400 text-xs sm:text-sm font-medium shadow-xl focus:outline-none focus:ring-4 focus:ring-emerald-400/40"
-              />
-
-              <div className="absolute right-3 flex items-center gap-1.5">
-                {isSearchingFood && (
-                  <RefreshCw className="w-4 h-4 text-emerald-600 animate-spin" />
-                )}
-                {searchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSearchQuery('');
-                      setSelectedCuisine('All');
-                    }}
-                    className="p-1 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition"
-                    title="Clear search"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
+      {/* ------------------------- Hero / food discovery ------------------------- */}
+      <section className="bg-brand-deep px-4 pb-5 pt-5 text-white sm:px-6 lg:px-8">
+        <div className="mx-auto max-w-3xl">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <h1 className="text-[20px] font-bold leading-tight tracking-tight sm:text-2xl">
+                Order Jollof, Waakye, Banku &amp; More
+              </h1>
+              <p className="mt-1 text-[13px] leading-relaxed text-emerald-100/85">
+                Find fresh Ghanaian dishes from partner kitchens near you.
+              </p>
             </div>
 
-            {/* Live Backend Realtime Status Badge under search */}
-            <div className="mt-2.5 flex items-center justify-between text-[11px] text-emerald-200/80 px-1">
-              <span className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                <span>Realtime data from SamleyGo Search</span>
-              </span>
-              {isSearchActive && (
-                <span className="font-semibold text-amber-300">
-                  {foodResults.length} dishes · {restaurantResults.length} kitchens found
-                </span>
+            {/* Install affordance — renders only when the browser offers it */}
+            <div className="flex-shrink-0 pt-1">
+              <PWAInstallButton compact />
+            </div>
+          </div>
+
+          <div className="relative mt-4">
+            <span className="pointer-events-none absolute left-3.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center">
+              {isSearchingFood ? (
+                <RefreshCw className="h-4 w-4 animate-spin text-brand" aria-hidden="true" />
+              ) : (
+                <Search className="h-4 w-4 text-slate-400" aria-hidden="true" />
               )}
-            </div>
+            </span>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Search food, dishes or kitchens"
+              aria-label="Search food, dishes or kitchens"
+              className="h-12 w-full rounded-xl bg-white pl-10 pr-14 text-[13px] font-medium text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand/50"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                aria-label="Clear search"
+                className="absolute right-1.5 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 transition hover:text-slate-600"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            )}
           </div>
 
-          {/* Quick Search Chips */}
-          <div className="flex items-center justify-center flex-wrap gap-1.5 pt-1">
-            <span className="text-[11px] text-emerald-200/60 font-semibold mr-1 flex items-center gap-1">
-              <Flame className="w-3 h-3 text-amber-400" /> Popular:
+          {/* Popular searches — quiet text chips, never a wall of pills */}
+          <div className="no-scrollbar mt-3 flex items-center gap-2 overflow-x-auto pb-0.5">
+            <span className="flex-shrink-0 text-[11px] font-semibold uppercase tracking-[0.08em] text-emerald-200/70">
+              Popular
             </span>
             {QUICK_SEARCH_SUGGESTIONS.map((item) => (
               <button
                 key={item}
                 type="button"
                 onClick={() => setSearchQuery(item)}
-                className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-emerald-100 hover:text-white transition active:scale-95 border border-white/10"
+                className="h-11 flex-shrink-0 rounded-lg border border-white/10 bg-white/10 px-3 text-[11.5px] font-semibold text-emerald-50 transition hover:bg-white/15 active:scale-95"
               >
                 {item}
               </button>
@@ -831,677 +841,337 @@ export const HomePage: React.FC = () => {
         </div>
       </section>
 
-      {/* Cuisines Horizontal Snap-Scroll Filter */}
-      <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 -mt-5 relative z-10">
-        <div className="bg-white rounded-2xl shadow-md border border-slate-200/80 p-2 sm:p-2.5 overflow-x-auto no-scrollbar flex items-center gap-2">
-          {GHANA_CUISINES.map((cuisine) => {
-            const isSelected = selectedCuisine === cuisine.name;
-            return (
-              <button
-                key={cuisine.name}
-                onClick={() => {
-                  setSelectedCuisine(cuisine.name);
-                }}
-                className={`whitespace-nowrap px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 flex-shrink-0 active:scale-95 ${
-                  isSelected
-                    ? 'bg-emerald-600 text-white shadow-sm ring-2 ring-emerald-600/30'
-                    : 'bg-slate-50 text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-                }`}
-              >
-                <span>{cuisine.icon}</span>
-                <span>{cuisine.name}</span>
-              </button>
-            );
-          })}
-        </div>
-      </section>
+      {/* --------------------------- Categories (filters) --------------------------- */}
+      <CategoryScroller
+        categories={FOOD_CATEGORIES}
+        value={selectedCuisine}
+        onChange={setSelectedCuisine}
+      />
 
-      {/* =========================================================================
-          SEARCH ACTIVE VIEW (Realtime Food Dishes + Restaurants from Supabase)
-         ========================================================================= */}
       {isSearchActive ? (
-        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6 space-y-6">
-          
-          {/* Search Header Bar with Tab Switches */}
-          <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center font-bold">
-                <Search className="w-4 h-4" />
-              </div>
-              <div>
-                <h2 className="text-sm sm:text-base font-black text-slate-900">
-                  {searchQuery ? `Search results for "${searchQuery}"` : `Category: ${selectedCuisine}`}
-                </h2>
-                <div className="flex items-center gap-2 text-xs text-slate-500">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                  <span>Live query across data menu items &amp; kitchens</span>
-                </div>
-              </div>
+        /* ======================================================================
+           SEARCH RESULTS — real dishes & kitchens matching the typed query
+           ====================================================================== */
+        <main className="mx-auto max-w-7xl px-4 py-5 sm:px-6 lg:px-8">
+          <div className="flex flex-col gap-3 rounded-2xl border border-slate-200/80 bg-white p-3 shadow-card sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <h2 className="truncate text-sm font-bold text-slate-900">
+                {searchQuery.trim() ? `Results for "${searchQuery.trim()}"` : selectedCuisine}
+              </h2>
+              <p className="mt-0.5 text-[11px] text-slate-500">
+                {isSearchingFood
+                  ? 'Searching kitchens and menus…'
+                  : `${foodResults.length + restaurantResults.length} result${
+                      foodResults.length + restaurantResults.length === 1 ? '' : 's'
+                    } across dishes and kitchens`}
+              </p>
             </div>
 
-            {/* Filter Segment Tabs */}
-            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl w-full sm:w-auto text-xs font-bold">
-              <button
-                onClick={() => setSearchTab('all')}
-                className={`flex-1 sm:flex-none px-3 py-1.5 rounded-lg transition ${
-                  searchTab === 'all'
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                All ({foodResults.length + restaurantResults.length})
-              </button>
-              <button
-                onClick={() => setSearchTab('dishes')}
-                className={`flex-1 sm:flex-none px-3 py-1.5 rounded-lg transition ${
-                  searchTab === 'dishes'
-                    ? 'bg-emerald-600 text-white shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Dishes ({foodResults.length})
-              </button>
-              <button
-                onClick={() => setSearchTab('restaurants')}
-                className={`flex-1 sm:flex-none px-3 py-1.5 rounded-lg transition ${
-                  searchTab === 'restaurants'
-                    ? 'bg-emerald-600 text-white shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Kitchens ({restaurantResults.length})
-              </button>
+            <div className="flex w-full items-center gap-1 rounded-xl bg-slate-100 p-1 text-xs font-semibold sm:w-auto">
+              {(
+                [
+                  ['all', `All (${foodResults.length + restaurantResults.length})`],
+                  ['dishes', `Dishes (${foodResults.length})`],
+                  ['restaurants', `Kitchens (${restaurantResults.length})`],
+                ] as const
+              ).map(([tab, label]) => (
+                <button
+                  key={tab}
+                  type="button"
+                  aria-pressed={searchTab === tab}
+                  onClick={() => setSearchTab(tab)}
+                  className={`h-11 flex-1 whitespace-nowrap rounded-lg px-2.5 transition sm:flex-none ${
+                    searchTab === tab
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
           </div>
 
-          {/* Loading Indicator */}
-          {isSearchingFood && (
-            <div className="bg-emerald-50/70 border border-emerald-200/60 rounded-2xl p-4 flex items-center justify-center gap-2 text-xs font-bold text-emerald-800 animate-pulse">
-              <RefreshCw className="w-4 h-4 animate-spin text-emerald-600" />
-              <span>Querying live food database in realtime...</span>
+          {searchError && !isSearchingFood && (
+            <div className="mt-4">
+              <ErrorState
+                description="We could not reach SamleyGo just now. Check your connection and try again."
+                onRetry={() => executeRealtimeSearch(searchQuery, selectedCuisine)}
+              />
             </div>
           )}
 
-          {/* SECTION 1: MATCHING FOOD DISHES */}
           {(searchTab === 'all' || searchTab === 'dishes') && (
-            <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm sm:text-base font-black text-slate-900 flex items-center gap-2">
-                  <Utensils className="w-4 h-4 text-emerald-600" />
-                  <span>Matching Dishes ({foodResults.length})</span>
-                </h3>
-                {foodResults.length > 0 && (
-                  <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-lg border border-emerald-100">
-                    Live Kitchen Items
-                  </span>
-                )}
-              </div>
-
-              {foodResults.length === 0 ? (
-                <div className="bg-white rounded-2xl p-6 text-center border border-slate-200 text-slate-500 text-xs">
-                  No individual dishes matched your search. Check matching kitchens below or try another food name.
-                </div>
+            <section className="mt-5">
+              <SectionHeading
+                title="Dishes"
+                countLabel={
+                  isSearchingFood
+                    ? undefined
+                    : `${foodResults.length} ${
+                        foodResults.length === 1 ? 'dish' : 'dishes'
+                      }`
+                }
+              />
+              {isSearchingFood ? (
+                <FoodGridSkeleton />
+              ) : foodResults.length === 0 ? (
+                !searchError && (
+                  <EmptyState
+                    icon={<Utensils className="h-6 w-6" aria-hidden="true" />}
+                    title="No dishes found"
+                    description="Try another search or explore a different category."
+                  />
+                )
               ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {foodResults.map((dish) => {
-                    const rest = dish.restaurant || restaurantsMap[dish.restaurant_id];
-                    return (
-                      <div
-                        key={dish.id}
-                        className="bg-white rounded-2xl border border-slate-200/90 shadow-xs hover:shadow-md transition overflow-hidden flex flex-col justify-between group"
-                      >
-                        <div className="p-3 sm:p-4 flex gap-3.5">
-                          {/* Dish Image / Fallback Avatar */}
-                          <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-xl bg-slate-100 overflow-hidden flex-shrink-0 relative border border-slate-100">
-                            {dish.image_url ? (
-                              <img
-                                src={dish.image_url}
-                                alt={dish.name}
-                                className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                              />
-                            ) : (
-                              <div className="w-full h-full bg-gradient-to-br from-amber-500/10 via-emerald-500/10 to-teal-500/20 flex flex-col items-center justify-center text-center p-1">
-                                <span className="text-3xl select-none">
-                                  {getCuisineEmoji(dish.name, dish.description)}
-                                </span>
-                              </div>
-                            )}
-
-                            {/* Sold out tag */}
-                            {!dish.is_available && (
-                              <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center">
-                                <span className="text-[9px] font-black text-white px-1.5 py-0.5 rounded bg-rose-600">
-                                  SOLD OUT
-                                </span>
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Dish Details */}
-                          <div className="flex-1 min-w-0 flex flex-col justify-between">
-                            <div>
-                              <div className="flex items-start justify-between gap-1">
-                                <h4 className="font-extrabold text-slate-900 text-xs sm:text-sm line-clamp-1 group-hover:text-emerald-700 transition">
-                                  {dish.name}
-                                </h4>
-                              </div>
-
-                              {rest && (
-                                <Link
-                                  to={`/restaurant/${rest.id}`}
-                                  className="text-[11px] font-bold text-emerald-700 hover:underline flex items-center gap-1 mt-0.5"
-                                >
-                                  <Store className="w-3 h-3 flex-shrink-0" />
-                                  <span className="truncate">{rest.name}</span>
-                                </Link>
-                              )}
-
-                              {dish.description && (
-                                <p className="text-[11px] text-slate-500 line-clamp-2 mt-1">
-                                  {dish.description}
-                                </p>
-                              )}
-                            </div>
-
-                            <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-100">
-                              <span className="text-xs sm:text-sm font-black text-emerald-700">
-                                {formatGHS(dish.price)}
-                              </span>
-
-                              <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-semibold">
-                                <Clock className="w-3 h-3 text-slate-400" />
-                                <span>{dish.preparation_time_minutes || 20}m</span>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Card Footer Actions */}
-                        <div className="bg-slate-50 px-3 py-2 border-t border-slate-100 flex items-center justify-between gap-2">
-                          {rest ? (
-                            <Link
-                              to={`/restaurant/${rest.id}`}
-                              className="text-[11px] font-bold text-slate-600 hover:text-slate-900 flex items-center gap-1 transition"
-                            >
-                              <span>View Menu</span>
-                              <ChevronRight className="w-3 h-3" />
-                            </Link>
-                          ) : (
-                            <span className="text-[11px] text-slate-400">Ghana Kitchen</span>
-                          )}
-
-                          <button
-                            onClick={(e) => handleAddDishToCart(e, dish)}
-                            disabled={!dish.is_available}
-                            className={`px-3 py-1.5 rounded-xl text-xs font-black flex items-center gap-1 transition shadow-xs active:scale-95 ${
-                              dish.is_available
-                                ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                            }`}
-                          >
-                            <Plus className="w-3.5 h-3.5 stroke-[3]" />
-                            <span>Add</span>
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
-          )}
-
-          {/* SECTION 2: MATCHING RESTAURANTS */}
-          {(searchTab === 'all' || searchTab === 'restaurants') && (
-            <section className="space-y-3 pt-4 border-t border-slate-200/80">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm sm:text-base font-black text-slate-900 flex items-center gap-2">
-                  <Store className="w-4 h-4 text-emerald-600" />
-                  <span>Matching Kitchens &amp; Restaurants ({restaurantResults.length})</span>
-                </h3>
-              </div>
-
-              {restaurantResults.length === 0 ? (
-                <div className="bg-white rounded-2xl p-6 text-center border border-slate-200 text-slate-500 text-xs">
-                  No kitchen profiles match &quot;{searchQuery}&quot;.
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-                  {restaurantResults.map((rest) => (
-                    <Link
-                      key={rest.id}
-                      to={`/restaurant/${rest.id}`}
-                      className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200/90 shadow-xs hover:shadow-lg transition-all duration-200 overflow-hidden flex flex-col group active:scale-[0.99]"
-                    >
-                      <div className="relative h-36 sm:h-44 bg-gradient-to-br from-emerald-700 via-emerald-800 to-slate-900 overflow-hidden">
-                        {rest.cover_url ? (
-                          <img
-                            src={rest.cover_url}
-                            alt={rest.name}
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex flex-col items-center justify-center text-white/90 p-4 text-center">
-                            <div className="w-12 h-12 rounded-2xl bg-white/10 backdrop-blur-md flex items-center justify-center mb-1">
-                              <Store className="w-6 h-6 text-white" />
-                            </div>
-                            <span className="font-black text-sm tracking-tight">{rest.name}</span>
-                            <span className="text-[10px] text-emerald-200">{rest.cuisine_type}</span>
-                          </div>
-                        )}
-
-                        <div className="absolute top-3 left-3">
-                          <span
-                            className={`px-2.5 py-1 rounded-full text-[10px] font-black tracking-wide flex items-center gap-1 shadow-md ${
-                              rest.is_open
-                                ? 'bg-emerald-600 text-white'
-                                : 'bg-slate-900/90 text-slate-300 backdrop-blur-xs'
-                            }`}
-                          >
-                            <span
-                              className={`w-1.5 h-1.5 rounded-full ${
-                                rest.is_open ? 'bg-white animate-pulse' : 'bg-rose-500'
-                              }`}
-                            />
-                            {rest.is_open ? 'OPEN NOW' : 'CLOSED'}
-                          </span>
-                        </div>
-
-                        <div className="absolute top-3 right-3 bg-white/95 backdrop-blur-md px-2.5 py-1 rounded-full text-slate-900 text-xs font-black flex items-center gap-1 shadow-md">
-                          <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                          <span>{rest.rating > 0 ? rest.rating.toFixed(1) : '5.0'}</span>
-                          <span className="text-[10px] text-slate-400">({rest.total_reviews})</span>
-                        </div>
-                      </div>
-
-                      <div className="p-4 sm:p-5 flex-1 flex flex-col justify-between space-y-3">
-                        <div>
-                          <h4 className="font-black text-slate-900 text-base group-hover:text-emerald-700 transition">
-                            {rest.name}
-                          </h4>
-                          <p className="text-xs text-slate-500 line-clamp-1 mt-0.5">
-                            {rest.cuisine_type} · {rest.address}
-                          </p>
-                        </div>
-
-                        <div className="flex items-center justify-between text-xs text-slate-600 pt-2 border-t border-slate-100">
-                          <div className="flex items-center gap-1">
-                            <Clock className="w-3.5 h-3.5 text-slate-400" />
-                            <span>20–35 min</span>
-                          </div>
-                          <div className="font-bold text-emerald-700">
-                            <span>Delivery from {formatGHS(12.0)}</span>
-                          </div>
-                        </div>
-                      </div>
-                    </Link>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                  {foodResults.map((dish) => (
+                    <FoodCard key={dish.id} dish={dish} onAdd={handleAddDishToCart} />
                   ))}
                 </div>
               )}
             </section>
           )}
 
-          {/* EMPTY SEARCH STATE (ZERO MOCK DATA) */}
-          {foodResults.length === 0 && restaurantResults.length === 0 && !isSearchingFood && (
-            <div className="bg-white rounded-3xl p-8 sm:p-12 text-center border border-slate-200 shadow-xs space-y-4 max-w-lg mx-auto my-6">
-              <div className="w-16 h-16 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto">
-                <Search className="w-8 h-8" />
-              </div>
-              <h3 className="text-lg font-black text-slate-900">
-                No food or kitchens found matching &quot;{searchQuery}&quot;
-              </h3>
-              <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                Try searching for Ghanaian specialties like Jollof, Waakye, Banku, Tilapia, Kelewele, or Shawarma.
-              </p>
+          {(searchTab === 'all' || searchTab === 'restaurants') && (
+            <section className="mt-6">
+              <SectionHeading
+                title="Kitchens & Restaurants"
+                countLabel={
+                  isSearchingFood
+                    ? undefined
+                    : `${restaurantResults.length} ${
+                        restaurantResults.length === 1 ? 'Restaurant' : 'Restaurants'
+                      }`
+                }
+              />
+              {isSearchingFood ? (
+                <RestaurantGridSkeleton />
+              ) : restaurantResults.length === 0 ? (
+                !searchError && (
+                  <EmptyState
+                    icon={<Store className="h-6 w-6" aria-hidden="true" />}
+                    title="No kitchens found"
+                    description="No partner kitchen matches this search yet. Try another dish or area name."
+                  />
+                )
+              ) : (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {restaurantResults.map((rest) => (
+                    <RestaurantCard
+                      key={rest.id}
+                      restaurant={rest}
+                      deliveryFrom={deliveryFrom}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
 
-              <div className="pt-2 flex flex-wrap items-center justify-center gap-2">
-                {QUICK_SEARCH_SUGGESTIONS.slice(0, 5).map((dishName) => (
+          {!isSearchingFood && !searchError && foodResults.length === 0 && restaurantResults.length === 0 && (
+            <div className="mt-4">
+              <EmptyState
+                title={`Nothing found for "${searchQuery.trim()}"`}
+                description="Check the spelling, or clear your search to browse everything our partner kitchens are cooking today."
+                action={
                   <button
-                    key={dishName}
-                    onClick={() => setSearchQuery(dishName)}
-                    className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition"
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery('');
+                      setSelectedCuisine(ALL_CATEGORIES);
+                    }}
+                    className="h-11 rounded-xl bg-brand px-4 text-xs font-bold text-white transition hover:bg-brand-dark active:scale-95"
                   >
-                    {dishName}
+                    Clear search
                   </button>
-                ))}
-              </div>
-
-              <div className="pt-2">
-                <button
-                  onClick={() => {
-                    setSearchQuery('');
-                    setSelectedCuisine('All');
-                  }}
-                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md transition"
-                >
-                  Clear Search Filters
-                </button>
-              </div>
+                }
+              />
             </div>
           )}
         </main>
       ) : (
-        /* =========================================================================
-            NORMAL DEFAULT HOME VIEW (Browsing Approved Kitchens)
-           ========================================================================= */
-        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
-          {/* =======================================================================
-              FRESH DISHES FEED (Realtime products from partner kitchens)
-             ======================================================================= */}
-          <section className="mb-8">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="text-base sm:text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-                  <Utensils className="w-5 h-5 text-emerald-600" />
-                  <span>Fresh Dishes Near You</span>
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Live menu items added by partner kitchens — updated in realtime
-                </p>
-              </div>
-              <span className="hidden sm:inline text-xs font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-xl border border-emerald-100">
-                {freshDishes.length} Dishes
-              </span>
-            </div>
+        /* ======================================================================
+           DEFAULT HOME FEED — fresh dishes and popular kitchens near you
+           ====================================================================== */
+        <main className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <section className="pt-5">
+            <SectionHeading
+              title="Fresh Dishes Near You"
+              subtitle={
+                isCategoryFeed
+                  ? `Filtered by ${selectedCuisine}`
+                  : 'Recently added by partner kitchens'
+              }
+              countLabel={feedDishesLoading ? undefined : dishCountLabel}
+            />
 
-            {isLoadingDishes ? (
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-                {[1, 2, 3, 4].map((n) => (
-                  <div
-                    key={n}
-                    className="bg-white rounded-2xl p-3 border border-slate-200/80 shadow-xs space-y-2 animate-pulse"
-                  >
-                    <div className="h-24 sm:h-28 bg-slate-200 rounded-xl" />
-                    <div className="h-3.5 bg-slate-200 rounded w-3/4" />
-                    <div className="h-3 bg-slate-100 rounded w-1/2" />
-                  </div>
-                ))}
-              </div>
-            ) : freshDishes.length === 0 ? (
-              <div className="bg-white rounded-2xl p-6 text-center border border-slate-200 text-slate-500 text-xs">
-                No dishes published by partner kitchens yet. New menu items will appear here the moment restaurants add them.
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-                {freshDishes.map((dish) => {
-                  const rest = dish.restaurant || restaurantsMap[dish.restaurant_id];
-                  return (
-                    <div
-                      key={dish.id}
-                      className="bg-white rounded-2xl border border-slate-200/90 shadow-xs hover:shadow-md transition overflow-hidden flex flex-col group"
+            {feedDishesLoading ? (
+              <FoodGridSkeleton />
+            ) : feedDishesError && feedDishes.length === 0 ? (
+              <ErrorState
+                description="We could not load the dish feed. Check your connection and try again."
+                onRetry={() =>
+                  isCategoryFeed
+                    ? executeRealtimeSearch('', selectedCuisine)
+                    : loadFreshDishes()
+                }
+              />
+            ) : feedDishes.length === 0 ? (
+              <EmptyState
+                icon={<Utensils className="h-6 w-6" aria-hidden="true" />}
+                title={isCategoryFeed ? 'No dishes found' : 'No dishes yet'}
+                description={
+                  isCategoryFeed
+                    ? 'Try another search or explore a different category.'
+                    : 'Partner kitchens publish their menus here the moment they add them. New dishes will appear as soon as they are ready.'
+                }
+                action={
+                  isCategoryFeed ? (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedCuisine(ALL_CATEGORIES)}
+                      className="h-11 rounded-xl bg-brand px-4 text-xs font-bold text-white transition hover:bg-brand-dark active:scale-95"
                     >
-                      {/* Dish image / emoji fallback — links to the restaurant */}
-                      <Link
-                        to={`/restaurant/${dish.restaurant_id}`}
-                        className="relative block h-24 sm:h-28 bg-slate-100 overflow-hidden"
-                      >
-                        {dish.image_url ? (
-                          <img
-                            src={dish.image_url}
-                            alt={dish.name}
-                            className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                            loading="lazy"
-                          />
-                        ) : (
-                          <div className="w-full h-full bg-gradient-to-br from-amber-500/10 via-emerald-500/10 to-teal-500/20 flex items-center justify-center">
-                            <span className="text-4xl select-none">
-                              {getCuisineEmoji(dish.name, dish.description)}
-                            </span>
-                          </div>
-                        )}
-
-                        {!dish.is_available && (
-                          <div className="absolute inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center">
-                            <span className="text-[9px] font-black text-white px-1.5 py-0.5 rounded bg-rose-600">
-                              SOLD OUT
-                            </span>
-                          </div>
-                        )}
-                      </Link>
-
-                      {/* Dish info */}
-                      <div className="p-2.5 sm:p-3 flex-1 flex flex-col">
-                        <h4 className="font-extrabold text-slate-900 text-xs sm:text-sm line-clamp-1">
-                          {dish.name}
-                        </h4>
-                        {rest && (
-                          <Link
-                            to={`/restaurant/${rest.id}`}
-                            className="text-[10px] font-bold text-emerald-700 hover:underline flex items-center gap-1 mt-0.5"
-                          >
-                            <Store className="w-2.5 h-2.5 flex-shrink-0" />
-                            <span className="truncate">{rest.name}</span>
-                          </Link>
-                        )}
-
-                        <div className="flex items-center justify-between mt-2 pt-1.5 border-t border-slate-100">
-                          <span className="text-xs sm:text-sm font-black text-emerald-700">
-                            {formatGHS(dish.price)}
-                          </span>
-                          <button
-                            onClick={(e) => handleAddDishToCart(e, dish)}
-                            disabled={!dish.is_available}
-                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-black flex items-center gap-0.5 transition shadow-xs active:scale-95 ${
-                              dish.is_available
-                                ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                            }`}
-                          >
-                            <Plus className="w-3 h-3 stroke-[3]" />
-                            <span>Add</span>
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+                      Show all dishes
+                    </button>
+                  ) : undefined
+                }
+              />
+            ) : (
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                {feedDishes.map((dish) => (
+                  <FoodCard key={dish.id} dish={dish} onAdd={handleAddDishToCart} />
+                ))}
               </div>
             )}
           </section>
 
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-base sm:text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-                <span>Popular Ghanaian Kitchens</span>
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Available near {locationName || 'your area'}
-              </p>
-            </div>
-            <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-xl border border-emerald-100">
-              {filteredHomeRestaurants.length} Restaurants
-            </span>
-          </div>
+          <section className="pb-6 pt-7">
+            <SectionHeading
+              title="Popular Kitchens Near You"
+              subtitle={
+                isCategoryFeed
+                  ? `Kitchens matching ${selectedCuisine}`
+                  : 'Partner kitchens ready to cook for you'
+              }
+              countLabel={feedRestaurantsLoading ? undefined : restaurantCountLabel}
+            />
 
-          {isLoading ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-              {[1, 2, 3, 4, 5, 6].map((n) => (
-                <div
-                  key={n}
-                  className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-xs space-y-3 animate-pulse"
-                >
-                  <div className="h-36 sm:h-44 bg-slate-200 rounded-xl" />
-                  <div className="h-4 bg-slate-200 rounded w-2/3" />
-                  <div className="h-3 bg-slate-100 rounded w-1/2" />
-                </div>
-              ))}
-            </div>
-          ) : filteredHomeRestaurants.length === 0 ? (
-            /* Proper Empty State with ZERO Mock Data */
-            <div className="bg-white rounded-3xl p-8 sm:p-12 text-center border border-slate-200 shadow-xs space-y-4 max-w-lg mx-auto my-6">
-              <div className="w-16 h-16 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto">
-                <Store className="w-8 h-8" />
+            {feedRestaurantsLoading ? (
+              <RestaurantGridSkeleton />
+            ) : feedRestaurantsError && feedRestaurants.length === 0 ? (
+              <ErrorState
+                description="We could not load kitchens near you. Check your connection and try again."
+                onRetry={() =>
+                  isCategoryFeed
+                    ? executeRealtimeSearch('', selectedCuisine)
+                    : loadApprovedRestaurants()
+                }
+              />
+            ) : feedRestaurants.length === 0 ? (
+              <EmptyState
+                icon={<Store className="h-6 w-6" aria-hidden="true" />}
+                title="No kitchens found"
+                description={
+                  isCategoryFeed
+                    ? 'No partner kitchen matches this category yet. Clear the filter to see everything that is open now.'
+                    : 'Partner restaurants approved on SamleyGo will appear here the moment they join.'
+                }
+                action={
+                  isCategoryFeed ? (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedCuisine(ALL_CATEGORIES)}
+                      className="h-11 rounded-xl bg-brand px-4 text-xs font-bold text-white transition hover:bg-brand-dark active:scale-95"
+                    >
+                      Show all kitchens
+                    </button>
+                  ) : (
+                    <Link
+                      to="/restaurants"
+                      className="h-11 rounded-xl border border-slate-200 bg-white px-4 text-xs font-bold text-slate-700 transition hover:bg-slate-50"
+                    >
+                      Explore kitchens
+                    </Link>
+                  )
+                }
+              />
+            ) : (
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {feedRestaurants.map((rest) => (
+                  <RestaurantCard key={rest.id} restaurant={rest} deliveryFrom={deliveryFrom} />
+                ))}
               </div>
-              <h3 className="text-lg font-black text-slate-900">
-                No restaurants available yet.
-              </h3>
-              <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                {selectedCuisine !== 'All'
-                  ? `No restaurants match "${selectedCuisine}". Try clearing your category filter.`
-                  : 'Partner restaurants registered on SamleyGo will appear here in real time.'}
-              </p>
-
-              <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
-                {selectedCuisine !== 'All' ? (
-                  <button
-                    onClick={() => setSelectedCuisine('All')}
-                    className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition"
-                  >
-                    Clear Filter
-                  </button>
-                ) : (
-                  <Link
-                    to="/restaurant/dashboard"
-                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md transition"
-                  >
-                    Register a Kitchen
-                  </Link>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-              {filteredHomeRestaurants.map((rest) => (
-                <Link
-                  key={rest.id}
-                  to={`/restaurant/${rest.id}`}
-                  className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200/90 shadow-xs hover:shadow-lg transition-all duration-200 overflow-hidden flex flex-col group active:scale-[0.99]"
-                >
-                  {/* Restaurant Cover / Image Area */}
-                  <div className="relative h-36 sm:h-44 bg-gradient-to-br from-emerald-700 via-emerald-800 to-slate-900 overflow-hidden">
-                    {rest.cover_url ? (
-                      <img
-                        src={rest.cover_url}
-                        alt={rest.name}
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex flex-col items-center justify-center text-white/90 p-4 text-center">
-                        <div className="w-12 h-12 rounded-2xl bg-white/10 backdrop-blur-md flex items-center justify-center mb-1">
-                          <Store className="w-6 h-6 text-white" />
-                        </div>
-                        <span className="font-black text-sm tracking-tight">{rest.name}</span>
-                        <span className="text-[10px] text-emerald-200">{rest.cuisine_type}</span>
-                      </div>
-                    )}
-
-                    {/* Open / Closed Status Badge */}
-                    <div className="absolute top-3 left-3">
-                      <span
-                        className={`px-2.5 py-1 rounded-full text-[10px] font-black tracking-wide flex items-center gap-1 shadow-md ${
-                          rest.is_open
-                            ? 'bg-emerald-600 text-white'
-                            : 'bg-slate-900/90 text-slate-300 backdrop-blur-xs'
-                        }`}
-                      >
-                        <span
-                          className={`w-1.5 h-1.5 rounded-full ${
-                            rest.is_open ? 'bg-white animate-pulse' : 'bg-rose-500'
-                          }`}
-                        />
-                        {rest.is_open ? 'OPEN NOW' : 'CLOSED'}
-                      </span>
-                    </div>
-
-                    {/* Rating Badge */}
-                    <div className="absolute top-3 right-3 bg-white/95 backdrop-blur-md px-2.5 py-1 rounded-full text-slate-900 text-xs font-black flex items-center gap-1 shadow-md">
-                      <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                      <span>{rest.rating > 0 ? rest.rating.toFixed(1) : '5.0'}</span>
-                      <span className="text-[10px] text-slate-400">({rest.total_reviews})</span>
-                    </div>
-                  </div>
-
-                  {/* Details Section */}
-                  <div className="p-4 sm:p-5 flex-1 flex flex-col justify-between space-y-3">
-                    <div>
-                      <h3 className="font-black text-slate-900 text-base group-hover:text-emerald-700 transition">
-                        {rest.name}
-                      </h3>
-                      <p className="text-xs text-slate-500 line-clamp-1 mt-0.5">
-                        {rest.cuisine_type} · {rest.address}
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between text-xs text-slate-600 pt-2 border-t border-slate-100">
-                      <div className="flex items-center gap-1">
-                        <Clock className="w-3.5 h-3.5 text-slate-400" />
-                        <span>20–35 min</span>
-                      </div>
-
-                      <div className="flex items-center gap-1 font-bold text-emerald-700">
-                        <span>Delivery from {formatGHS(12.0)}</span>
-                      </div>
-                    </div>
-                  </div>
-                </Link>
-              ))}
-            </div>
-          )}
+            )}
+          </section>
         </main>
       )}
 
-      {/* Location Picker Modal / Bottom Sheet */}
+      {/* ------------------------- Delivery location sheet ------------------------- */}
       {showLocationModal && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-950/60 backdrop-blur-xs p-0 sm:p-4">
-          <div className="w-full max-w-md bg-white rounded-t-3xl sm:rounded-3xl p-6 border border-slate-200 shadow-2xl space-y-4 max-h-[85vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/50 sm:items-center sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Select delivery address"
+        >
+          <div className="max-h-[85dvh] w-full max-w-md animate-sg-pop space-y-4 overflow-y-auto rounded-t-3xl bg-white p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl sm:rounded-3xl sm:pb-5">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
-                <MapPin className="w-5 h-5 text-emerald-600" />
-                <h3 className="font-black text-slate-900 text-base">Select Delivery Address</h3>
+                <MapPin className="h-4.5 w-4.5 text-brand-dark" aria-hidden="true" />
+                <h3 className="text-[15px] font-bold text-slate-900">Delivery address</h3>
               </div>
               <button
+                type="button"
                 onClick={() => setShowLocationModal(false)}
-                className="w-8 h-8 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center hover:bg-slate-200"
+                aria-label="Close"
+                className="flex h-11 w-11 items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
               >
-                <X className="w-4 h-4" />
+                <X className="h-4.5 w-4.5" aria-hidden="true" />
               </button>
             </div>
 
-            {/* Why we are asking (shown once, no nagging afterwards) */}
-            <p className="text-[11px] text-slate-500 leading-snug">
-              {locationName
-                ? `Delivering to ${locationName}.`
+            <p className="text-xs leading-relaxed text-slate-500">
+              {displayLocation
+                ? `Delivering to ${displayLocation}. Pick a different area or use your device location.`
                 : 'Pick your area or use your current location so we only show kitchens that deliver to you.'}
             </p>
 
-            {/* GPS Auto Detect */}
             <button
+              type="button"
               onClick={handleDetectLocation}
               disabled={isDetectingLocation}
-              className="w-full py-3 px-4 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-extrabold text-xs flex items-center justify-center gap-2 transition"
+              className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-emerald-50 px-4 text-xs font-bold text-brand-dark transition hover:bg-emerald-100 active:scale-[0.99] disabled:opacity-60"
             >
-              <Navigation className="w-4 h-4" />
+              <Navigation className="h-4 w-4" aria-hidden="true" />
               <span>
                 {isDetectingLocation
-                  ? 'Acquiring GPS...'
+                  ? 'Finding your location…'
                   : isUsingDeviceLocation
-                  ? 'Tracking your location live…'
-                  : 'Use Current Device Location'}
+                  ? 'Following your location live'
+                  : 'Use current device location'}
               </span>
             </button>
 
-            {/* Inline failure copy — friendly words, never coordinates and
-                never a blocking browser alert */}
             {locationError && (
-              <div className="flex items-start gap-2 text-[11px] font-semibold text-rose-600 bg-rose-50 border border-rose-200 rounded-xl p-3">
-                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                <span className="leading-snug">{locationError}</span>
+              <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-medium leading-relaxed text-rose-600">
+                <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" aria-hidden="true" />
+                <span>{locationError}</span>
               </div>
             )}
 
-            {/* Popular Ghana Locations */}
             <div>
-              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">
-                Popular Ghana Locations
+              <span className="mb-2 block text-[11px] font-bold uppercase tracking-[0.08em] text-slate-400">
+                Popular areas
               </span>
               <div className="space-y-1">
                 {POPULAR_LOCATIONS.map((loc) => (
                   <button
                     key={loc}
+                    type="button"
                     onClick={() => {
-                      // A hand-picked area wins over the live device follow
+                      // A hand-picked area wins over the live device follow.
                       setIsUsingDeviceLocation(false);
                       persistLiveTracking(false);
                       setLocationName(loc);
@@ -1509,14 +1179,14 @@ export const HomePage: React.FC = () => {
                       setLocationError(null);
                       setShowLocationModal(false);
                     }}
-                    className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs flex items-center justify-between transition ${
+                    className={`flex h-11 w-full items-center justify-between rounded-xl px-3.5 text-left text-xs transition ${
                       locationName === loc
-                        ? 'bg-emerald-600 text-white font-bold'
-                        : 'hover:bg-slate-50 text-slate-700'
+                        ? 'bg-brand text-white font-bold'
+                        : 'text-slate-700 hover:bg-slate-50'
                     }`}
                   >
-                    <span>{loc}</span>
-                    {locationName === loc && <Check className="w-4 h-4" />}
+                    <span className="truncate">{loc}</span>
+                    {locationName === loc && <Check className="h-4 w-4 flex-shrink-0" />}
                   </button>
                 ))}
               </div>

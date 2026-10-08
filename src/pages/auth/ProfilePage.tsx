@@ -34,12 +34,12 @@ export const ProfilePage: React.FC = () => {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-canvas flex items-center justify-center p-4">
         <div className="bg-white rounded-3xl p-8 max-w-md w-full text-center border border-slate-200">
           <h2 className="text-lg font-bold text-slate-900">Sign in required</h2>
           <Link
             to="/login?redirect=/profile"
-            className="mt-4 inline-block px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold"
+            className="mt-4 inline-flex h-11 items-center rounded-xl bg-brand px-4 text-xs font-bold text-white"
           >
             Sign In
           </Link>
@@ -61,7 +61,7 @@ export const ProfilePage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen pb-28 md:pb-12 bg-slate-50">
+    <div className="min-h-screen pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-12 bg-canvas">
       <div className="max-w-xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
         
         {/* Profile Card */}
@@ -78,7 +78,7 @@ export const ProfilePage: React.FC = () => {
               <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md">
                 {role.replace(/_/g, ' ')}
               </span>
-              <h1 className="text-xl font-black text-slate-900 mt-1">
+              <h1 className="text-xl font-bold text-slate-900 mt-1">
                 {profile?.full_name || 'User Profile'}
               </h1>
               <p className="text-xs text-slate-500">{user.email}</p>
@@ -112,7 +112,7 @@ export const ProfilePage: React.FC = () => {
           {savedSuccess && (
             <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-xl flex items-center gap-2 font-semibold">
               <Check className="w-4 h-4 text-emerald-600" />
-              <span>Profile details updated in Supabase!</span>
+              <span>Profile details updated.</span>
             </div>
           )}
 
@@ -126,7 +126,7 @@ export const ProfilePage: React.FC = () => {
                   required
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
-                  className="w-full pl-10 pr-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-xs sm:text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-3.5 py-0 text-slate-900 text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 sm:text-sm"
                 />
               </div>
             </div>
@@ -140,7 +140,7 @@ export const ProfilePage: React.FC = () => {
                   placeholder="024 123 4567"
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
-                  className="w-full pl-10 pr-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-xs sm:text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-3.5 py-0 text-slate-900 text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 sm:text-sm"
                 />
               </div>
             </div>
@@ -148,7 +148,7 @@ export const ProfilePage: React.FC = () => {
             <button
               type="submit"
               disabled={isUpdating}
-              className="w-full py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs transition disabled:opacity-50"
+              className="h-11 w-full rounded-xl bg-slate-900 py-0 text-xs font-bold text-white transition hover:bg-slate-800 disabled:opacity-50"
             >
               {isUpdating ? 'Saving...' : 'Update Profile'}
             </button>

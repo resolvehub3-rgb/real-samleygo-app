@@ -38,7 +38,7 @@ export default function App() {
     <BrowserRouter>
       <AuthProvider>
         <CartProvider>
-          <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 selection:bg-emerald-500 selection:text-white">
+          <div className="flex min-h-screen flex-col bg-canvas text-slate-900 selection:bg-brand selection:text-white">
             <Navbar />
             
             <div className="flex-1">

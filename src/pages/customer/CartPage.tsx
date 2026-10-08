@@ -416,7 +416,7 @@ export const CartPage: React.FC = () => {
       if (restaurant.owner_id) {
         await supabase.from('notifications').insert({
           user_id: restaurant.owner_id,
-          title: '🔥 New Food Order Received!',
+          title: 'New order received',
           message: `Order #${orderNumber} for ${formatGHS(
             orderData.total_amount ?? grandTotal
           )} is waiting for your kitchen acceptance.`,
@@ -444,7 +444,7 @@ export const CartPage: React.FC = () => {
 
   if (items.length === 0) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-canvas flex items-center justify-center p-4">
         <div className="bg-white rounded-3xl p-8 max-w-md w-full text-center border border-slate-200 shadow-xs">
           <div className="w-16 h-16 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-4">
             <ShoppingBag className="w-8 h-8" />
@@ -465,13 +465,13 @@ export const CartPage: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen pb-28 md:pb-12 bg-slate-50">
+    <div className="min-h-screen pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-12 bg-canvas">
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         
         {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-slate-200">
           <div>
-            <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
               Order Checkout
             </h1>
             <p className="text-xs text-slate-500 mt-0.5">
@@ -480,7 +480,7 @@ export const CartPage: React.FC = () => {
           </div>
           <button
             onClick={clearCart}
-            className="flex items-center gap-1 text-xs text-rose-600 hover:text-rose-700 font-semibold p-1"
+            className="-my-1 flex h-11 items-center gap-1 rounded-lg px-2 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 hover:text-rose-700"
           >
             <Trash2 className="w-4 h-4" />
             <span>Clear Cart</span>
@@ -519,28 +519,31 @@ export const CartPage: React.FC = () => {
                       </p>
                     </div>
 
-                    <div className="flex items-center gap-2 border border-slate-200 rounded-lg p-1 bg-slate-50">
+                    <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1">
                       <button
                         type="button"
                         onClick={() => updateQuantity(item.menuItem.id, -1)}
-                        className="w-6 h-6 rounded bg-white text-slate-700 hover:bg-slate-100 flex items-center justify-center shadow-xs"
+                        aria-label={`Decrease ${item.menuItem.name} quantity`}
+                        className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-slate-700 shadow-xs transition hover:bg-slate-100 active:scale-95"
                       >
-                        <Minus className="w-3 h-3" />
+                        <Minus className="h-3.5 w-3.5" />
                       </button>
-                      <span className="text-xs font-bold w-4 text-center">{item.quantity}</span>
+                      <span className="w-6 text-center text-xs font-bold tabular-nums">{item.quantity}</span>
                       <button
                         type="button"
                         onClick={() => updateQuantity(item.menuItem.id, 1)}
-                        className="w-6 h-6 rounded bg-white text-slate-700 hover:bg-slate-100 flex items-center justify-center shadow-xs"
+                        aria-label={`Increase ${item.menuItem.name} quantity`}
+                        className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-slate-700 shadow-xs transition hover:bg-slate-100 active:scale-95"
                       >
-                        <Plus className="w-3 h-3" />
+                        <Plus className="h-3.5 w-3.5" />
                       </button>
                     </div>
 
                     <button
                       type="button"
                       onClick={() => removeItem(item.menuItem.id)}
-                      className="text-slate-400 hover:text-rose-600 p-1"
+                      aria-label={`Remove ${item.menuItem.name} from cart`}
+                      className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -560,7 +563,7 @@ export const CartPage: React.FC = () => {
                   type="button"
                   onClick={handleUseCurrentLocation}
                   disabled={isLocating}
-                  className="flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1.5 rounded-lg hover:bg-emerald-100 transition"
+                  className="-my-1 flex h-11 items-center gap-1.5 rounded-lg bg-emerald-50 px-3 text-[11px] font-bold text-emerald-700 transition hover:bg-emerald-100"
                 >
                   <Navigation className="w-3 h-3" />
                   <span>
@@ -600,30 +603,32 @@ export const CartPage: React.FC = () => {
               />
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
+                <label htmlFor="cart-phone" className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
                   <Phone className="w-3.5 h-3.5 text-emerald-600" />
                   <span>Customer Contact Phone</span>
                 </label>
                 <input
                   type="tel"
                   required
+                  id="cart-phone"
                   placeholder="024 123 4567 or 050 987 6543"
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white"
+                  className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-0 text-slate-900 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white sm:text-sm"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                <label htmlFor="cart-notes" className="block text-xs font-semibold text-slate-700 mb-1">
                   Delivery Notes / Gate Directions (Optional)
                 </label>
                 <input
                   type="text"
+                  id="cart-notes"
                   placeholder="e.g. Ring the bell at the black gate, call when arriving..."
                   value={deliveryNotes}
                   onChange={(e) => setDeliveryNotes(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white"
+                  className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-0 text-slate-900 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:bg-white sm:text-sm"
                 />
               </div>
             </div>
@@ -667,15 +672,16 @@ export const CartPage: React.FC = () => {
 
               {paymentMethod.includes('MOMO') && (
                 <div className="pt-2">
-                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  <label htmlFor="cart-momo" className="block text-[11px] font-bold text-slate-700 mb-1">
                     Mobile Money Wallet Number
                   </label>
                   <input
                     type="tel"
+                    id="cart-momo"
                     placeholder="Enter Ghana Mobile Money number"
                     value={momoNumber}
                     onChange={(e) => setMomoNumber(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-0 text-xs font-semibold focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
                   />
                   <p className="mt-1 text-[10px] text-slate-400">
                     A real-time prompt will be initiated upon order placement.
@@ -732,7 +738,7 @@ export const CartPage: React.FC = () => {
                         key={t}
                         type="button"
                         onClick={() => setTip(t)}
-                        className={`py-1.5 rounded-lg text-xs font-bold transition ${
+                        className={`h-11 rounded-lg text-xs font-bold transition ${
                           tip === t
                             ? 'bg-emerald-600 text-white shadow-xs'
                             : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
@@ -745,8 +751,8 @@ export const CartPage: React.FC = () => {
                 </div>
 
                 <div className="pt-3 border-t border-slate-100 flex justify-between items-baseline text-sm">
-                  <span className="font-black text-slate-900">Total</span>
-                  <span className="font-black text-lg text-emerald-700">
+                  <span className="font-bold text-slate-900">Total</span>
+                  <span className="font-bold text-lg text-emerald-700">
                     {formatGHS(grandTotal)}
                   </span>
                 </div>
@@ -775,7 +781,7 @@ export const CartPage: React.FC = () => {
 
               <div className="flex items-center justify-center gap-1.5 text-[10px] text-slate-400">
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                <span>Protected by Supabase Realtime &amp; Row Level Security</span>
+                <span>Encrypted checkout — your order status updates live</span>
               </div>
             </div>
           </div>

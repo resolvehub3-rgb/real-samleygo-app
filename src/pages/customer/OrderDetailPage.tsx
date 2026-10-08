@@ -205,7 +205,7 @@ export const OrderDetailPage: React.FC = () => {
                 playCustomerSound(3);
                 setSoundAlertBanner({
                   type: 'PICKED_UP',
-                  title: '🛵 Food Picked Up by Courier!',
+                  title: 'Food picked up by your courier',
                   message:
                     'Your courier has collected your food from the kitchen and is driving towards you.',
                 });
@@ -216,7 +216,7 @@ export const OrderDetailPage: React.FC = () => {
                 playCustomerArrivedAlert();
                 setSoundAlertBanner({
                   type: 'ARRIVED',
-                  title: '🛵 Courier Has Arrived!',
+                  title: 'Your courier has arrived',
                   message:
                     'Your courier is at your destination. Meet them at the drop-off point to collect your meal.',
                 });
@@ -228,7 +228,7 @@ export const OrderDetailPage: React.FC = () => {
                   playCustomerSound(3);
                   setSoundAlertBanner({
                     type: 'DELIVERED',
-                    title: '🎉 Order Delivered Safely!',
+                    title: 'Order delivered safely',
                     message: 'Your food has arrived at your destination. Enjoy your meal!',
                   });
                   setTimeout(() => setSoundAlertBanner(null), 12000);
@@ -550,7 +550,7 @@ export const OrderDetailPage: React.FC = () => {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 py-12 px-4 max-w-3xl mx-auto space-y-6">
+      <div className="min-h-screen bg-canvas py-12 px-4 max-w-3xl mx-auto space-y-6">
         <div className="h-8 bg-slate-200 rounded w-1/3 animate-pulse" />
         <div className="h-40 bg-slate-200 rounded-2xl animate-pulse" />
       </div>
@@ -559,7 +559,7 @@ export const OrderDetailPage: React.FC = () => {
 
   if (!order) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-canvas flex items-center justify-center p-4">
         <div className="bg-white rounded-3xl p-8 max-w-md w-full text-center border border-slate-200">
           <h2 className="text-lg font-bold text-slate-900">Order not found</h2>
           <Link
@@ -589,7 +589,7 @@ export const OrderDetailPage: React.FC = () => {
     newestPingAt > 0 ? Math.floor((Date.now() - newestPingAt) / 60000) : null;
 
   return (
-    <div className="min-h-screen pb-28 md:pb-12 bg-slate-50">
+    <div className="min-h-screen pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-12 bg-canvas">
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
         
         {/* Back Link & Header */}
@@ -603,7 +603,7 @@ export const OrderDetailPage: React.FC = () => {
           </Link>
 
           <span
-            className={`text-xs font-black uppercase tracking-wider px-3 py-1 rounded-xl shadow-xs ${
+            className={`text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-xl shadow-xs ${
               isDelivered
                 ? 'bg-emerald-600 text-white'
                 : isCancelled
@@ -659,7 +659,7 @@ export const OrderDetailPage: React.FC = () => {
                 <RotateCcw className="w-5 h-5" />
               </div>
               <div className="min-w-0">
-                <h3 className="text-sm font-black text-emerald-900">Your reorder is live</h3>
+                <h3 className="text-sm font-bold text-emerald-900">Your reorder is live</h3>
                 <p className="text-xs text-emerald-800/90 mt-0.5 leading-snug">
                   Order re-placed from #{reorderNote.from}. The kitchen sees it straight away —
                   the status below updates without refreshing.
@@ -689,7 +689,7 @@ export const OrderDetailPage: React.FC = () => {
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                 Order Tracking
               </span>
-              <h1 className="text-xl sm:text-2xl font-black text-slate-900">
+              <h1 className="text-xl sm:text-2xl font-bold text-slate-900">
                 Order #{order.order_number}
               </h1>
               <p className="text-xs text-slate-500 mt-0.5">
@@ -699,17 +699,17 @@ export const OrderDetailPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setShowLiveMapModal(true)}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs shadow-xs transition"
+                  className="inline-flex h-11 items-center gap-1.5 rounded-xl bg-brand px-3.5 text-xs font-bold text-white shadow-xs transition hover:bg-brand-dark active:scale-95"
                 >
                   <Navigation className="w-3.5 h-3.5" />
                   <span>Live Map</span>
                 </button>
                 {(isDelivered || isCancelled) && (
-                  <ReorderButton order={order} className="px-3.5 py-1.5 text-xs" />
+                  <ReorderButton order={order} className="inline-flex h-11 items-center rounded-xl px-3.5 text-xs" />
                 )}
                 <TestRingBellButton
                   tone="customer"
-                  className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
+                  className="h-11 px-3 rounded-xl bg-slate-100 text-xs font-bold text-slate-700 hover:bg-slate-200"
                   iconClassName="text-emerald-600"
                 />
               </div>
@@ -717,7 +717,7 @@ export const OrderDetailPage: React.FC = () => {
 
             <div className="text-left sm:text-right">
               <span className="text-xs text-slate-400 block">Total Paid</span>
-              <span className="text-xl font-black text-emerald-700">
+              <span className="text-xl font-bold text-emerald-700">
                 {formatGHS(order.total_amount)}
               </span>
               <span className="text-[10px] text-slate-400 block mt-0.5">
@@ -729,7 +729,7 @@ export const OrderDetailPage: React.FC = () => {
           {/* Stepper Progress */}
           <div className="py-2">
             <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">
-              Realtime Order Progress
+              Order Progress
             </h3>
 
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
@@ -853,7 +853,7 @@ export const OrderDetailPage: React.FC = () => {
                         <Navigation className="w-4 h-4 text-emerald-600" />
                         <span>Live Tracking</span>
                         {courierPosition && (
-                          <span className="flex items-center gap-1 text-[10px] font-black uppercase text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">
+                          <span className="flex items-center gap-1 text-[10px] font-bold uppercase text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                             Live
                           </span>
@@ -919,20 +919,20 @@ export const OrderDetailPage: React.FC = () => {
                       <div className="p-4 bg-slate-50 flex items-center justify-between text-xs text-slate-500">
                         <span className="flex items-center gap-1.5">
                           <EyeOff className="w-4 h-4 text-slate-400" />
-                          <span>Map hidden. Live delivery updates are running in realtime.</span>
+                          <span>Map hidden — live delivery updates keep coming.</span>
                         </span>
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
                             onClick={() => setShowLiveMapModal(true)}
-                            className="font-bold text-emerald-600 hover:text-emerald-700"
+                            className="inline-flex h-11 items-center rounded-lg px-1 font-bold text-emerald-600 hover:text-emerald-700"
                           >
                             Open Live Map
                           </button>
                           <button
                             type="button"
                             onClick={() => setIsInlineMapHidden(false)}
-                            className="font-bold text-slate-700 hover:text-slate-900 underline"
+                            className="inline-flex h-11 items-center rounded-lg px-1 font-bold text-slate-700 underline hover:text-slate-900"
                           >
                             Show Map
                           </button>
@@ -990,7 +990,7 @@ export const OrderDetailPage: React.FC = () => {
                   <span>{formatGHS(order.tip)}</span>
                 </div>
               )}
-              <div className="flex justify-between font-black text-sm text-slate-900 pt-1.5 border-t border-slate-100">
+              <div className="flex justify-between font-bold text-sm text-slate-900 pt-1.5 border-t border-slate-100">
                 <span>Total</span>
                 <span className="text-emerald-700">{formatGHS(order.total_amount)}</span>
               </div>
@@ -1056,7 +1056,7 @@ export const OrderDetailPage: React.FC = () => {
                 {/* The stored stars for the kitchen and the courier */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200">
-                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 block">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
                       Kitchen rating
                     </span>
                     <span className="text-sm font-extrabold text-slate-800 mt-1 block">
@@ -1071,7 +1071,7 @@ export const OrderDetailPage: React.FC = () => {
 
                   {order.courier_id && (
                     <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200">
-                      <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 block">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
                         Courier rating
                       </span>
                       <span className="text-sm font-extrabold text-slate-800 mt-1 block">

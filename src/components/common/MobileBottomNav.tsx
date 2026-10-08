@@ -141,76 +141,84 @@ export const MobileBottomNav: React.FC = () => {
     );
   }
 
-  // Default customer & guest mobile bottom nav: Home, Search, Orders, Cart, Profile
+  // Default customer & guest mobile bottom nav: Home, Search, Orders, Cart, Account
   return (
-    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-lg border-t border-slate-200/80 pb-safe">
-      <div className="flex items-center justify-around h-16 px-1">
+    <nav
+      className="fixed bottom-0 left-0 right-0 z-40 border-t border-slate-200/80 bg-white/95 pb-safe backdrop-blur-lg md:hidden"
+      aria-label="Primary"
+    >
+      <div className="flex h-16 items-stretch justify-around px-1">
         <NavLink
           to="/"
           end
           className={({ isActive }) =>
-            `flex flex-col items-center justify-center flex-1 py-1 transition-colors ${
-              isActive ? 'text-emerald-600 font-bold' : 'text-slate-500 hover:text-slate-800'
+            `flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 text-[10px] transition-colors ${
+              isActive ? 'font-semibold text-brand-dark' : 'font-medium text-slate-500'
             }`
           }
         >
-          <Home className="w-5 h-5 mb-0.5" />
-          <span className="text-[10px] tracking-tight">Home</span>
+          <Home className="h-5 w-5" aria-hidden="true" />
+          <span className="truncate">Home</span>
         </NavLink>
 
         <NavLink
           to="/restaurants"
           className={({ isActive }) =>
-            `flex flex-col items-center justify-center flex-1 py-1 transition-colors ${
-              isActive ? 'text-emerald-600 font-bold' : 'text-slate-500 hover:text-slate-800'
+            `flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 text-[10px] transition-colors ${
+              isActive ? 'font-semibold text-brand-dark' : 'font-medium text-slate-500'
             }`
           }
         >
-          <Compass className="w-5 h-5 mb-0.5" />
-          <span className="text-[10px] tracking-tight">Search</span>
+          <Compass className="h-5 w-5" aria-hidden="true" />
+          <span className="truncate">Search</span>
         </NavLink>
 
         <NavLink
           to="/orders"
           className={({ isActive }) =>
-            `flex flex-col items-center justify-center flex-1 py-1 transition-colors ${
-              isActive ? 'text-emerald-600 font-bold' : 'text-slate-500 hover:text-slate-800'
+            `flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 text-[10px] transition-colors ${
+              isActive ? 'font-semibold text-brand-dark' : 'font-medium text-slate-500'
             }`
           }
         >
-          <Receipt className="w-5 h-5 mb-0.5" />
-          <span className="text-[10px] tracking-tight">Orders</span>
+          <Receipt className="h-5 w-5" aria-hidden="true" />
+          <span className="truncate">Orders</span>
         </NavLink>
 
         <NavLink
           to="/cart"
           className={({ isActive }) =>
-            `flex flex-col items-center justify-center flex-1 py-1 relative transition-colors ${
-              isActive ? 'text-emerald-600 font-bold' : 'text-slate-500 hover:text-slate-800'
+            `flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 text-[10px] transition-colors ${
+              isActive ? 'font-semibold text-brand-dark' : 'font-medium text-slate-500'
             }`
           }
+          aria-label={
+            totalCount > 0
+              ? `Cart, ${totalCount} item${totalCount === 1 ? '' : 's'}`
+              : 'Cart'
+          }
         >
-          <div className="relative">
-            <ShoppingBag className="w-5 h-5 mb-0.5" />
+          <span className="relative">
+            <ShoppingBag className="h-5 w-5" aria-hidden="true" />
             {totalCount > 0 && (
-              <span className="absolute -top-1 -right-2 bg-emerald-600 text-white text-[9px] font-black rounded-full h-4 min-w-[16px] px-1 flex items-center justify-center">
+              <span className="absolute -right-2 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-[9px] font-bold leading-none text-white">
                 {totalCount}
               </span>
             )}
-          </div>
-          <span className="text-[10px] tracking-tight">Cart</span>
+          </span>
+          <span className="truncate">Cart</span>
         </NavLink>
 
         <NavLink
           to={user ? '/profile' : '/login'}
           className={({ isActive }) =>
-            `flex flex-col items-center justify-center flex-1 py-1 transition-colors ${
-              isActive ? 'text-emerald-600 font-bold' : 'text-slate-500 hover:text-slate-800'
+            `flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 text-[10px] transition-colors ${
+              isActive ? 'font-semibold text-brand-dark' : 'font-medium text-slate-500'
             }`
           }
         >
-          <User className="w-5 h-5 mb-0.5" />
-          <span className="text-[10px] tracking-tight">{user ? 'Account' : 'Sign In'}</span>
+          <User className="h-5 w-5" aria-hidden="true" />
+          <span className="truncate">{user ? 'Account' : 'Sign In'}</span>
         </NavLink>
       </div>
     </nav>
