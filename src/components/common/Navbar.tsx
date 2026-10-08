@@ -16,6 +16,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useCart } from '../../context/CartContext';
 import { PWAInstallButton } from './PWAInstallButton';
 import { UserAvatar } from './UserAvatar';
+import { isAuthPath } from '../../lib/roleRoutes';
 
 export const Navbar: React.FC = () => {
   const { user, profile, role, signOut, unreadCount, notifications, markNotificationAsRead } = useAuth();
@@ -31,6 +32,14 @@ export const Navbar: React.FC = () => {
   // so the public site header is suppressed there (AdminDashboard provides its
   // own section switcher, brand block and sign-out control).
   if (location.pathname.startsWith('/admin')) {
+    return null;
+  }
+
+  // Sign-in, sign-up and password recovery render their own compact
+  // application header (logo + the one alternate action). Showing the full
+  // site header here would repeat both actions and make auth feel like a
+  // page of the marketing site.
+  if (isAuthPath(location.pathname)) {
     return null;
   }
 

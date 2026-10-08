@@ -1,228 +1,179 @@
 import React, { type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowLeft, Check, type LucideIcon } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 
 /**
- * Shared chrome for the sign-in and sign-up screens.
+ * Shared chrome for the sign-in, sign-up and password-recovery screens.
  *
  * Layout contract:
- *  - `lg` and up: a true split screen — the brand/story column sits on the left
- *    and the white form card sits on the right, both inside one max-width grid.
- *  - below `lg`: the story column collapses to a compact header above the same
- *    card, so the form stays the primary focus on phones.
+ *  - one compact application header: the SamleyGo logo plus the single
+ *    alternate action for that screen ("Join" on sign-in, "Sign In" on
+ *    sign-up) — never both at once, so the header never competes with the
+ *    form's primary button;
+ *  - one centred white card holding the title, form and page footer. The form
+ *    is the visual priority on every width, from 320px phones to desktop;
+ *  - a restrained SamleyGo-green canvas (brand-deep) with a faint grid and a
+ *    single soft radial so the card reads as the interactive layer without
+ *    gradients, glow or animated decoration competing for attention.
  *
- * The whole page is painted on one dark emerald canvas with soft blurred blobs
- * (see `AuthBackdrop`) so the white card always reads as the interactive layer.
- * The fixed mobile tab bar is `h-16`, so the shell reserves `pb-24` on phones
- * to keep the footer clear of it.
+ * The site header and the signed-in bottom tab bar are suppressed on these
+ * routes (see `isAuthPath`), so authentication feels like its own screen
+ * rather than a page inside the customer shell.
  */
 
-export interface AuthFeature {
-  icon: LucideIcon;
-  title: string;
-  detail: string;
-}
+export type AuthMode = 'login' | 'register' | 'reset';
+
+/** The one alternate action shown in the header for each mode. */
+const HEADER_ACTION: Record<AuthMode, { to: string; label: string } | null> = {
+  login: { to: '/register', label: 'Join' },
+  register: { to: '/login', label: 'Sign In' },
+  reset: null,
+};
 
 interface AuthShellProps {
-  /** Small badge above the headline, e.g. "Welcome back". */
-  eyebrow: string;
-  headline: ReactNode;
-  description: string;
-  features: AuthFeature[];
-  /** Compact label shown on phones above the card (keeps the brand visible). */
-  mobileBrand: string;
-  cardTitle: string;
-  cardSubtitle: string;
+  mode: AuthMode;
+  /** Page heading — the single h1 on the screen. */
+  title: string;
+  /** One supporting sentence under the heading. */
+  subtitle: string;
   children: ReactNode;
 }
 
-/** Blurred colour blobs + faint grid that sit behind both columns. */
+/** Faint grid + one soft radial. Deliberately static and low contrast. */
 const AuthBackdrop: React.FC = () => (
   <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
-    <div className="absolute -left-40 -top-40 h-[28rem] w-[28rem] rounded-full bg-emerald-500/25 blur-3xl animate-blob" />
-    <div className="absolute -right-32 top-1/3 h-[26rem] w-[26rem] rounded-full bg-teal-500/20 blur-3xl animate-blob [animation-delay:-8s]" />
-    <div className="absolute bottom-0 left-1/4 h-[22rem] w-[22rem] rounded-full bg-orange-500/10 blur-3xl animate-blob [animation-delay:-16s]" />
     <div
-      className="absolute inset-0 opacity-[0.07]"
+      className="absolute inset-0 opacity-[0.055]"
       style={{
         backgroundImage:
           'linear-gradient(rgba(255,255,255,0.6) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.6) 1px, transparent 1px)',
-        backgroundSize: '44px 44px',
-        maskImage: 'radial-gradient(ellipse at center, black 30%, transparent 78%)',
-        WebkitMaskImage: 'radial-gradient(ellipse at center, black 30%, transparent 78%)',
+        backgroundSize: '48px 48px',
       }}
     />
+    <div className="absolute inset-x-0 top-0 h-[26rem] bg-[radial-gradient(ellipse_at_50%_-10%,rgba(5,150,105,0.28),transparent_65%)]" />
   </div>
 );
 
 export const AuthShell: React.FC<AuthShellProps> = ({
-  eyebrow,
-  headline,
-  description,
-  features,
-  mobileBrand,
-  cardTitle,
-  cardSubtitle,
+  mode,
+  title,
+  subtitle,
   children,
-}) => (
-  <div className="relative min-h-[calc(100vh-4rem)] bg-[#04140e] text-white overflow-hidden">
-    <AuthBackdrop />
+}) => {
+  const action = HEADER_ACTION[mode];
 
-    {/* The grid carries the viewport min-height (not just the outer wrapper)
-        so both columns stretch full height and centre their content. */}
-    <div className="relative mx-auto grid min-h-[calc(100vh-4rem)] w-full max-w-6xl grid-cols-1 gap-8 px-4 pb-24 pt-6 sm:px-6 lg:grid-cols-[1.05fr_1fr] lg:gap-14 lg:px-8 lg:pb-16 lg:pt-12">
-      {/* ── Left · brand / story column ─────────────────────────────── */}
-      <div className="flex flex-col justify-center animate-fade-up">
-        {/* Top bar: back link + live badge (only on the story column) */}
-        <div className="mb-8 flex items-center justify-between lg:mb-12">
+  return (
+    <div className="relative flex min-h-screen flex-col bg-brand-deep text-white">
+      <AuthBackdrop />
+
+      {/* ── Compact application header ─────────────────────────────── */}
+      <header className="relative z-10 border-b border-white/10">
+        <div className="mx-auto flex h-16 w-full max-w-5xl items-center justify-between gap-4 px-4 sm:px-6">
           <Link
             to="/"
-            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-white/10 text-white backdrop-blur-sm transition hover:bg-white/20 active:scale-95"
-            aria-label="Back to home"
+            className="flex h-11 items-center gap-2.5"
+            aria-label="SamleyGo home"
           >
-            <ArrowLeft className="h-5 w-5" />
+            <span className="h-9 w-9 shrink-0 overflow-hidden rounded-xl bg-white ring-1 ring-white/15 shadow-sm">
+              <img src="/logo-mark.png" alt="" className="h-full w-full object-cover" />
+            </span>
+            <span className="text-lg font-extrabold leading-none tracking-tight text-white sm:text-xl">
+              Samley<span className="text-accent">Go</span>
+            </span>
           </Link>
-          <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1.5 text-[11px] font-bold text-emerald-300">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-            Live across Ghana
-          </span>
+
+          {action && (
+            <Link
+              to={action.to}
+              className="inline-flex h-10 items-center rounded-xl bg-white px-4 text-sm font-bold text-brand-deep shadow-sm transition hover:bg-emerald-50 active:scale-[0.98]"
+            >
+              {action.label}
+            </Link>
+          )}
         </div>
+      </header>
 
-        {/* Mobile: condensed brand block */}
-        <div className="mb-6 flex items-center gap-3 lg:hidden">
-          <span className="h-11 w-11 shrink-0 overflow-hidden rounded-2xl bg-white ring-1 ring-white/20 shadow-lg">
-            <img src="/logo-mark.png" alt="" className="h-full w-full object-cover" />
-          </span>
-          <span className="text-lg font-extrabold tracking-tight">
-            Samley<span className="text-orange-400">Go</span>
-          </span>
-          <span className="ml-auto rounded-full bg-white/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-300">
-            {mobileBrand}
-          </span>
-        </div>
-
-        {/* Desktop: full story */}
-        <div className="hidden lg:block">
-          <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3.5 py-1.5 text-[11px] font-bold uppercase tracking-[0.14em] text-emerald-300">
-            {eyebrow}
-          </span>
-          <h1 className="mt-5 text-4xl font-black leading-[1.08] tracking-tight xl:text-[2.75rem]">
-            {headline}
-          </h1>
-          <p className="mt-4 max-w-md text-[15px] leading-relaxed text-emerald-100/70">
-            {description}
-          </p>
-
-          <ul className="mt-8 space-y-4">
-            {features.map((feature) => (
-              <li key={feature.title} className="flex items-start gap-3.5">
-                <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/25">
-                  <feature.icon className="h-4 w-4" />
-                </span>
-                <span>
-                  <span className="block text-sm font-bold text-white">{feature.title}</span>
-                  <span className="block text-[13px] leading-snug text-emerald-100/60">
-                    {feature.detail}
-                  </span>
-                </span>
-              </li>
-            ))}
-          </ul>
-
-          <div className="mt-9 flex items-center gap-2 text-[11px] font-semibold text-emerald-100/50">
-            <Check className="h-3.5 w-3.5 text-emerald-400" />
-            No delivery fees hidden · Cancel anytime · 24/7 human support
-          </div>
-        </div>
-
-        {/* Mobile: one-line promise + compact feature chips instead of the
-            full story block, so phones still get the value props without a
-            wall of text pushing the form down. */}
-        <div className="lg:hidden">
-          <p className="text-sm leading-relaxed text-emerald-100/70">{description}</p>
-          <ul className="mt-4 flex flex-wrap gap-2">
-            {features.map((feature) => (
-              <li
-                key={feature.title}
-                className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] font-semibold text-emerald-100/80 backdrop-blur-sm"
-              >
-                <feature.icon className="h-3.5 w-3.5 text-emerald-300" />
-                {feature.title}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-
-      {/* ── Right · form card ───────────────────────────────────────── */}
-      <div className="flex items-center justify-center animate-fade-up [animation-delay:120ms]">
-        <div className="w-full max-w-md rounded-3xl border border-white/10 bg-white p-5 text-slate-900 shadow-[0_30px_70px_-30px_rgba(0,0,0,0.85)] sm:p-7 lg:max-w-lg lg:p-8">
-          <div className="mb-6 text-center">
-            <h2 className="text-xl font-black tracking-tight text-slate-900 sm:text-2xl">
-              {cardTitle}
-            </h2>
-            <p className="mt-1.5 text-[13px] text-slate-500">{cardSubtitle}</p>
+      {/* ── Form card ──────────────────────────────────────────────── */}
+      <main className="relative z-10 flex flex-1 items-center justify-center px-4 py-8 sm:px-6 sm:py-12">
+        <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 text-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_18px_44px_-26px_rgba(2,71,45,0.55)] sm:p-8 animate-sg-in">
+          <div className="mb-6">
+            <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
+              {title}
+            </h1>
+            <p className="mt-1.5 text-sm leading-relaxed text-slate-500">{subtitle}</p>
           </div>
 
           {children}
         </div>
-      </div>
+      </main>
+
+      {/* ── Footer ─────────────────────────────────────────────────── */}
+      <footer className="relative z-10 px-4 pb-6 text-center sm:pb-8">
+        <p className="text-[11px] font-medium text-emerald-100/70">
+          SamleyGo Ghana · Fast, reliable delivery
+        </p>
+        <nav
+          aria-label="Legal and support"
+          className="mt-1 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] font-semibold text-emerald-100/70"
+        >
+          {['Terms', 'Privacy', 'Support'].map((item) => (
+            <Link
+              key={item}
+              to={`/${item.toLowerCase()}`}
+              className="inline-flex min-h-6 items-center px-1 transition hover:text-white"
+            >
+              {item}
+            </Link>
+          ))}
+        </nav>
+      </footer>
     </div>
+  );
+};
+
+/** Form-level error banner — one implementation shared by all auth screens. */
+export const AuthAlert: React.FC<{ children: ReactNode }> = ({ children }) => (
+  <div
+    role="alert"
+    className="mb-4 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-3 text-xs font-semibold leading-relaxed text-rose-700"
+  >
+    <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-rose-500" />
+    <span>{children}</span>
   </div>
 );
 
-/**
- * Sign In / Create Account segmented control shared by both auth screens.
- * The active side is a solid emerald pill so the current mode is obvious at
- * a glance without relying on colour alone (the active item also switches to
- * `font-extrabold`).
- */
-export const AuthTabs: React.FC<{
-  active: 'login' | 'register';
-}> = ({ active }) => (
-  <div className="mb-5 grid grid-cols-2 gap-1 rounded-2xl border border-slate-200 bg-slate-100 p-1">
-    <Link
-      to="/login"
-      className={`rounded-xl py-2.5 text-center text-xs transition ${
-        active === 'login'
-          ? 'bg-emerald-600 font-extrabold text-white shadow-sm'
-          : 'font-semibold text-slate-600 hover:text-slate-900'
-      }`}
-    >
-      Sign In
-    </Link>
-    <Link
-      to="/register"
-      className={`rounded-xl py-2.5 text-center text-xs transition ${
-        active === 'register'
-          ? 'bg-emerald-600 font-extrabold text-white shadow-sm'
-          : 'font-semibold text-slate-600 hover:text-slate-900'
-      }`}
-    >
-      Create Account
-    </Link>
-  </div>
-);
-
-/** Standard field chrome: bold label + helper slot underneath. */
-export const FieldLabel: React.FC<{ children: ReactNode; hint?: ReactNode }> = ({
-  children,
-  hint,
-}) => (
+/** Field chrome: a real `<label>` wired to its input, with an optional hint. */
+export const FieldLabel: React.FC<{
+  children: ReactNode;
+  htmlFor?: string;
+  hint?: ReactNode;
+}> = ({ children, htmlFor, hint }) => (
   <div className="mb-1.5 flex items-center justify-between gap-3">
-    <span className="block text-xs font-bold text-slate-700">{children}</span>
+    <label htmlFor={htmlFor} className="block text-xs font-bold text-slate-700">
+      {children}
+    </label>
     {hint}
   </div>
 );
 
-/** Input base classes — light theme, matches the white card. */
-export const INPUT_CLASS =
-  'w-full rounded-xl border border-slate-200 bg-slate-50 py-3 pl-11 pr-4 text-sm text-slate-900 placeholder-slate-400 transition focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-4 focus:ring-emerald-500/15';
+/** One field height (48px) and one focus treatment across every auth input. */
+const INPUT_BASE =
+  'h-12 w-full rounded-xl border border-slate-300 bg-slate-50 text-sm text-slate-900 placeholder-slate-400 transition focus:border-brand focus:bg-white focus:outline-none focus:ring-4 focus:ring-brand/15 disabled:cursor-not-allowed disabled:opacity-60';
 
-/**
- * Same as `INPUT_CLASS` but with room for an in-field action (eye toggle).
- * Built from the pieces rather than appending `pr-11`, otherwise the two
- * padding-right utilities fight and whichever Tailwind emits last wins.
- */
-export const INPUT_ACTION_CLASS =
-  'w-full rounded-xl border border-slate-200 bg-slate-50 py-3 pl-11 pr-11 text-sm text-slate-900 placeholder-slate-400 transition focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-4 focus:ring-emerald-500/15';
+/** Input with a leading icon. */
+export const INPUT_CLASS = `${INPUT_BASE} pl-11 pr-4`;
+
+/** Input with a leading icon and a trailing in-field action (eye toggle). */
+export const INPUT_ACTION_CLASS = `${INPUT_BASE} pl-11 pr-12`;
+
+/** Input without a leading icon (select, prefixed phone field). */
+export const INPUT_PLAIN_CLASS = `${INPUT_BASE} px-3.5`;
+
+/** Primary auth CTA — normal, hover, pressed, disabled and loading states. */
+export const AUTH_SUBMIT_CLASS =
+  'flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-brand px-4 text-sm font-bold text-white shadow-sm transition hover:bg-brand-dark active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60';
+
+/** Text link used inside auth cards (hints, back navigation). Sized to clear
+ *  the 24px WCAG target minimum without disturbing the row it sits in. */
+export const AUTH_LINK_CLASS =
+  'inline-flex min-h-6 items-center px-1 text-xs font-bold text-brand transition hover:text-brand-dark hover:underline';

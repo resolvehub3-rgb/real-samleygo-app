@@ -45,6 +45,19 @@ export const canRoleAccessPath = (role: UserRole | null | undefined, pathname: s
 };
 
 /**
+ * The authentication screens: sign-in, sign-up and password recovery.
+ *
+ * Each renders its own compact application header (logo + the one alternate
+ * action), so the site header and the signed-in bottom tab bar are suppressed
+ * on these routes rather than duplicating it. Authentication should feel
+ * separate from the customer app shell.
+ */
+export const isAuthPath = (pathname: string): boolean => {
+  const key = matchKey(pathname);
+  return key === '/login' || key === '/register' || key === '/forgot-password';
+};
+
+/**
  * Where a freshly signed-in user lands. An explicit `?redirect=` target wins
  * ONLY when the signed-in role is actually allowed to open it — a courier sent
  * to /login?redirect=/restaurant/dashboard must fall back to the courier

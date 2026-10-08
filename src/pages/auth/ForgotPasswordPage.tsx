@@ -1,7 +1,15 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Mail, ArrowLeft, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Mail, ArrowLeft, ArrowRight, CheckCircle2 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import {
+  AuthShell,
+  AuthAlert,
+  FieldLabel,
+  INPUT_CLASS,
+  AUTH_SUBMIT_CLASS,
+  AUTH_LINK_CLASS,
+} from '../../components/auth/AuthShell';
 
 export const ForgotPasswordPage: React.FC = () => {
   const { resetPassword } = useAuth();
@@ -26,69 +34,80 @@ export const ForgotPasswordPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-canvas flex items-center justify-center p-4">
-      <div className="max-w-md w-full bg-white rounded-3xl p-8 border border-slate-200 shadow-xl space-y-6">
-        
-        <div>
-          <Link
-            to="/login"
-            className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-slate-800 mb-4"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Back to Sign In</span>
-          </Link>
-          <h1 className="text-2xl font-black text-slate-900 tracking-tight">
-            Reset Password
-          </h1>
-          <p className="text-xs text-slate-500 mt-1">
-            Enter your email to receive a secure recovery link
+    <AuthShell
+      mode="reset"
+      title="Reset your password"
+      subtitle="Enter the email on your account and we'll send you a secure recovery link."
+    >
+      {errorMsg && <AuthAlert>{errorMsg}</AuthAlert>}
+
+      {sentSuccess ? (
+        <div
+          role="status"
+          className="rounded-xl border border-emerald-200 bg-emerald-50 p-4"
+        >
+          <div className="flex items-center gap-2 text-sm font-bold text-emerald-900">
+            <CheckCircle2 className="h-5 w-5 text-brand" aria-hidden="true" />
+            <span>Recovery link sent</span>
+          </div>
+          <p className="mt-1.5 text-xs leading-relaxed text-emerald-800">
+            Check your inbox for <span className="font-semibold">{email}</span> to reset
+            your SamleyGo password.
           </p>
+          <Link to="/login" className={`${AUTH_LINK_CLASS} mt-3`}>
+            <ArrowLeft className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+            Back to sign in
+          </Link>
         </div>
-
-        {errorMsg && (
-          <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 flex-shrink-0" />
-            <span>{errorMsg}</span>
-          </div>
-        )}
-
-        {sentSuccess ? (
-          <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs space-y-2">
-            <div className="flex items-center gap-2 font-bold text-sm">
-              <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-              <span>Password reset link sent!</span>
+      ) : (
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <FieldLabel htmlFor="reset-email">Email address</FieldLabel>
+            <div className="relative">
+              <Mail
+                className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                aria-hidden="true"
+              />
+              <input
+                id="reset-email"
+                type="email"
+                name="email"
+                autoComplete="email"
+                inputMode="email"
+                required
+                placeholder="you@domain.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className={INPUT_CLASS}
+              />
             </div>
-            <p className="text-[11px] text-emerald-800">
-              Check your inbox for <strong className="font-semibold">{email}</strong> to reset your SamleyGo password.
-            </p>
           </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Email Address</label>
-              <div className="relative">
-                <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5 pointer-events-none" />
-                <input
-                  type="email"
-                  required
-                  placeholder="name@example.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-10 pr-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 text-slate-900 text-xs sm:text-sm focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+
+          <button type="submit" disabled={isSubmitting} className={AUTH_SUBMIT_CLASS}>
+            {isSubmitting ? (
+              <>
+                <span
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                  aria-hidden="true"
                 />
-              </div>
-            </div>
+                <span>Sending link…</span>
+              </>
+            ) : (
+              <>
+                <span>Send recovery link</span>
+                <ArrowRight className="h-4 w-4" aria-hidden="true" />
+              </>
+            )}
+          </button>
 
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs shadow-md transition disabled:opacity-50"
-            >
-              {isSubmitting ? 'Sending Link...' : 'Send Recovery Link'}
-            </button>
-          </form>
-        )}
-      </div>
-    </div>
+          <p className="flex justify-center pt-1">
+            <Link to="/login" className={AUTH_LINK_CLASS}>
+              <ArrowLeft className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+              Back to sign in
+            </Link>
+          </p>
+        </form>
+      )}
+    </AuthShell>
   );
 };

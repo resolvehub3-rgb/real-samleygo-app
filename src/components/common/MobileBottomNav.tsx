@@ -3,6 +3,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { Home, Compass, ShoppingBag, Receipt, User, Bike, DollarSign } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useCart } from '../../context/CartContext';
+import { isAuthPath } from '../../lib/roleRoutes';
 
 export const MobileBottomNav: React.FC = () => {
   const { user, role } = useAuth();
@@ -13,6 +14,12 @@ export const MobileBottomNav: React.FC = () => {
   // and mobile top bar, so the customer bottom bar is suppressed there —
   // otherwise the console renders with default-user navigation over it.
   if (location.pathname.startsWith('/admin')) {
+    return null;
+  }
+
+  // Authentication screens belong to no session yet, so the signed-in tab bar
+  // is suppressed there and returns by itself after a successful sign-in.
+  if (isAuthPath(location.pathname)) {
     return null;
   }
 

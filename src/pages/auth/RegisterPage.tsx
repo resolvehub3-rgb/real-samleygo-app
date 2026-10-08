@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import {
   Mail,
   Lock,
@@ -9,7 +9,6 @@ import {
   ShoppingBag,
   Eye,
   EyeOff,
-  AlertCircle,
   ArrowRight,
   ArrowLeft,
   CheckCircle,
@@ -37,10 +36,12 @@ import {
 } from '../../lib/verification';
 import {
   AuthShell,
-  AuthTabs,
+  AuthAlert,
   FieldLabel,
   INPUT_CLASS,
   INPUT_ACTION_CLASS,
+  INPUT_PLAIN_CLASS,
+  AUTH_SUBMIT_CLASS,
 } from '../../components/auth/AuthShell';
 
 const LABEL_CLASS = 'block text-xs font-bold text-slate-700 mb-1.5';
@@ -49,53 +50,22 @@ interface RoleOption {
   role: UserRole;
   label: string;
   icon: LucideIcon;
-  /** Ring/border/background applied when this role is the active selection. */
-  selected: string;
-  /** Icon tile colours applied when selected. */
-  iconOn: string;
 }
 
+/**
+ * The three account types the sign-up flow supports. Selection styling is
+ * identical for every role (SamleyGo green): the icon and label carry the
+ * difference, so the chosen role reads as *selected* rather than *colour-coded*.
+ */
 const ROLE_OPTIONS: RoleOption[] = [
-  {
-    role: 'CUSTOMER',
-    label: 'Customer',
-    icon: ShoppingBag,
-    selected: 'border-emerald-500 bg-emerald-50 text-emerald-900 ring-2 ring-emerald-500/30',
-    iconOn: 'bg-emerald-600 text-white',
-  },
-  {
-    role: 'COURIER',
-    label: 'Courier',
-    icon: Bike,
-    selected: 'border-amber-500 bg-amber-50 text-amber-900 ring-2 ring-amber-500/30',
-    iconOn: 'bg-amber-500 text-white',
-  },
-  {
-    role: 'RESTAURANT_OWNER',
-    label: 'Kitchen',
-    icon: ChefHat,
-    selected: 'border-purple-500 bg-purple-50 text-purple-900 ring-2 ring-purple-500/30',
-    iconOn: 'bg-purple-600 text-white',
-  },
+  { role: 'CUSTOMER', label: 'Customer', icon: ShoppingBag },
+  { role: 'COURIER', label: 'Courier', icon: Bike },
+  { role: 'RESTAURANT_OWNER', label: 'Kitchen', icon: ChefHat },
 ];
 
-const REGISTER_FEATURES = [
-  {
-    icon: ShoppingBag,
-    title: 'For hungry customers',
-    detail: 'Order from your favourite kitchens and follow every delivery live.',
-  },
-  {
-    icon: Bike,
-    title: 'For couriers',
-    detail: 'Set your own hours and earn with verified, supported deliveries.',
-  },
-  {
-    icon: ChefHat,
-    title: 'For kitchens',
-    detail: 'List your menu, reach new customers and grow your food business.',
-  },
-];
+const ROLE_SELECTED_CLASS = 'border-brand bg-brand/5 text-slate-900 ring-2 ring-brand/25';
+const ROLE_ICON_ON_CLASS = 'bg-brand text-white';
+const ROLE_IDLE_CLASS = 'border-slate-200 bg-white text-slate-600 hover:border-slate-300';
 
 interface PhotoTileProps {
   label: string;
@@ -110,22 +80,22 @@ const PhotoTile: React.FC<PhotoTileProps> = ({ label, hint, preview, file, onPic
   <div>
     <span className={LABEL_CLASS}>{label}</span>
     <div
-      className={`relative overflow-hidden rounded-2xl border-2 border-dashed transition ${
+      className={`relative overflow-hidden rounded-xl border border-dashed transition ${
         file
-          ? 'border-emerald-400 bg-emerald-50'
-          : 'border-slate-300 bg-slate-50 hover:border-emerald-400 hover:bg-emerald-50/60'
+          ? 'border-brand bg-brand/5'
+          : 'border-slate-300 bg-slate-50 hover:border-brand/60 hover:bg-brand/5'
       }`}
     >
       {preview ? (
         <div className="relative">
           <img src={preview} alt={label} className="h-36 w-full object-cover" />
-          <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-2 bg-gradient-to-t from-slate-950/95 to-transparent px-2.5 pb-2 pt-8">
-            <span className="flex items-center gap-1 text-[10px] font-extrabold text-emerald-300">
+          <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-2 bg-slate-950/85 px-2.5 py-2">
+            <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-300">
               <CheckCircle className="h-3.5 w-3.5" />
               Attached
             </span>
             <div className="flex gap-1.5">
-              <label className="cursor-pointer rounded-lg bg-white/95 px-2 py-1 text-[10px] font-bold text-slate-800 transition active:scale-95">
+              <label className="inline-flex min-h-8 cursor-pointer items-center rounded-lg bg-white px-2.5 py-1.5 text-[11px] font-bold text-slate-800 transition active:scale-95">
                 Replace
                 <input
                   type="file"
@@ -141,7 +111,7 @@ const PhotoTile: React.FC<PhotoTileProps> = ({ label, hint, preview, file, onPic
               <button
                 type="button"
                 onClick={onClear}
-                className="rounded-lg bg-rose-500 px-2 py-1 text-[10px] font-bold text-white transition active:scale-95"
+                className="inline-flex min-h-8 items-center rounded-lg bg-rose-600 px-2.5 py-1.5 text-[11px] font-bold text-white transition active:scale-95"
               >
                 Remove
               </button>
@@ -150,7 +120,7 @@ const PhotoTile: React.FC<PhotoTileProps> = ({ label, hint, preview, file, onPic
         </div>
       ) : (
         <label className="flex cursor-pointer flex-col items-center justify-center gap-1.5 px-3 py-6 text-center transition active:scale-[0.99]">
-          <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-white text-amber-500 shadow-sm ring-1 ring-slate-200">
+          <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-white text-accent shadow-sm ring-1 ring-slate-200">
             <Camera className="h-5 w-5" />
           </span>
           <span className="text-xs font-bold text-slate-700">{label}</span>
@@ -388,62 +358,37 @@ export const RegisterPage: React.FC = () => {
 
   return (
     <AuthShell
-      eyebrow="Join SamleyGo"
-      headline={
-        <>
-          Create your
-          <br />
-          account in
-          <br />
-          minutes<span className="text-orange-400">.</span>
-        </>
-      }
-      description="Order food, earn on the road, or grow your kitchen — one free account powers it all."
-      features={REGISTER_FEATURES}
-      mobileBrand="Sign up"
-      cardTitle="Create your account"
-      cardSubtitle="Order delicious food, deliver packages, or partner your kitchen"
+      mode="register"
+      title="Create your account"
+      subtitle="Order food, deliver packages, or partner your kitchen."
     >
-      <AuthTabs active="register" />
+      {errorMsg && <AuthAlert>{errorMsg}</AuthAlert>}
 
-      {errorMsg && (
-        <div
-          role="alert"
-          className="mb-4 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-3 text-xs font-semibold text-rose-700"
-        >
-          <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-rose-500" />
-          <span>{errorMsg}</span>
-        </div>
-      )}
-
-      {/* Account type selector */}
+      {/* Account type selector — the same three roles the signup API accepts */}
       <div className="mb-5">
-        <span className="mb-2 block text-xs font-bold text-slate-700">
+        <span id="role-label" className="mb-2 block text-xs font-bold text-slate-700">
           I'm joining SamleyGo as a…
         </span>
-        <div className="grid grid-cols-3 gap-2">
+        <div role="radiogroup" aria-labelledby="role-label" className="grid grid-cols-3 gap-2">
           {ROLE_OPTIONS.map((option) => {
             const isActive = role === option.role;
             return (
               <button
                 key={option.role}
                 type="button"
+                role="radio"
+                aria-checked={isActive}
                 onClick={() => selectRole(option.role)}
-                aria-pressed={isActive}
-                className={`flex flex-col items-center gap-1.5 rounded-2xl border p-3 text-center transition active:scale-95 ${
-                  isActive
-                    ? option.selected
-                    : 'border-slate-200 bg-slate-50 text-slate-500 hover:border-slate-300 hover:bg-white'
+                className={`flex min-h-[76px] flex-col items-center justify-center gap-1.5 rounded-xl border p-3 text-center transition active:scale-[0.98] ${
+                  isActive ? ROLE_SELECTED_CLASS : ROLE_IDLE_CLASS
                 }`}
               >
                 <span
-                  className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${
-                    isActive
-                      ? option.iconOn
-                      : 'bg-white text-slate-400 ring-1 ring-slate-200'
+                  className={`flex h-9 w-9 items-center justify-center rounded-lg transition ${
+                    isActive ? ROLE_ICON_ON_CLASS : 'bg-slate-100 text-slate-400'
                   }`}
                 >
-                  <option.icon className="h-4 w-4" />
+                  <option.icon className="h-4 w-4" aria-hidden="true" />
                 </span>
                 <span className="text-xs font-bold">{option.label}</span>
               </button>
@@ -454,8 +399,8 @@ export const RegisterPage: React.FC = () => {
 
       {/* Two-step stepper (courier onboarding only) */}
       {isCourier && (
-        <div className="mb-5 space-y-2.5 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-          <div className="flex items-center gap-2">
+        <div className="mb-5 space-y-2.5 rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <ol className="flex items-center gap-2">
             {[
               { id: 1 as const, label: 'Account' },
               { id: 2 as const, label: 'Verification' },
@@ -463,34 +408,47 @@ export const RegisterPage: React.FC = () => {
               const isActive = step === item.id;
               const isDone = step > item.id;
               return (
-                <div
+                <li
                   key={item.id}
-                  className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl border px-2 py-2 text-[11px] font-extrabold transition ${
+                  aria-current={isActive ? 'step' : undefined}
+                  className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-2 py-2 text-[11px] font-bold transition ${
                     isActive
-                      ? 'border-emerald-500 bg-emerald-600 text-white shadow-sm'
+                      ? 'border-brand bg-brand text-white'
                       : isDone
-                        ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                        ? 'border-brand/30 bg-brand/10 text-brand-dark'
                         : 'border-slate-200 bg-white text-slate-400'
                   }`}
                 >
-                  {isDone ? <CheckCircle className="h-3.5 w-3.5" /> : <span>{item.id}</span>}
+                  {isDone ? (
+                    <CheckCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                  ) : (
+                    <span aria-hidden="true">{item.id}</span>
+                  )}
                   <span>{item.label}</span>
-                </div>
+                </li>
               );
             })}
-          </div>
+          </ol>
 
-          <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
+          <div
+            className="h-1.5 overflow-hidden rounded-full bg-slate-200"
+            role="progressbar"
+            aria-valuemin={1}
+            aria-valuemax={totalSteps}
+            aria-valuenow={step}
+            aria-label="Registration progress"
+          >
             <div
-              className="h-full rounded-full bg-gradient-to-r from-emerald-600 to-teal-400 transition-all duration-500"
+              className="h-full rounded-full bg-brand transition-all duration-500"
               style={{ width: `${(step / totalSteps) * 100}%` }}
             />
           </div>
 
           <p className="text-[11px] font-medium text-slate-500">
+            Step {step} of {totalSteps} ·{' '}
             {step === 1
-              ? 'Step 1 of 2 · Your login credentials'
-              : 'Step 2 of 2 · Ghana Card, licence & vehicle verification'}
+              ? 'Your login credentials'
+              : 'Ghana Card, licence & vehicle verification'}
           </p>
         </div>
       )}
@@ -498,19 +456,26 @@ export const RegisterPage: React.FC = () => {
         {/* ============================ SECTION 1 ============================ */}
         <div className="space-y-4">
           <div className="flex items-center gap-2">
-            <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-100 text-[11px] font-black text-emerald-700">
+            <span
+              aria-hidden="true"
+              className="flex h-6 w-6 items-center justify-center rounded-full bg-brand/10 text-[11px] font-bold text-brand-dark"
+            >
               1
             </span>
-            <h2 className="text-xs font-black uppercase tracking-wide text-slate-500">
-              Section 1 · Account details
+            <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Account details
             </h2>
           </div>
 
           <div>
-            <FieldLabel>Full name</FieldLabel>
+            <FieldLabel htmlFor="register-name">Full name</FieldLabel>
             <div className="relative">
-              <User className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <User
+                className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                aria-hidden="true"
+              />
               <input
+                id="register-name"
                 type="text"
                 name="name"
                 autoComplete="name"
@@ -524,16 +489,20 @@ export const RegisterPage: React.FC = () => {
           </div>
 
           <div>
-            <FieldLabel>Email address</FieldLabel>
+            <FieldLabel htmlFor="register-email">Email address</FieldLabel>
             <div className="relative">
-              <Mail className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <Mail
+                className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                aria-hidden="true"
+              />
               <input
+                id="register-email"
                 type="email"
                 name="email"
                 autoComplete="email"
                 inputMode="email"
                 required
-                placeholder="kwame@example.com"
+                placeholder="you@domain.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 className={INPUT_CLASS}
@@ -542,12 +511,13 @@ export const RegisterPage: React.FC = () => {
           </div>
 
           <div>
-            <FieldLabel>Ghana phone number (MoMo / calls)</FieldLabel>
-            <div className="relative flex">
-              <span className="inline-flex shrink-0 items-center whitespace-nowrap rounded-l-xl border border-r-0 border-slate-200 bg-slate-100 px-3 text-xs font-bold text-slate-600">
-                🇬🇭 +233
+            <FieldLabel htmlFor="register-phone">Ghana phone number (MoMo / calls)</FieldLabel>
+            <div className="flex">
+              <span className="inline-flex h-12 shrink-0 items-center whitespace-nowrap rounded-l-xl border border-r-0 border-slate-300 bg-slate-100 px-3 text-xs font-bold text-slate-600">
+                +233
               </span>
               <input
+                id="register-phone"
                 type="tel"
                 name="phone"
                 autoComplete="tel"
@@ -556,16 +526,29 @@ export const RegisterPage: React.FC = () => {
                 placeholder="24 123 4567"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
-                className="w-full rounded-r-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm text-slate-900 placeholder-slate-400 transition focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-4 focus:ring-emerald-500/15"
+                className={`${INPUT_PLAIN_CLASS} rounded-r-xl border-l-0`}
               />
             </div>
           </div>
 
           <div>
-            <FieldLabel>Password · at least 6 characters</FieldLabel>
+            <FieldLabel
+              htmlFor="register-password"
+              hint={
+                <span className="text-[11px] font-medium text-slate-400">
+                  At least 6 characters
+                </span>
+              }
+            >
+              Password
+            </FieldLabel>
             <div className="relative">
-              <Lock className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <Lock
+                className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                aria-hidden="true"
+              />
               <input
+                id="register-password"
                 type={showPassword ? 'text' : 'password'}
                 name="password"
                 autoComplete="new-password"
@@ -579,9 +562,14 @@ export const RegisterPage: React.FC = () => {
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
                 aria-label={showPassword ? 'Hide password' : 'Show password'}
-                className="absolute right-2.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                aria-pressed={showPassword}
+                className="absolute right-1 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
               >
-                {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                {showPassword ? (
+                  <EyeOff className="h-4 w-4" aria-hidden="true" />
+                ) : (
+                  <Eye className="h-4 w-4" aria-hidden="true" />
+                )}
               </button>
             </div>
           </div>
@@ -591,16 +579,19 @@ export const RegisterPage: React.FC = () => {
         {isCourier && step === 2 && (
           <div className="space-y-4 border-t border-slate-100 pt-4">
             <div className="flex items-center gap-2">
-              <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-100 text-[11px] font-black text-amber-700">
+              <span
+                aria-hidden="true"
+                className="flex h-6 w-6 items-center justify-center rounded-full bg-brand/10 text-[11px] font-bold text-brand-dark"
+              >
                 2
               </span>
-              <h2 className="text-xs font-black uppercase tracking-wide text-slate-500">
-                Section 2 · Identity &amp; vehicle verification
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Identity &amp; vehicle verification
               </h2>
             </div>
 
-            <div className="flex gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-[11px] leading-relaxed text-emerald-800">
-              <ShieldCheck className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-600" />
+            <div className="flex gap-2 rounded-xl border border-brand/20 bg-brand/5 p-3 text-[11px] leading-relaxed text-brand-dark">
+              <ShieldCheck className="mt-0.5 h-4 w-4 flex-shrink-0 text-brand" aria-hidden="true" />
               <span>
                 Your Ghana Card, licence and vehicle details are reviewed by the SamleyGo team.
                 You go online for deliveries once verification is approved.
@@ -608,11 +599,12 @@ export const RegisterPage: React.FC = () => {
             </div>
 
             <div>
-              <FieldLabel>Vehicle type</FieldLabel>
+              <FieldLabel htmlFor="register-vehicle-type">Vehicle type</FieldLabel>
               <select
+                id="register-vehicle-type"
                 value={vehicleType}
                 onChange={(e) => setVehicleType(e.target.value)}
-                className="w-full appearance-none rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-sm text-slate-900 transition focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-4 focus:ring-emerald-500/15"
+                className={INPUT_PLAIN_CLASS}
               >
                 <option value="Motorcycle">Motorcycle / Okada</option>
                 <option value="Bicycle">Bicycle</option>
@@ -622,10 +614,14 @@ export const RegisterPage: React.FC = () => {
             </div>
 
             <div>
-              <FieldLabel>Vehicle number plate</FieldLabel>
+              <FieldLabel htmlFor="register-plate">Vehicle number plate</FieldLabel>
               <div className="relative">
-                <Hash className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <Hash
+                  className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                  aria-hidden="true"
+                />
                 <input
+                  id="register-plate"
                   type="text"
                   required
                   placeholder="e.g. GR-1234-24"
@@ -634,16 +630,20 @@ export const RegisterPage: React.FC = () => {
                   className={INPUT_CLASS}
                 />
               </div>
-              <p className="mt-1 text-[10px] text-slate-500">
+              <p className="mt-1 text-[11px] text-slate-500">
                 Exactly as printed on your DVLA plate (letters, numbers and dashes).
               </p>
             </div>
 
             <div>
-              <FieldLabel>Ghana Card ID number (PIN)</FieldLabel>
+              <FieldLabel htmlFor="register-ghana-card">Ghana Card ID number (PIN)</FieldLabel>
               <div className="relative">
-                <CreditCard className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <CreditCard
+                  className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                  aria-hidden="true"
+                />
                 <input
+                  id="register-ghana-card"
                   type="text"
                   required
                   placeholder="GHA-123456789-2"
@@ -653,7 +653,7 @@ export const RegisterPage: React.FC = () => {
                   className={INPUT_CLASS}
                 />
               </div>
-              <p className="mt-1 text-[10px] text-slate-500">
+              <p className="mt-1 text-[11px] text-slate-500">
                 15-character PIN from the front of your Ghana Card.
               </p>
             </div>
@@ -678,10 +678,14 @@ export const RegisterPage: React.FC = () => {
             </div>
 
             <div>
-              <FieldLabel>Driving licence ID number</FieldLabel>
+              <FieldLabel htmlFor="register-licence">Driving licence ID number</FieldLabel>
               <div className="relative">
-                <ClipboardCheck className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <ClipboardCheck
+                  className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                  aria-hidden="true"
+                />
                 <input
+                  id="register-licence"
                   type="text"
                   required
                   placeholder="e.g. GHA-DL-998877665"
@@ -691,13 +695,13 @@ export const RegisterPage: React.FC = () => {
                   className={INPUT_CLASS}
                 />
               </div>
-              <p className="mt-1 text-[10px] text-slate-500">
+              <p className="mt-1 text-[11px] text-slate-500">
                 Licence number printed on your Ghanaian driving licence.
               </p>
             </div>
 
-            <div className="flex items-center gap-2 text-[10px] text-slate-500">
-              <ImagePlus className="h-3.5 w-3.5 flex-shrink-0 text-emerald-600" />
+            <div className="flex items-center gap-2 text-[11px] text-slate-500">
+              <ImagePlus className="h-3.5 w-3.5 flex-shrink-0 text-brand" aria-hidden="true" />
               <span>
                 JPG, PNG or HEIC up to 10 MB · Photos are compressed before upload to save data.
               </span>
@@ -707,20 +711,23 @@ export const RegisterPage: React.FC = () => {
 
         {/* Actions */}
         <div className="space-y-3 pt-1">
-          <button
-            type="submit"
-            disabled={isSubmitting}
-            className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-500 px-4 py-3.5 text-sm font-extrabold text-white shadow-lg shadow-emerald-600/25 transition hover:from-emerald-700 hover:to-emerald-600 active:scale-[0.98] disabled:opacity-60"
-          >
+          <button type="submit" disabled={isSubmitting} className={AUTH_SUBMIT_CLASS}>
             {isSubmitting ? (
               <>
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                <span>Creating your account &amp; uploading documents…</span>
+                <span
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                  aria-hidden="true"
+                />
+                <span>
+                  {isCourier && step === 2
+                    ? 'Creating your account & uploading documents…'
+                    : 'Creating your account…'}
+                </span>
               </>
             ) : (
               <>
                 <span>{submitLabel}</span>
-                <ArrowRight className="h-4 w-4" />
+                <ArrowRight className="h-4 w-4" aria-hidden="true" />
               </>
             )}
           </button>
@@ -730,28 +737,14 @@ export const RegisterPage: React.FC = () => {
               type="button"
               onClick={handleBack}
               disabled={isSubmitting}
-              className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-600 transition hover:bg-slate-50 disabled:opacity-60"
+              className="flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-xs font-bold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              <ArrowLeft className="h-3.5 w-3.5" />
+              <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
               <span>Back to account details</span>
             </button>
           )}
         </div>
       </form>
-      <div className="mt-5 border-t border-slate-100 pt-4 text-center">
-        <p className="text-xs text-slate-500">
-          Already registered?{' '}
-          <Link
-            to="/login"
-            className="font-extrabold text-emerald-600 hover:text-emerald-700 hover:underline"
-          >
-            Sign in here
-          </Link>
-        </p>
-        <p className="mt-3 text-[11px] text-slate-400">
-          SamleyGo Ghana · Safe &amp; realtime food logistics
-        </p>
-      </div>
 
       <SupabaseConnectModal isOpen={showDbModal} onClose={() => setShowDbModal(false)} />
     </AuthShell>
