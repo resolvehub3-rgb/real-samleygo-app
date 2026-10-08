@@ -96,8 +96,14 @@ export const FoodCardSkeleton: React.FC = () => (
   <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-card">
     <div className="aspect-[4/3] w-full animate-pulse bg-slate-200/80" />
     <div className="space-y-2 p-2.5 sm:p-3">
-      <Shimmer className="h-3.5 w-4/5" />
-      <Shimmer className="h-3 w-1/2" />
+      {/* Mirrors the real card: dish + kitchen beside the Add control, price below */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0 flex-1 space-y-2">
+          <Shimmer className="h-3.5 w-4/5" />
+          <Shimmer className="h-3 w-1/2" />
+        </div>
+        <Shimmer className="h-11 w-11 flex-shrink-0 rounded-xl" />
+      </div>
       <Shimmer className="mt-3 h-4 w-2/5" />
     </div>
   </div>

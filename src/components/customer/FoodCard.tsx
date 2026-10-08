@@ -14,8 +14,9 @@ export interface FoodCardProps {
 }
 
 /**
- * The customer food card: real photo, dish, kitchen, price and a compact
- * 44px "+ Add" control wired to the production cart.
+ * The customer food card: real photo, then a text block where the dish and
+ * kitchen share one 44px link and the "+ Add" control sits beside them,
+ * with the price on its own unwrappable line below.
  *
  * The image always renders at 4:3 (`aspect-[4/3]` + `object-cover`) so a
  * card never grows taller than its neighbours because of the photo it got.
@@ -56,42 +57,50 @@ export const FoodCard: React.FC<FoodCardProps> = ({ dish, onAdd }) => {
             </span>
           </div>
         )}
-
-        <button
-          type="button"
-          onClick={(event) => onAdd(event, dish)}
-          disabled={!available}
-          aria-label={
-            available ? `Add ${dish.name} to cart` : `${dish.name} is sold out`
-          }
-          className={`absolute bottom-2 right-2 flex h-11 min-w-11 items-center gap-1 rounded-xl px-3 text-xs font-bold shadow-md transition active:scale-95 ${
-            available
-              ? 'bg-brand text-white hover:bg-brand-dark'
-              : 'cursor-not-allowed bg-white/95 text-slate-400'
-          }`}
-        >
-          <Plus className="h-4 w-4" strokeWidth={2.75} aria-hidden="true" />
-          <span>{available ? 'Add' : 'Sold out'}</span>
-        </button>
       </div>
 
       <div className="flex flex-1 flex-col p-2.5 sm:p-3">
-        {/* One 44px target carries the dish + kitchen to the kitchen's menu
-            (the photo above links to the same place for thumb-sized tapping). */}
-        <Link
-          to={restaurantPath}
-          className="flex min-h-[44px] flex-col justify-center rounded-lg py-0.5 transition hover:text-brand-dark focus-visible:outline-2 focus-visible:outline-brand"
-        >
-          <h3 className="line-clamp-2 text-[13px] font-semibold leading-[1.35] text-slate-900">
-            {dish.name}
-          </h3>
-          <span className="mt-0.5 truncate text-[11px] font-medium text-slate-500">
-            {restaurantName}
-          </span>
-        </Link>
+        {/* Dish + kitchen on the left, the 44px Add control on the right — one
+            row, so the control reads as part of the card rather than floating
+            over the photo. The photo above links to the same menu. */}
+        <div className="flex items-center justify-between gap-2">
+          <Link
+            to={restaurantPath}
+            className="flex min-h-[44px] min-w-0 flex-col justify-center rounded-lg py-0.5 transition hover:text-brand-dark focus-visible:outline-2 focus-visible:outline-brand"
+          >
+            <h3 className="line-clamp-2 text-[13px] font-semibold leading-[1.35] text-slate-900">
+              {dish.name}
+            </h3>
+            <span className="mt-0.5 truncate text-[11px] font-medium text-slate-500">
+              {restaurantName}
+            </span>
+          </Link>
 
-        <div className="mt-auto flex items-end justify-between gap-2 pt-2">
-          <span className="text-sm font-bold tabular-nums text-slate-900">
+          {available ? (
+            <button
+              type="button"
+              onClick={(event) => onAdd(event, dish)}
+              aria-label={`Add ${dish.name} to cart`}
+              className="flex h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-xl bg-brand px-2 text-xs font-bold text-white shadow-sm transition hover:bg-brand-dark active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand sm:px-2.5"
+            >
+              {/* On the narrowest phones the "+" yields its space so the dish name keeps room */}
+              <Plus
+                className="h-4 w-4 max-[359px]:hidden"
+                strokeWidth={2.75}
+                aria-hidden="true"
+              />
+              <span>Add</span>
+            </button>
+          ) : (
+            <span className="flex h-11 shrink-0 items-center rounded-xl bg-slate-100 px-2 text-[11px] font-bold text-slate-400">
+              Sold out
+            </span>
+          )}
+        </div>
+
+        {/* The price gets its own line so it stays on one line at 320px too */}
+        <div className="mt-auto pt-2">
+          <span className="whitespace-nowrap text-[13px] font-bold tabular-nums text-slate-900 sm:text-sm">
             {formatGHS(dish.price)}
           </span>
         </div>
