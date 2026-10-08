@@ -67,7 +67,13 @@ export const AuthShell: React.FC<AuthShellProps> = ({
       <AuthBackdrop />
 
       {/* ── Compact application header ─────────────────────────────── */}
-      <header className="relative z-10 border-b border-white/10">
+      {/* Pinned on phones so the logo and the single alternate action stay
+          reachable while the long sign-up form scrolls under it; from `sm` up
+          it is an ordinary bar that scrolls away with the page. The solid
+          canvas is applied only where it pins, so the header never masks the
+          backdrop on wide screens, and `pt-safe` keeps it clear of the status
+          bar on notched devices (viewport-fit=cover). */}
+      <header className="sticky top-0 z-20 border-b border-white/10 pt-safe max-sm:bg-brand-deep sm:relative">
         <div className="mx-auto flex h-16 w-full max-w-5xl items-center justify-between gap-4 px-4 sm:px-6">
           <Link
             to="/"
