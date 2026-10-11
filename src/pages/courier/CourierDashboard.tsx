@@ -45,6 +45,7 @@ import {
   type RestaurantPinRow,
 } from '../../lib/restaurantPins';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
+import { NavigationScreen } from '../../components/navigation/NavigationScreen';
 import { playCourierAssignedAlert, initAudioUnlock } from '../../lib/soundAlerts';
 
 /**
@@ -86,6 +87,8 @@ export const CourierDashboard: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [verificationNotice, setVerificationNotice] = useState<string | null>(null);
   const [showLiveMapModal, setShowLiveMapModal] = useState(false);
+  /** Full-screen turn-by-turn view — replaces the inline map while open. */
+  const [isNavigating, setIsNavigating] = useState(false);
   const [isInlineMapHidden, setIsInlineMapHidden] = useState(false);
   /** Every restaurant on the platform, drawn as secondary pins on the live map. */
   const [mapRestaurants, setMapRestaurants] = useState<MapRestaurantPin[]>([]);
@@ -1045,39 +1048,53 @@ export const CourierDashboard: React.FC = () => {
                 </span>
               </div>
 
-              <div
-                className="flex shrink-0 items-center gap-0.5 rounded-[10px] bg-slate-100 p-0.5"
-                role="group"
-                aria-label="Map visibility"
-              >
+              <div className="flex shrink-0 items-center gap-2">
+                {/* Full-screen rider view: replaces the inline map while open,
+                    so the two Google Maps instances never fight over the GPS
+                    stream or the single voice session. */}
                 <button
                   type="button"
-                  onClick={() => setIsInlineMapHidden(false)}
-                  aria-pressed={!isInlineMapHidden}
-                  className={`rounded-[8px] px-3 py-1.5 text-[11px] font-bold transition ${
-                    !isInlineMapHidden
-                      ? 'bg-white text-slate-900 shadow-xs'
-                      : 'text-slate-500 hover:text-slate-700'
-                  }`}
+                  onClick={() => setIsNavigating(true)}
+                  className="inline-flex min-h-[34px] items-center gap-1.5 rounded-[10px] bg-slate-900 px-3 text-[11px] font-bold text-white shadow-xs transition hover:bg-slate-800 active:scale-95"
                 >
-                  Map
+                  <Navigation className="h-3.5 w-3.5" />
+                  Start navigation
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setIsInlineMapHidden(true)}
-                  aria-pressed={isInlineMapHidden}
-                  className={`rounded-[8px] px-3 py-1.5 text-[11px] font-bold transition ${
-                    isInlineMapHidden
-                      ? 'bg-white text-slate-900 shadow-xs'
-                      : 'text-slate-500 hover:text-slate-700'
-                  }`}
+
+                <div
+                  className="flex shrink-0 items-center gap-0.5 rounded-[10px] bg-slate-100 p-0.5"
+                  role="group"
+                  aria-label="Map visibility"
                 >
-                  Hide
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsInlineMapHidden(false)}
+                    aria-pressed={!isInlineMapHidden}
+                    className={`rounded-[8px] px-3 py-1.5 text-[11px] font-bold transition ${
+                      !isInlineMapHidden
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    Map
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsInlineMapHidden(true)}
+                    aria-pressed={isInlineMapHidden}
+                    className={`rounded-[8px] px-3 py-1.5 text-[11px] font-bold transition ${
+                      isInlineMapHidden
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    Hide
+                  </button>
+                </div>
               </div>
             </div>
 
-            {!isInlineMapHidden ? (
+            {!isInlineMapHidden && !isNavigating ? (
               <div className="mt-3">
                 <CourierLiveMap
                   courierPosition={currentCoords}
@@ -1110,6 +1127,20 @@ export const CourierDashboard: React.FC = () => {
                     Accept a delivery to see the pickup and customer pins on your map.
                   </p>
                 )}
+              </div>
+            ) : isNavigating ? (
+              <div className="mx-4 mt-3 flex flex-wrap items-center justify-between gap-2 rounded-[12px] border border-slate-200 bg-slate-50 px-3.5 py-3 md:mx-6">
+                <span className="flex min-w-0 items-center gap-2 text-xs text-slate-500">
+                  <Navigation className="h-4 w-4 shrink-0 text-slate-400" />
+                  <span>Full-screen navigation is open. GPS tracking stays active.</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setIsNavigating(false)}
+                  className="text-xs font-bold text-slate-700 underline underline-offset-2 hover:text-slate-900"
+                >
+                  Back to map
+                </button>
               </div>
             ) : (
               <div className="mx-4 mt-3 flex flex-wrap items-center justify-between gap-2 rounded-[12px] border border-slate-200 bg-slate-50 px-3.5 py-3 md:mx-6">
@@ -1468,6 +1499,37 @@ export const CourierDashboard: React.FC = () => {
 
         {/* Desktop framing closes before the fixed-overlay modal */}
         </div>
+
+        {/* Full-screen rider navigation — replaces the inline map while open
+            so two Google Maps instances never compete for the GPS stream or
+            the single voice session. */}
+        {isNavigating && (
+          <NavigationScreen
+            courierPosition={currentCoords}
+            status={activeDelivery?.status}
+            destination={
+              activeDelivery?.delivery_latitude && activeDelivery?.delivery_longitude
+                ? { lat: activeDelivery.delivery_latitude, lng: activeDelivery.delivery_longitude }
+                : null
+            }
+            destinationAddress={activeDelivery?.delivery_address}
+            pickup={
+              activeDelivery?.restaurant?.latitude && activeDelivery?.restaurant?.longitude
+                ? { lat: activeDelivery.restaurant.latitude, lng: activeDelivery.restaurant.longitude }
+                : null
+            }
+            pickupAddress={
+              activeDelivery?.restaurant
+                ? `${activeDelivery.restaurant.address}, ${activeDelivery.restaurant.city}`
+                : undefined
+            }
+            restaurants={otherRestaurants}
+            courierName={courier?.profile?.full_name || 'You (Courier)'}
+            orderId={activeDelivery?.id ?? null}
+            courierFix={courierFix}
+            onExit={() => setIsNavigating(false)}
+          />
+        )}
 
         {/* Live Map Modal for Courier */}
         <LiveDeliveryMapModal

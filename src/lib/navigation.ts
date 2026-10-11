@@ -942,6 +942,288 @@ export function endNavigationSession(reason = 'ORDER_FINISHED'): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Navigation state machine (the HUD's one source of truth)
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Lifecycle of a navigation session, exactly as the rider experiences it.
+ *
+ * The values map 1:1 onto what the banner/panel can show, so no component ever
+ * has to re-derive "what is happening right now" from a pile of primitives —
+ * {@link deriveNavigationState} is the only place that decision is made.
+ */
+export type NavigationState =
+  | 'IDLE' // no destination for this trip
+  | 'ROUTE_CALCULATING' // waiting on the routing engine (first attempt or a retry)
+  | 'ROUTE_READY' // a line exists, the rider is still parked at its origin
+  | 'NAVIGATING' // following the route
+  | 'APPROACHING' // the next maneuver is close enough to act on
+  | 'OFF_ROUTE' // the rider is genuinely off the line and no fresh route yet
+  | 'REROUTING' // a replacement route is being fetched
+  | 'GPS_UNAVAILABLE' // no fix, or the newest one is too old to trust
+  | 'ARRIVING' // inside the destination radius
+  | 'ARRIVED' // destination reached
+  | 'CANCELLED'; // the rider ended navigation
+
+/** Lifecycle of the current route request (mirrors the map's request status). */
+export type RouteCalcStatus = 'idle' | 'loading' | 'recalculating' | 'ready' | 'retrying';
+
+/** Below this the rider is still standing where the route starts. */
+export const ROUTE_READY_ALONG_M = 10;
+/** The next maneuver is announced as imminent inside this distance. */
+export const APPROACH_MANEUVER_M = 80;
+/** How close (metres) the rider must be to a pin before "You have arrived". */
+export const ARRIVAL_RADIUS_M = 150;
+/** A fix older than this means the position can no longer be trusted. */
+export const GPS_UNAVAILABLE_MS = 20_000;
+/** How far ahead the "then …" line is shown once a maneuver becomes imminent. */
+export const ADVANCE_NOTICE_M = 150;
+
+export interface NavigationStateInput {
+  /** A destination exists for the active trip (phase resolved + pin present). */
+  hasDestination: boolean;
+  /** The rider pressed exit — nothing else may resurrect the session. */
+  cancelled?: boolean;
+  /** Route request lifecycle. */
+  routeStatus?: RouteCalcStatus;
+  /** A usable route line is drawn for the current destination. */
+  hasRoute: boolean;
+  /** Metres travelled along the route (`null` before the first projection). */
+  alongMeters?: number | null;
+  /** Metres left to the destination (`null` before the first projection). */
+  remainingMeters?: number | null;
+  /** Metres to the next maneuver (`null` when there is no route with steps). */
+  distanceToManeuver?: number | null;
+  /** Perpendicular distance from the route (`null` before the first projection). */
+  offRouteMeters?: number | null;
+  /** GPS accuracy of the newest fix in metres (scales the off-route threshold). */
+  accuracyMeters?: number | null;
+  /** Consecutive off-route fixes seen (one noisy reading never counts). */
+  offRouteStreak?: number;
+  /** Inside the destination radius. */
+  arrived?: boolean;
+  /** Age of the newest GPS fix in ms; `null` when no fix has ever arrived. */
+  gpsAgeMs?: number | null;
+}
+
+/**
+ * Resolve the single navigation state from the raw inputs.
+ *
+ * Priority is deliberate and safety-led: cancellation wins over everything,
+ * then "there is nowhere to go", then "I do not know where you are" (a stale
+ * GPS can never be dressed up as navigation), then arrival, then deviation,
+ * then the ordinary approach/navigate pair. `ROUTE_CALCULATING` is reached
+ * only when the line is genuinely missing — a refresh in flight keeps the
+ * existing route (and its instructions) on screen.
+ */
+export function deriveNavigationState(input: NavigationStateInput): NavigationState {
+  const {
+    hasDestination,
+    cancelled = false,
+    routeStatus = 'idle',
+    hasRoute,
+    alongMeters = null,
+    remainingMeters = null,
+    distanceToManeuver = null,
+    offRouteMeters = null,
+    accuracyMeters = null,
+    offRouteStreak = 0,
+    arrived = false,
+    gpsAgeMs = null,
+  } = input;
+
+  if (cancelled) return 'CANCELLED';
+  if (!hasDestination) return 'IDLE';
+
+  // No fix yet, or a fix so old the marker/ETA are fiction — say so instead of
+  // showing a confident route from where the rider *was*.
+  if (gpsAgeMs == null || !Number.isFinite(gpsAgeMs) || gpsAgeMs > GPS_UNAVAILABLE_MS) {
+    return 'GPS_UNAVAILABLE';
+  }
+
+  if (arrived) return 'ARRIVED';
+
+  if (routeStatus === 'retrying' && !hasRoute) return 'ROUTE_CALCULATING';
+  if (!hasRoute) return 'ROUTE_CALCULATING';
+
+  if (remainingMeters != null && distanceToManeuver != null) {
+    const offRoute = isOffRoute(offRouteMeters, accuracyMeters);
+    if (offRoute || offRouteStreak >= OFF_ROUTE_STREAK_REQUIRED) {
+      return routeStatus === 'recalculating' ? 'REROUTING' : 'OFF_ROUTE';
+    }
+  }
+
+  if (remainingMeters != null && remainingMeters <= ARRIVAL_RADIUS_M) return 'ARRIVING';
+  if (distanceToManeuver != null && distanceToManeuver <= APPROACH_MANEUVER_M) {
+    return 'APPROACHING';
+  }
+  if (alongMeters != null && alongMeters <= ROUTE_READY_ALONG_M) return 'ROUTE_READY';
+  if (remainingMeters != null) return 'NAVIGATING';
+
+  return 'ROUTE_READY';
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Banner instruction — what the top card must show for the current position
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Icon family for a maneuver, derived from the engine's type + modifier. */
+export type ManeuverIconKey =
+  | 'depart'
+  | 'straight'
+  | 'left'
+  | 'right'
+  | 'slight-left'
+  | 'slight-right'
+  | 'sharp-left'
+  | 'sharp-right'
+  | 'uturn'
+  | 'roundabout'
+  | 'exit-roundabout'
+  | 'ramp'
+  | 'ramp-left'
+  | 'ramp-right'
+  | 'fork'
+  | 'fork-left'
+  | 'fork-right'
+  | 'merge'
+  | 'merge-left'
+  | 'merge-right'
+  | 'arrive'
+  | 'continue';
+
+const modifierWord = (modifier?: string | null): string =>
+  (modifier ?? '').toLowerCase().trim();
+
+/**
+ * Collapse an OSRM-style `type` + `modifier` pair into one icon family.
+ *
+ * Every supported instruction (left, right, slight/keep, straight, exits,
+ * roundabout entry/exit, U-turn, arrival) lands on its own bucket so the UI
+ * can pick a glyph without ever re-reading the raw engine strings — and
+ * anything unrecognised falls back to `continue` rather than an empty icon.
+ */
+export function maneuverIconKey(
+  step: Pick<NavigationStep, 'maneuverType' | 'maneuverModifier'> | null | undefined
+): ManeuverIconKey {
+  const type = (step?.maneuverType ?? '').toLowerCase().trim();
+  const modifier = modifierWord(step?.maneuverModifier);
+
+  const side = (): ManeuverIconKey | null => {
+    if (modifier.includes('uturn')) return 'uturn';
+    if (modifier.startsWith('sharp left')) return 'sharp-left';
+    if (modifier.startsWith('sharp right')) return 'sharp-right';
+    if (modifier.startsWith('slight left')) return 'slight-left';
+    if (modifier.startsWith('slight right')) return 'slight-right';
+    if (modifier === 'left') return 'left';
+    if (modifier === 'right') return 'right';
+    return null;
+  };
+
+  switch (type) {
+    case 'arrive':
+      return 'arrive';
+    case 'depart':
+      return 'depart';
+    case 'roundabout':
+    case 'rotary':
+      return 'roundabout';
+    case 'exit roundabout':
+    case 'exit rotary':
+      return 'exit-roundabout';
+    case 'on ramp':
+      if (modifier.includes('left')) return 'ramp-left';
+      if (modifier.includes('right')) return 'ramp-right';
+      return 'ramp';
+    case 'off ramp':
+    case 'end of road':
+      return side() ?? 'continue';
+    case 'fork':
+      if (modifier.includes('left')) return 'fork-left';
+      if (modifier.includes('right')) return 'fork-right';
+      return 'fork';
+    case 'merge':
+      if (modifier.includes('left')) return 'merge-left';
+      if (modifier.includes('right')) return 'merge-right';
+      return 'merge';
+    case 'new name':
+      return side() ?? 'straight';
+    case 'continue':
+    case 'turn':
+    default: {
+      const viaSide = side();
+      if (viaSide) return viaSide;
+      if (type === 'turn' || type === 'end of road') return 'continue';
+      return type === 'continue' || type === 'default' ? 'straight' : 'continue';
+    }
+  }
+}
+
+export interface BannerAdvance {
+  /** Metres from the vehicle to the maneuver *after* the one being shown. */
+  distanceMeters: number;
+  instruction: string;
+  roadName: string | null;
+}
+
+export interface BannerInstruction {
+  /** Metres from the vehicle to the maneuver shown in the banner. */
+  distanceMeters: number;
+  /** Road the maneuver leads onto (empty string when the engine has none). */
+  roadName: string;
+  /** Human instruction, straight from the engine's maneuver. */
+  instruction: string;
+  maneuverType: string;
+  maneuverModifier?: string;
+  maneuverExit?: number;
+  icon: ManeuverIconKey;
+  /**
+   * The step after this one, present only once the current maneuver is close
+   * enough to need a heads-up — the "then …" line. Never invented: it is the
+   * next real step in the route, with its own real distance.
+   */
+  advance: BannerAdvance | null;
+}
+
+/**
+ * What the top banner must show at `alongMeters` into `route`.
+ *
+ * `null` means there is nothing left to instruct (no route, no steps) — the UI
+ * then falls back to the arrival card instead of printing a stale road name.
+ */
+export function selectBannerInstruction(
+  route: Pick<NavigationRoute, 'steps'> | null | undefined,
+  alongMeters: number
+): BannerInstruction | null {
+  const upcoming = nextManeuver(route, alongMeters);
+  if (!upcoming) return null;
+
+  const step = upcoming.step;
+  const steps = route?.steps ?? [];
+  const following = steps[upcoming.index + 1];
+
+  const advance: BannerAdvance | null =
+    following && upcoming.distanceMeters <= ADVANCE_NOTICE_M
+      ? {
+          distanceMeters: Math.max(0, following.cumulativeMeters - alongMeters),
+          instruction: following.instruction,
+          roadName: following.roadName?.trim() || '',
+        }
+      : null;
+
+  return {
+    distanceMeters: Math.round(upcoming.distanceMeters),
+    roadName: step.roadName?.trim() ?? '',
+    instruction: step.instruction,
+    maneuverType: step.maneuverType,
+    maneuverModifier: step.maneuverModifier,
+    maneuverExit: step.maneuverExit,
+    icon: maneuverIconKey(step),
+    advance,
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Structured logging
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -956,6 +1238,8 @@ export type NavigationLogEvent =
   | 'NAVIGATION_DESTINATION_CHANGED'
   | 'NAVIGATION_SESSION_STARTED'
   | 'NAVIGATION_SESSION_ENDED'
+  | 'NAVIGATION_ALTERNATIVE_SELECTED'
+  | 'NAVIGATION_EXITED'
   | 'NAVIGATION_VOICE_ANNOUNCEMENT'
   | 'NAVIGATION_VOICE_ERROR';
 

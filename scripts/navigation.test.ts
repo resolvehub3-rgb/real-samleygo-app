@@ -663,6 +663,7 @@ test('only courier screens ever show turn-by-turn', () => {
     [
       'src/components/common/LiveDeliveryMapModal.tsx',
       'src/components/courier/CourierLiveMap.tsx',
+      'src/components/navigation/NavigationScreen.tsx',
       'src/pages/courier/CourierDashboard.tsx',
     ],
     'customers/restaurants never receive the HUD prop'

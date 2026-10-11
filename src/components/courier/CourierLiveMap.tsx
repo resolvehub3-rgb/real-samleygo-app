@@ -11,9 +11,12 @@ import {
 import {
   ACCRA,
   MAP_ID,
+  animateOrientation,
   cancelCameraPan,
+  cancelOrientationAnimation,
   fitPoints,
   loadGoogleMaps,
+  mapColorScheme,
   outsideCenterZone,
   panToAnimated,
 } from '../../lib/googleMaps';
@@ -33,6 +36,7 @@ import {
 import type { RestaurantMapPin } from '../../lib/restaurantPins';
 import {
   calculateRoute,
+  calculateRouteSet,
   formatRouteDistance,
   formatRouteDuration,
   geocodeAddress,
@@ -40,7 +44,9 @@ import {
   type LatLng,
 } from '../../lib/routing';
 import {
+  ARRIVAL_RADIUS_M,
   destinationForPhase,
+  deriveNavigationState,
   evaluateReroute,
   isOffRoute,
   navLog,
@@ -49,8 +55,10 @@ import {
   projectOnRoute,
   resolveNavigationPhase,
   recordSessionRoute,
+  selectBannerInstruction,
   type NavigationPhase,
   type NavigationRoute,
+  type NavigationState,
   type NavigationStep,
   type UpcomingManeuver,
 } from '../../lib/navigation';
@@ -58,6 +66,7 @@ import {
   navigationVoice,
   type NavigationVoiceUiState,
 } from '../../lib/navigationVoice';
+import { NavigationChrome, type RouteOption } from '../navigation/NavigationChrome';
 
 // Re-exported as a type only: exporting runtime values alongside components
 // would break React Fast Refresh (dev HMR falls back to full reloads).
@@ -88,6 +97,8 @@ export type MapRestaurantPin = RestaurantMapPin;
 interface NavProgress {
   remainingMeters: number;
   remainingSeconds: number;
+  /** Metres travelled along the current route (drives the state machine). */
+  alongMeters: number;
   offRouteMeters: number;
   maneuver: UpcomingManeuver | null;
   currentRoad: string | null;
@@ -147,6 +158,22 @@ interface CourierLiveMapProps {
    * map. Radius/size then come from `className` alone.
    */
   flat?: boolean;
+  /**
+   * `navigation` swaps the compact light HUD for the full turn-by-turn chrome
+   * (dark basemap, teal maneuver banner, black ETA panel, floating controls)
+   * — the Google-Maps-style rider view. `standard` (default) keeps the light
+   * in-card HUD that customers, restaurants and the courier hub's inline map
+   * already use, so nothing existing changes shape.
+   */
+  variant?: 'standard' | 'navigation';
+  /** Order this trip belongs to — attached to incident reports only. */
+  orderId?: string | null;
+  /**
+   * Called when the rider leaves navigation (✕ on the ETA panel or the
+   * arrival card). The parent decides what that means — typically it unmounts
+   * the full-screen host. Never called by the standard variant.
+   */
+  onExitNavigation?: () => void;
 }
 
 /** An Advanced Marker: an HTMLElement the Maps API positions on the map. */
@@ -286,6 +313,54 @@ const projectOnTrack = (
 };
 
 /**
+ * Split a drawn route at the rider's projection onto it, so the navigation
+ * view can dim what has been ridden and keep the remaining stretch bright.
+ *
+ * The split vertex is the true closest point on the polyline — no point is
+ * added, removed or moved, so the two halves still describe exactly the road
+ * the engine returned. When the rider cannot be projected (no track yet, or
+ * far off the line) the whole route is reported as "ahead" and nothing is
+ * dimmed: an un-ridden stretch must never look ridden.
+ */
+const splitRouteAt = (
+  path: google.maps.LatLngLiteral[],
+  at: LatLng
+): { behind: google.maps.LatLngLiteral[]; ahead: google.maps.LatLngLiteral[] } => {
+  if (path.length < 2) return { behind: [], ahead: path };
+
+  const track = buildTrack(path);
+  if (!track) return { behind: [], ahead: path };
+  const { sKm, perpKm } = projectOnTrack(track, at);
+  // Same gate the marker uses: only claim progress where the rider is on it.
+  if (perpKm > ROUTE_SNAP_KM) return { behind: [], ahead: path };
+
+  const splitAt = sKm * 1000; // projectOnTrack works in km, steps in metres
+  const behind: google.maps.LatLngLiteral[] = [];
+  const ahead: google.maps.LatLngLiteral[] = [];
+  let crossed = false;
+
+  for (let i = 0; i < path.length; i += 1) {
+    const cumulative = i === 0 ? 0 : (track.cumulative[i - 1] ?? 0) * 1000;
+    if (!crossed && cumulative < splitAt) {
+      behind.push(path[i]);
+      continue;
+    }
+    if (!crossed) {
+      // First vertex at/after the projection — place the exact split point so
+      // the two halves meet where the vehicle actually is.
+      const splitPoint = trackPointAt(track, sKm);
+      behind.push({ lat: splitPoint.lat, lng: splitPoint.lng });
+      ahead.push({ lat: splitPoint.lat, lng: splitPoint.lng });
+      crossed = true;
+    }
+    ahead.push(path[i]);
+  }
+
+  if (!crossed) return { behind: path, ahead: [] };
+  return { behind, ahead };
+};
+
+/**
  * A coordinate is only drawn if it is finite, in range and not "null island"
  * (0,0) — the classic artifact of a column that was never really filled in.
  */
@@ -296,8 +371,6 @@ const isUsablePin = (lat: number, lng: number): boolean =>
   Math.abs(lng) <= 180 &&
   !(Math.abs(lat) < 0.01 && Math.abs(lng) < 0.01);
 
-/** How close (metres) the courier must be to a pin before "You have arrived". */
-const ARRIVAL_RADIUS_M = 150;
 /** GPS heading is only trusted above this speed — below it, noise dominates. */
 const GPS_HEADING_MIN_SPEED_MPS = 3;
 /** Re-notify parents about remaining distance every ~100 m of progress. */
@@ -391,8 +464,15 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   courierFix,
   showNavigationHud = false,
   flat = false,
+  variant = 'standard',
+  orderId = null,
+  onExitNavigation,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  /** Full-screen rider view vs. the existing compact in-card HUD. */
+  const isNavigationVariant = variant === 'navigation';
+  /** Voice attaches on the courier hub HUD *and* the full-screen view. */
+  const voiceActive = showNavigationHud || isNavigationVariant;
   const mapRef = useRef<google.maps.Map | null>(null);
   const courierMarkerRef = useRef<PinMarker | null>(null);
   /** The courier marker's DOM node — heading rotation happens on this. */
@@ -402,6 +482,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const destinationMarkerRef = useRef<PinMarker | null>(null);
   const pickupMarkerRef = useRef<PinMarker | null>(null);
   const roadPolylineRef = useRef<google.maps.Polyline | null>(null);
+  /** Dark casing drawn under the active line (navigation variant only). */
+  const routeCasingRef = useRef<google.maps.Polyline | null>(null);
+  /** The stretch already ridden, dimmed behind the live cyan line. */
+  const traveledPolylineRef = useRef<google.maps.Polyline | null>(null);
+  /** Alternative routes, one thin polyline each (navigation variant only). */
+  const alternativeLinesRef = useRef<google.maps.Polyline[]>([]);
   /** Arc-length view of the drawn road route — the marker rides along this. */
   const trackRef = useRef<RouteTrack | null>(null);
   /** Secondary restaurant pins, keyed by restaurant id so updates are cheap. */
@@ -446,7 +532,13 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     setFollow: (on: boolean) => void;
     openPopup: (marker: PinMarker) => void;
     repaintHeading: () => void;
-  }>({ setFollow: () => {}, openPopup: () => {}, repaintHeading: () => {} });
+    publishHeading: () => void;
+  }>({
+    setFollow: () => {},
+    openPopup: () => {},
+    repaintHeading: () => {},
+    publishHeading: () => {},
+  });
 
   // ── Map bootstrap state ───────────────────────────────────────────────
   /** Guards the async loader against React StrictMode's double effect. */
@@ -517,6 +609,61 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         ? (heading as number)
         : null;
   });
+
+  // ── Full-screen navigation chrome (`variant="navigation"`) ──────────────
+  /** The rider pressed ✕ — nothing may resurrect the session afterwards. */
+  const [navCancelled, setNavCancelled] = useState(false);
+  /** The route the engine recommended first, kept so ✕/selection can return. */
+  const [primaryRoute, setPrimaryRoute] = useState<
+    (NavigationRoute & { leg: RouteLeg; phase: NavigationPhase; targetKey: string }) | null
+  >(null);
+  /** Alternatives fetched on demand by the overview sheet (never invented). */
+  const [alternatives, setAlternatives] = useState<NavigationRoute[]>([]);
+  /** Lifecycle of that on-demand alternatives request. */
+  const [alternativesStatus, setAlternativesStatus] = useState<
+    'idle' | 'loading' | 'ready' | 'failed'
+  >('idle');
+  /** Which entry of the overview list is currently drawn (0 = primary). */
+  const [selectedAlternative, setSelectedAlternative] = useState(0);
+  /** Camera bearing for the compass needle — throttled, never per-frame. */
+  const [cameraHeading, setCameraHeading] = useState(0);
+  /** Set by "Reset orientation": hold north until the rider re-centres. */
+  const northLockRef = useRef(false);
+  const headingTimerRef = useRef<number | null>(null);
+
+  /**
+   * Mirror `map.getHeading()` into React state. `heading_changed` fires for
+   * every animation frame, so the value is coalesced into one update ~120 ms
+   * after the last event — the needle stays smooth without re-rendering the
+   * map on each frame.
+   */
+  const publishCameraHeading = () => {
+    if (headingTimerRef.current !== null) return;
+    headingTimerRef.current = window.setTimeout(() => {
+      headingTimerRef.current = null;
+      const value = Math.round(mapRef.current?.getHeading() ?? 0);
+      setCameraHeading((previous) => (previous === value ? previous : value));
+    }, 120);
+  };
+
+  useEffect(
+    () => () => {
+      if (headingTimerRef.current !== null) window.clearTimeout(headingTimerRef.current);
+      headingTimerRef.current = null;
+    },
+    []
+  );
+
+  // The state machine keys off the AGE of the newest fix, and a dead GPS
+  // stream stops producing renders entirely — tick while the full-screen
+  // chrome is mounted so "GPS unavailable" can appear without a new ping.
+  useEffect(() => {
+    if (variant !== 'navigation') return;
+    const timer = window.setInterval(() => {
+      setCameraHeading((value) => value); // no-op value: forces a re-render
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [variant]);
 
   // Invalidate every in-flight response when the map goes away.
   useEffect(() => {
@@ -838,6 +985,9 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   const setFollow = (on: boolean) => {
     followRef.current = on;
     setFollowing(on);
+    // Re-centring is the rider asking for the guided view again — the compass
+    // hold that "Reset orientation" set is released with it.
+    if (on) northLockRef.current = false;
     const map = mapRef.current;
     if (!map) return;
     if (!on) {
@@ -846,6 +996,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     }
     const at = currentLatLngRef.current ?? targetRef.current;
     if (at) panToAnimated(map, at, 700);
+    // Coming back to follow means re-adopting the guided camera immediately,
+    // not waiting for the next GPS fix to arrive.
+    if (variant === 'navigation' && !northLockRef.current) {
+      const heading = headingAlongRoute(at ?? targetRef.current ?? ACCRA);
+      animateOrientation(map, { heading: heading ?? 0, tilt: 45 }, 500);
+    }
   };
 
   // The map is created once, so keep its handlers pointed at the newest closure.
@@ -853,6 +1009,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     actionRefs.current.setFollow = setFollow;
     actionRefs.current.openPopup = openPopup;
     actionRefs.current.repaintHeading = applyScreenHeading;
+    actionRefs.current.publishHeading = publishCameraHeading;
   });
 
   // ── Route bookkeeping ─────────────────────────────────────────────────
@@ -875,9 +1032,10 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   // ── Voice: attach this screen to the single voice session ─────────────
   // Declared BEFORE the progress effect so the owner is attached before the
   // first sample arrives. Customers/restaurants never set `showNavigationHud`
-  // and therefore never attach — they can never hear courier navigation.
+  // and never mount the navigation variant, so they never attach — they can
+  // never hear courier navigation.
   useEffect(() => {
-    if (!showNavigationHud) return;
+    if (!voiceActive) return;
     navigationVoice.attach(voiceOwnerId);
     const unsubscribe = navigationVoice.subscribe(setVoiceUi);
     setVoiceUi(navigationVoice.getState());
@@ -886,7 +1044,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       unsubscribe();
       navigationVoice.detach(voiceOwnerId);
     };
-  }, [showNavigationHud, voiceOwnerId]);
+  }, [voiceActive, voiceOwnerId]);
 
   // ── A changed phase/destination invalidates every in-flight request ───
   // Bump the request id FIRST: a response from the previous destination
@@ -910,6 +1068,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     );
     setRouteStatus('idle');
     setNavProgress(null);
+    // Alternatives, the selected route and the remembered primary all belong
+    // to the previous destination — none of them may follow the rider on.
+    setAlternatives([]);
+    setAlternativesStatus('idle');
+    setSelectedAlternative(0);
+    setPrimaryRoute(null);
     if (leg) {
       navLog('NAVIGATION_DESTINATION_CHANGED', { phase: leg.phase, target: leg.target });
     }
@@ -984,7 +1148,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       navLog('NAVIGATION_REROUTE', { reason: decision.reason, origin: courierPosition });
       // The next route that lands is a genuine recalculation: the voice
       // engine cancels the old instruction and says so (debounced).
-      if (showNavigationHud) navigationVoice.noteDeviationReroute();
+      if (voiceActive) navigationVoice.noteDeviationReroute();
     }
 
     routeInFlightRef.current = true;
@@ -1015,6 +1179,13 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
         failuresRef.current = 0;
         setRoadRoute({ ...route, leg: leg.kind, phase: leg.phase, targetKey });
+        // Remember the engine's first choice so the overview sheet can always
+        // return to it after the rider previews an alternative.
+        setPrimaryRoute({ ...route, leg: leg.kind, phase: leg.phase, targetKey });
+        setSelectedAlternative(0);
+        // Alternatives describe the request they came from — a new primary
+        // (fresh origin after a reroute) invalidates them.
+        setAlternatives([]);
         setRouteStatus('ready');
         recordSessionRoute(route);
         notifyRouteUpdate({
@@ -1049,7 +1220,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     if (!activeRoute || !courierPosition || !leg) {
       setNavProgress(null);
       notifyRouteUpdate(null);
-      if (showNavigationHud) {
+      if (voiceActive) {
         // Keep the voice engine's journey in sync ('' = no destination).
         navigationVoice.update({
           owner: voiceOwnerId,
@@ -1093,7 +1264,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
     // Voice consumes the SAME sample the HUD just rendered (same maneuver,
     // same distances) — one projection, one instruction, zero extra renders.
-    if (showNavigationHud) {
+    if (voiceActive) {
       navigationVoice.update({
         owner: voiceOwnerId,
         sessionKey: targetKey,
@@ -1119,7 +1290,15 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       ) {
         return previous;
       }
-      return { remainingMeters, remainingSeconds, offRouteMeters, maneuver, currentRoad, arrived };
+      return {
+        remainingMeters,
+        remainingSeconds,
+        alongMeters: Math.round(travelled),
+        offRouteMeters,
+        maneuver,
+        currentRoad,
+        arrived,
+      };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roadRoute, courierPosition, legKind, targetKey]);
@@ -1154,6 +1333,14 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           center: ACCRA,
           zoom: 13,
           mapId: MAP_ID, // Advanced Markers refuse to draw without one
+          // Google's own dark basemap for the rider's navigation view. Chosen
+          // here because `colorScheme` is construction-only; the standard
+          // variant stays on Google's default light roadmap so nothing that
+          // already ships changes appearance.
+          ...(variant === 'navigation' ? { colorScheme: mapColorScheme('DARK') } : {}),
+          // A tilted camera is what makes the 3D navigation view readable;
+          // silently ignored on a raster map type that cannot tilt.
+          ...(variant === 'navigation' ? { tilt: 45 } : {}),
           zoomControl: true,
           // Keep the overlay stack clear: zoom rides the right edge (above the
           // ETA strip), the style switcher parks top-right — the HUD owns the
@@ -1177,8 +1364,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         // they keep following.
         map.addListener('dragstart', () => actionRefs.current.setFollow(false));
         // A two-finger gesture can spin the camera — re-lay the bike's
-        // rotation so it keeps facing along the road AS SEEN ON SCREEN.
-        map.addListener('heading_changed', () => actionRefs.current.repaintHeading());
+        // rotation so it keeps facing along the road AS SEEN ON SCREEN, and
+        // refresh the compass needle in the navigation chrome.
+        map.addListener('heading_changed', () => {
+          actionRefs.current.repaintHeading();
+          actionRefs.current.publishHeading();
+        });
         map.addListener('zoom_changed', () => {
           if (Date.now() < ignoreZoomUntilRef.current) return;
           if (Date.now() - userGestureAtRef.current > 1000) return;
@@ -1237,6 +1428,9 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         if (destinationMarkerRef.current) destinationMarkerRef.current.map = null;
         if (pickupMarkerRef.current) pickupMarkerRef.current.map = null;
         roadPolylineRef.current?.setMap(null);
+        routeCasingRef.current?.setMap(null);
+        traveledPolylineRef.current?.setMap(null);
+        alternativeLinesRef.current.forEach((line) => line.setMap(null));
         restaurantMarkersRef.current.forEach((marker) => {
           marker.map = null;
         });
@@ -1250,6 +1444,9 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       destinationMarkerRef.current = null;
       pickupMarkerRef.current = null;
       roadPolylineRef.current = null;
+      routeCasingRef.current = null;
+      traveledPolylineRef.current = null;
+      alternativeLinesRef.current = [];
       infoWindowRef.current = null;
       popupTextsRef.current.clear();
       popupAnchorRef.current = null;
@@ -1363,10 +1560,19 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
     /** Solid road-snapped route for the leg the rider is actually driving. */
     const drawRoadRoute = (courierLL: LatLng | null) => {
+      const navStyle = variant === 'navigation';
       if (!roadRoute || roadRoute.geometry.coordinates.length < 2) {
         if (roadPolylineRef.current) {
           roadPolylineRef.current.setMap(null);
           roadPolylineRef.current = null;
+        }
+        if (routeCasingRef.current) {
+          routeCasingRef.current.setMap(null);
+          routeCasingRef.current = null;
+        }
+        if (traveledPolylineRef.current) {
+          traveledPolylineRef.current.setMap(null);
+          traveledPolylineRef.current = null;
         }
         return;
       }
@@ -1391,8 +1597,65 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         }
       }
 
+      // ── Navigation variant: casing + "already ridden" split ────────────
+      // Google's rider view draws three layers: a dark casing so the line
+      // reads on any tile, a dim stretch for what is behind the vehicle, and
+      // the bright remaining route on top. The split point is the rider's own
+      // projection onto the line — no geometry is invented, only clipped.
+      let ahead: google.maps.LatLngLiteral[] | null = null;
+      let behind: google.maps.LatLngLiteral[] | null = null;
+      if (navStyle && courierLL) {
+        const split = splitRouteAt(coords, courierLL);
+        ahead = split.ahead;
+        behind = split.behind;
+      }
+
+      const ensureLine = (
+        holder: { current: google.maps.Polyline | null },
+        options: google.maps.PolylineOptions
+      ): google.maps.Polyline => {
+        if (!holder.current) {
+          holder.current = new google.maps.Polyline(options);
+          holder.current.setMap(map);
+        } else {
+          holder.current.setOptions(options);
+        }
+        return holder.current;
+      };
+
+      if (navStyle) {
+        ensureLine(routeCasingRef, {
+          path: coords,
+          strokeColor: '#052e2b',
+          strokeOpacity: 0.95,
+          strokeWeight: 12,
+          zIndex: 0,
+        });
+        ensureLine(traveledPolylineRef, {
+          path: behind ?? [],
+          strokeColor: '#4b5563',
+          strokeOpacity: 0.9,
+          strokeWeight: 7,
+          zIndex: 1,
+        });
+        ensureLine(roadPolylineRef, {
+          path: ahead ?? coords,
+          strokeColor: '#22d3ee',
+          strokeOpacity: 1,
+          strokeWeight: 7,
+          zIndex: 3,
+        });
+        return;
+      }
+
       if (roadPolylineRef.current) {
         roadPolylineRef.current.setPath(coords);
+        roadPolylineRef.current.setOptions({
+          strokeColor: '#059669',
+          strokeOpacity: 0.95,
+          strokeWeight: 4,
+          zIndex: 1,
+        });
       } else {
         roadPolylineRef.current = new google.maps.Polyline({
           path: coords,
@@ -1569,6 +1832,20 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       else if (gpsHeadingRef.current !== null) setHeading(gpsHeadingRef.current);
       else if (animFrameRef.current === null) aimAtLeg(target, leg);
 
+      // Navigation variant: the camera rides *behind* the vehicle — heading
+      // follows the road under the wheels so the route points up-screen, and
+      // the tilt gives the 3D view. Both stop the moment the rider takes the
+      // camera (drag/zoom) or presses "Reset orientation" (north-up hold),
+      // and neither is applied on a map type that cannot rotate.
+      if (
+        variant === 'navigation' &&
+        followRef.current &&
+        !northLockRef.current &&
+        routeHeading !== null
+      ) {
+        animateOrientation(map, { heading: routeHeading, tilt: 45 }, 600);
+      }
+
       // Same fix stream drives the Moving/Idle art (§13) — created content
       // starts on Idle, a glide or rolling fix flips it to Moving.
       refreshMotorcycleState();
@@ -1631,6 +1908,54 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
         })
       : null;
 
+  // ── Full-screen chrome: one derived state from the same raw inputs ──────
+  /** The route actually drawn for the leg being driven (never another leg's). */
+  const activeRoute =
+    roadRoute && leg && roadRoute.leg === leg.kind && roadRoute.targetKey === targetKey
+      ? roadRoute
+      : null;
+  /** Rider on a fix at all — `null` timestamp means no fix has ever arrived. */
+  const gpsAgeMs = courierFix?.timestamp ? Date.now() - courierFix.timestamp : null;
+
+  const navigationState: NavigationState = deriveNavigationState({
+    hasDestination: Boolean(leg),
+    cancelled: navCancelled,
+    routeStatus,
+    hasRoute: Boolean(activeRoute),
+    alongMeters: navProgress?.alongMeters ?? null,
+    remainingMeters: navProgress?.remainingMeters ?? null,
+    distanceToManeuver: navProgress?.maneuver?.distanceMeters ?? null,
+    offRouteMeters: navProgress?.offRouteMeters ?? null,
+    accuracyMeters: courierFix?.accuracy ?? null,
+    offRouteStreak: offRouteStreakRef.current,
+    arrived: navProgress?.arrived ?? false,
+    gpsAgeMs,
+  });
+
+  /** What the teal banner says — the engine's own next maneuver, if any. */
+  const banner = activeRoute
+    ? selectBannerInstruction(activeRoute, navProgress?.alongMeters ?? 0)
+    : null;
+
+  /**
+   * The overview sheet's list: the engine's recommended route first, then the
+   * alternatives it actually returned for this request. Both come straight
+   * from routing — nothing here is padded to look fuller.
+   */
+  const routeOptions: RouteOption[] = [];
+  if (activeRoute) {
+    routeOptions.push({
+      distanceMeters: activeRoute.distanceMeters,
+      durationSeconds: activeRoute.durationSeconds,
+    });
+    for (const alternative of alternatives) {
+      routeOptions.push({
+        distanceMeters: alternative.distanceMeters,
+        durationSeconds: alternative.durationSeconds,
+      });
+    }
+  }
+
   /**
    * Voice ON/OFF. The tap itself is the user gesture that arms speech (browsers
    * refuse to start talking without one) — on a blocked session the first tap
@@ -1643,6 +1968,83 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
     navigationVoice.setEnabled(!state.enabled);
   };
 
+  // ── Navigation chrome callbacks ─────────────────────────────────────────
+  /**
+   * Ask the engine for real alternatives (same origin/destination, same
+   * request) — only when the overview sheet actually opens. Nothing is
+   * fabricated: an engine that returns one route shows exactly that.
+   */
+  const loadAlternatives = () => {
+    if (!courierPosition || !leg) return;
+    if (alternativesStatus === 'loading') return;
+    const requestedFor = `${leg.kind}:${targetKey}`;
+    setAlternativesStatus('loading');
+    calculateRouteSet(courierPosition, leg.target, { steps: true, alternatives: true })
+      .then((set) => {
+        if (!mountedRef.current) return;
+        if (!set) {
+          setAlternativesStatus('failed');
+          return;
+        }
+        // The rider moved on to another leg while the request was in flight:
+        // its alternatives describe a journey that no longer exists.
+        if (`${leg.kind}:${targetKey}` !== requestedFor) return;
+        setAlternatives(set.alternatives);
+        setAlternativesStatus('ready');
+      })
+      .catch(() => {
+        if (mountedRef.current) setAlternativesStatus('failed');
+      });
+  };
+
+  /**
+   * Draw the route the rider picked. Index 0 is the engine's recommendation
+   * (the primary already on screen); anything else is a real alternative
+   * returned by the same request, spliced in wholesale so its steps, ETA and
+   * geometry all come from the engine.
+   */
+  const selectRoute = (index: number) => {
+    if (!leg) return;
+    if (index === 0) {
+      const primary = primaryRoute;
+      if (primary && (primary.leg !== leg.kind || primary.targetKey !== targetKey)) return;
+      setSelectedAlternative(0);
+      if (primary) {
+        setRoadRoute({ ...primary, leg: leg.kind, phase: leg.phase, targetKey });
+        setRouteStatus('ready');
+      }
+      return;
+    }
+    const alternative = alternatives[index - 1];
+    if (!alternative) return;
+    setSelectedAlternative(index);
+    setRoadRoute({ ...alternative, leg: leg.kind, phase: leg.phase, targetKey });
+    setRouteStatus('ready');
+    navLog('NAVIGATION_ALTERNATIVE_SELECTED', {
+      index,
+      distanceMeters: alternative.distanceMeters,
+      durationSeconds: alternative.durationSeconds,
+    });
+  };
+
+  /**
+   * Leave navigation. The session is marked cancelled FIRST so no late GPS fix
+   * or route reply can resurrect it, then the host is told to unmount us.
+   */
+  const exitNavigation = () => {
+    navLog('NAVIGATION_EXITED', { phase: leg?.phase ?? 'IDLE', targetKey });
+    setNavCancelled(true);
+    setRoadRoute(null);
+    setNavProgress(null);
+    setRouteStatus('idle');
+    setAlternatives([]);
+    setAlternativesStatus('idle');
+    setSelectedAlternative(0);
+    setPrimaryRoute(null);
+    notifyRouteUpdate(null);
+    onExitNavigation?.();
+  };
+
   return (
     <div
       className={`relative w-full ${className} overflow-hidden bg-slate-100 z-0 ${
@@ -1653,8 +2055,46 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           empty div and every overlay below stays a sibling. */}
       <div ref={containerRef} className="absolute inset-0" />
 
+      {/* ── Navigation chrome — full-screen rider view ──────────────────── */}
+      {isNavigationVariant && mapReady && (
+        <NavigationChrome
+          state={navigationState}
+          banner={banner}
+          remainingMeters={navProgress?.remainingMeters ?? 0}
+          remainingSeconds={navProgress?.remainingSeconds ?? 0}
+          arrivalClock={etaAt}
+          destinationLabel={destinationLabel}
+          legLabel={leg?.kind === 'TO_PICKUP' ? 'To pickup' : 'To customer'}
+          routeStatus={routeStatus}
+          voice={voiceUi}
+          heading={cameraHeading}
+          following={following}
+          accuracyMeters={courierFix?.accuracy ?? null}
+          steps={activeRoute?.steps ?? []}
+          routes={routeOptions}
+          selectedRouteIndex={selectedAlternative}
+          providerId={activeRoute?.provider ?? 'routing engine'}
+          orderId={orderId}
+          phase={leg?.phase ?? null}
+          reportPoint={courierPosition}
+          onExit={exitNavigation}
+          onRecenter={() => setFollow(true)}
+          onResetOrientation={() => {
+            const map = mapRef.current;
+            if (!map) return;
+            northLockRef.current = true;
+            cancelOrientationAnimation(map);
+            animateOrientation(map, { heading: 0 }, 400);
+            setCameraHeading(0);
+          }}
+          onToggleVoice={handleVoiceToggle}
+          onSelectRoute={selectRoute}
+          onLoadRoutes={loadAlternatives}
+        />
+      )}
+
       {/* ── Navigation HUD — courier-only turn-by-turn overlay ──────────── */}
-      {showNavigationHud && mapReady && (
+      {showNavigationHud && !isNavigationVariant && mapReady && (
         <div className="pointer-events-none absolute inset-x-0 top-0 z-[900] flex flex-col items-start gap-2 p-3">
           {/* Next maneuver, straight from the routing engine's steps */}
           {!navProgress?.arrived && maneuver && (
@@ -1766,7 +2206,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
 
       {/* Bottom strip: the navigation information panel for this leg —
           visually attached to the map, never a floating card (§12). */}
-      {showNavigationHud && mapReady && navProgress && (
+      {showNavigationHud && !isNavigationVariant && mapReady && navProgress && (
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-[900] border-t border-slate-200 bg-white px-4 pt-2 pb-2.5 shadow-[0_-2px_10px_rgba(15,23,42,0.07)]">
           <p className="truncate text-[11px] leading-tight text-slate-500">
             <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-700">
@@ -1804,8 +2244,9 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       )}
 
       {/* Camera-follow: the current-location control. Shown only after the
-          user drags/zooms away from the rider. */}
-      {courierPosition && !following && (
+          user drags/zooms away from the rider. The navigation chrome has its
+          own re-centre pill, so it never draws this one. */}
+      {courierPosition && !following && !isNavigationVariant && (
         <button
           type="button"
           onClick={() => setFollow(true)}

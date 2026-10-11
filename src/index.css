@@ -27,6 +27,15 @@
   --color-accent: #fd6902;
   --color-canvas: #f6f5f1;
 
+  /* Navigation screen (the full-screen turn-by-turn surface).
+     Kept apart from the brand palette on purpose: the guidance banner reads as
+     its own thing (teal), the route reads against the dark basemap (cyan), and
+     the panels stay near-black so the map is the brightest thing on screen. */
+  --color-nav-teal: #0f6b62;
+  --color-nav-teal-deep: #0b544d;
+  --color-nav-cyan: #22d3ee;
+  --color-nav-ink: #0b1220;
+
   --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04);
 
   --animate-sg-in: sg-in 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;

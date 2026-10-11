@@ -87,7 +87,7 @@ interface CacheEntry<T> {
   expires: number;
 }
 
-const routeCache = new Map<string, CacheEntry<NavigationRoute | null>>();
+const routeCache = new Map<string, CacheEntry<RouteCalculation | null>>();
 const geocodeCache = new Map<string, CacheEntry<LatLng | null>>();
 const searchCache = new Map<string, CacheEntry<AddressSuggestion[]>>();
 const reverseCache = new Map<string, CacheEntry<string | null>>();
@@ -138,6 +138,20 @@ const routeCacheKey = (from: NavPoint, to: NavPoint, suffix: string): string =>
 export interface RouteRequestOptions {
   /** Ask the engine for turn-by-turn steps (navigation screens). Default `false`. */
   steps?: boolean;
+  /**
+   * Ask for alternative routes as well as the best one. Costs a slightly
+   * heavier response, so it is only requested by the route-overview sheet —
+   * the turn-by-turn loop itself never asks for it.
+   */
+  alternatives?: boolean;
+}
+
+/** What the configured engine can actually offer — never assumed. */
+export interface RoutingCapabilities {
+  /** Engine returns traffic-aware durations / incidents along the route. */
+  liveTraffic: boolean;
+  /** Engine can return alternative routes for one request. */
+  alternatives: boolean;
 }
 
 /**
@@ -149,6 +163,8 @@ export interface RouteRequestOptions {
 export interface RoutingService {
   /** Stable identifier, stored on every route it produces. */
   readonly id: string;
+  /** What this engine can honestly provide (traffic, alternatives). */
+  readonly capabilities: RoutingCapabilities;
   /**
    * Calculate the drivable road route from `origin` to `destination`.
    * Resolves to `null` (never throws) when no route can be resolved.
@@ -281,8 +297,25 @@ const parseOsrmRoute = (route: OsrmRouteRaw | undefined, provider: string): Navi
 
 // ── The OSRM-backed service ────────────────────────────────────────────────
 
+/**
+ * A primary route plus any alternatives the engine returned for the same
+ * request. `alternatives` is empty when the engine cannot (or was not asked
+ * to) produce them — it is never padded with invented lines.
+ */
+export interface RouteCalculation {
+  primary: NavigationRoute;
+  alternatives: NavigationRoute[];
+}
+
 class OsrmRoutingService implements RoutingService {
   readonly id = 'OSRM';
+  /**
+   * The public OSRM profile returns duration from road class and typical
+   * speeds: no live traffic, no incidents, no closures. Saying otherwise in
+   * the UI would be a fabrication, so the flag stays `false` until a provider
+   * that really reports traffic is configured.
+   */
+  readonly capabilities: RoutingCapabilities = { liveTraffic: false, alternatives: true };
 
   async calculateRoute(
     origin: NavPoint,
@@ -293,10 +326,21 @@ class OsrmRoutingService implements RoutingService {
     // and the never-throw contract stay in exactly one place.
     return calculateRoute(origin, destination, options);
   }
+
+  async calculateRouteSet(
+    origin: NavPoint,
+    destination: NavPoint,
+    options: RouteRequestOptions = {}
+  ): Promise<RouteCalculation | null> {
+    return calculateRouteSet(origin, destination, options);
+  }
 }
 
 /** The routing backend used across the app (swap here to change providers). */
 export const routingService: RoutingService = new OsrmRoutingService();
+
+/** What the currently configured engine supports (traffic, alternatives). */
+export const routingCapabilities: RoutingCapabilities = routingService.capabilities;
 
 /**
  * Calculate (and cache) a road route through the configured
@@ -312,6 +356,21 @@ export async function calculateRoute(
   destination: NavPoint,
   options: RouteRequestOptions = {}
 ): Promise<NavigationRoute | null> {
+  const set = await calculateRouteSet(origin, destination, options);
+  return set?.primary ?? null;
+}
+
+/**
+ * Same contract as {@link calculateRoute}, but also returns the alternative
+ * routes the engine produced for this exact request (empty when none). Used
+ * only by the route-overview sheet, so the turn-by-turn loop never pays for a
+ * heavier response.
+ */
+export async function calculateRouteSet(
+  origin: NavPoint,
+  destination: NavPoint,
+  options: RouteRequestOptions = {}
+): Promise<RouteCalculation | null> {
   const from = asCoordinate(origin);
   const to = asCoordinate(destination);
   if (!from || !to) {
@@ -322,14 +381,23 @@ export async function calculateRoute(
   if (Math.abs(from.lat - to.lat) < 1e-6 && Math.abs(from.lng - to.lng) < 1e-6) return null;
 
   const wantsSteps = options.steps === true;
+  const wantsAlternatives = options.alternatives === true && routingCapabilities.alternatives;
   prune(routeCache as Map<string, CacheEntry<unknown>>);
 
-  const key = routeCacheKey(from, to, wantsSteps ? ':steps' : '');
+  const suffix = `${wantsSteps ? ':steps' : ''}${wantsAlternatives ? ':alt' : ''}`;
+  const plainSuffix = wantsSteps ? ':steps' : '';
+  const key = routeCacheKey(from, to, suffix);
   const cached = routeCache.get(key);
   if (cached && cached.expires > Date.now()) return cached.value;
 
+  // An already-fetched alternative set answers the plain request for free.
+  if (!wantsAlternatives) {
+    const richer = routeCache.get(routeCacheKey(from, to, `${plainSuffix}:alt`));
+    if (richer && richer.expires > Date.now()) return richer.value;
+  }
+
   const pending = inFlight.get(key);
-  if (pending) return pending as Promise<NavigationRoute | null>;
+  if (pending) return pending as Promise<RouteCalculation | null>;
 
   const startedAt = Date.now();
   navLog('NAVIGATION_ROUTE_REQUEST', {
@@ -337,13 +405,21 @@ export async function calculateRoute(
     origin: from,
     destination: to,
     steps: wantsSteps,
+    alternatives: wantsAlternatives,
   });
 
-  const request = (async (): Promise<NavigationRoute | null> => {
+  const request = (async (): Promise<RouteCalculation | null> => {
     // Provider boundary: SamleyGo `{lat,lng}` → OSRM `lon,lat` URL order.
     const url =
       `${OSRM_BASE_URL}/driving/${from.lng},${from.lat};${to.lng},${to.lat}` +
-      `?overview=full&geometries=geojson&alternatives=false&steps=${wantsSteps ? 'true' : 'false'}`;
+      `?overview=full&geometries=geojson&steps=${wantsSteps || wantsAlternatives ? 'true' : 'false'}` +
+      // Verified against the public demo endpoint (2026-10): it accepts
+      // `alternatives=true` but rejects the `number` parameter outright
+      // (HTTP 200 + `code: "InvalidQuery"`), so no count is sent here. An
+      // engine that offers alternatives returns them in `routes[]` and they
+      // are picked up below; one that cannot simply returns the single best
+      // route, and the overview sheet says so honestly.
+      `&alternatives=${wantsAlternatives ? 'true' : 'false'}`;
 
     const json = (await getJson(url)) as { routes?: OsrmRouteRaw[] } | null;
 
@@ -357,9 +433,11 @@ export async function calculateRoute(
       return null;
     }
 
-    const route = parseOsrmRoute(json.routes?.[0], routingService.id);
+    const parsed = (json.routes ?? [])
+      .map((route) => parseOsrmRoute(route, routingService.id))
+      .filter((route): route is NavigationRoute => route !== null);
 
-    if (!route) {
+    if (parsed.length === 0) {
       // No route (islands, water, service gap) — remember briefly to avoid retry storms.
       navLog(
         'NAVIGATION_ROUTE_FAILURE',
@@ -370,16 +448,26 @@ export async function calculateRoute(
       return null;
     }
 
+    const calculation: RouteCalculation = { primary: parsed[0], alternatives: parsed.slice(1) };
+
     navLog('NAVIGATION_ROUTE_SUCCESS', {
       provider: routingService.id,
-      distanceMeters: route.distanceMeters,
-      durationSeconds: route.durationSeconds,
-      steps: route.steps.length,
+      distanceMeters: calculation.primary.distanceMeters,
+      durationSeconds: calculation.primary.durationSeconds,
+      steps: calculation.primary.steps.length,
+      alternatives: calculation.alternatives.length,
       ms: Date.now() - startedAt,
     });
 
-    routeCache.set(key, { value: route, expires: Date.now() + ROUTE_CACHE_TTL_MS });
-    return route;
+    routeCache.set(key, { value: calculation, expires: Date.now() + ROUTE_CACHE_TTL_MS });
+    // A richer response also answers the plain (no-alternatives) request.
+    if (wantsAlternatives && plainSuffix !== suffix) {
+      routeCache.set(routeCacheKey(from, to, plainSuffix), {
+        value: calculation,
+        expires: Date.now() + ROUTE_CACHE_TTL_MS,
+      });
+    }
+    return calculation;
   })();
 
   inFlight.set(key, request);

@@ -367,16 +367,19 @@ export const RestaurantDashboard: React.FC = () => {
         changed_by: user.id,
       });
 
-      // If marked READY, notify online couriers
+      // If marked READY, notify online couriers.
+      // Reads the RLS-safe directory function: a restaurant may enumerate
+      // riders who could pick up, never their live coordinates.
       if (status === 'READY_FOR_PICKUP') {
-        const { data: onlineCouriers } = await supabase
-          .from('couriers')
-          .select('id')
-          .eq('is_online', true)
-          .eq('is_approved', true);
+        const { data: onlineCouriers } = await supabase.rpc('courier_driver_directory', {
+          p_only_online: true,
+          p_only_approved: true,
+          p_limit: 200,
+        });
 
-        if (onlineCouriers && onlineCouriers.length > 0) {
-          const notifs = onlineCouriers.map((c) => ({
+        const riders = (onlineCouriers as Array<{ id: string }> | null) ?? [];
+        if (riders.length > 0) {
+          const notifs = riders.map((c) => ({
             user_id: c.id,
             title: '🛵 Food Ready for Pickup!',
             message: `Pickup order at ${restaurant?.name}. Delivery fee + tip waiting.`,
@@ -398,24 +401,23 @@ export const RestaurantDashboard: React.FC = () => {
     setAssignDriverOrder(order);
     setIsLoadingCouriers(true);
     try {
-      const { data: couriersData } = await supabase
-        .from('couriers')
-        .select(
-          'id, vehicle_type, vehicle_plate, is_approved, is_online, availability_status, total_deliveries, rating, profile:profiles(id, full_name, avatar_url, phone)'
-        )
-        .eq('is_online', true);
+      // Rider directory (no coordinates, no verification data) — the courier
+      // table's SELECT policy is participant-only, so the dispatch list goes
+      // through the restaurant-scoped function instead.
+      const { data: couriersData } = await supabase.rpc('courier_driver_directory', {
+        p_only_online: true,
+        p_limit: 50,
+      });
 
       if (couriersData && couriersData.length > 0) {
-        setAvailableCouriers(couriersData);
+        setAvailableCouriers(couriersData as any[]);
       } else {
         // Fallback: load any registered couriers if none currently flagged online
-        const { data: allCouriers } = await supabase
-          .from('couriers')
-          .select(
-            'id, vehicle_type, vehicle_plate, is_approved, is_online, availability_status, total_deliveries, rating, profile:profiles(id, full_name, avatar_url, phone)'
-          )
-          .limit(10);
-        setAvailableCouriers(allCouriers || []);
+        const { data: allCouriers } = await supabase.rpc('courier_driver_directory', {
+          p_only_online: false,
+          p_limit: 10,
+        });
+        setAvailableCouriers((allCouriers as any[]) || []);
       }
     } catch {
       setAvailableCouriers([]);

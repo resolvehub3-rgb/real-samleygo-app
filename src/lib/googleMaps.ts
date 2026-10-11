@@ -33,6 +33,15 @@ export const ACCRA: google.maps.LatLngLiteral = { lat: 5.6037, lng: -0.187 };
 let pending: Promise<void> | null = null;
 let ready = false;
 
+/**
+ * `google.maps.ColorScheme` lives in the `core` library, not in `maps`, so the
+ * value is stashed here once the loader has pulled `core` in. `null` means the
+ * API never handed it to us — callers then simply omit `colorScheme` and the
+ * map renders in Google's default light mode (a missing dark theme must never
+ * break the map).
+ */
+let colorScheme: typeof google.maps.ColorScheme | null = null;
+
 const toError = (value: unknown): Error =>
   value instanceof Error
     ? value
@@ -105,7 +114,15 @@ export function loadGoogleMaps(): Promise<void> {
       const importLibrary =
         typeof google !== 'undefined' ? google.maps?.importLibrary : undefined;
       if (typeof importLibrary === 'function') {
-        Promise.all([importLibrary('maps'), importLibrary('marker')]).then(succeed).catch(fail);
+        Promise.all([importLibrary('maps'), importLibrary('marker'), importLibrary('core')])
+          .then(() => {
+            // `ColorScheme` (LIGHT/DARK/FOLLOW_SYSTEM) ships with `core`.
+            colorScheme =
+              (google.maps as unknown as { ColorScheme?: typeof google.maps.ColorScheme })
+                .ColorScheme ?? null;
+            succeed();
+          })
+          .catch(fail);
         return;
       }
       if (attempt >= 200) {
@@ -153,6 +170,20 @@ export function loadGooglePlaces(): Promise<google.maps.PlacesLibrary | null> {
 // the "camera follows the rider" pan is tweened here to keep the motion as
 // smooth as the Leaflet pan it replaced.
 
+/**
+ * Value for `MapOptions.colorScheme`, or `undefined` when the API did not
+ * expose the enum (older bundle, blocked `core` library).
+ *
+ * `DARK` is Google's own supported dark roadmap — it is chosen at map
+ * construction because `colorScheme` cannot be changed afterwards, and it is
+ * the only dark basemap that needs no cloud Map ID or custom style array
+ * (`MapOptions.styles` is ignored as soon as a `mapId` is present).
+ */
+export function mapColorScheme(mode: 'LIGHT' | 'DARK' | 'FOLLOW_SYSTEM'): string | undefined {
+  if (!colorScheme) return undefined;
+  return colorScheme[mode];
+}
+
 const panFrames = new WeakMap<google.maps.Map, number>();
 
 /** Stops an in-flight `panToAnimated` — call when the user takes the camera. */
@@ -193,6 +224,63 @@ export function panToAnimated(
     else panFrames.delete(map);
   };
   panFrames.set(map, requestAnimationFrame(step));
+}
+
+const orientationFrames = new WeakMap<google.maps.Map, number>();
+
+/** Stops an in-flight `animateOrientation` — call before a manual rotation. */
+export function cancelOrientationAnimation(map: google.maps.Map): void {
+  const frame = orientationFrames.get(map);
+  if (frame !== undefined) {
+    cancelAnimationFrame(frame);
+    orientationFrames.delete(map);
+  }
+}
+
+/**
+ * Ease the camera onto a new bearing (and optional tilt) so the map never
+ * snaps when the navigation camera takes the wheel. Tilt is applied directly —
+ * Google clamps it to whatever the current zoom supports, and a tweened tilt
+ * reads as lag on a phone.
+ *
+ * Both are ignored on a map that does not support them (raster tiles without
+ * a vector Map ID): `setHeading`/`setTilt` simply have no visible effect.
+ */
+export function animateOrientation(
+  map: google.maps.Map,
+  target: { heading?: number; tilt?: number },
+  durationMs = 600
+): void {
+  cancelOrientationAnimation(map);
+
+  if (target.tilt !== undefined) {
+    try {
+      map.setTilt(target.tilt);
+    } catch {
+      // A map type without tilt support — the overhead view is fine.
+    }
+  }
+
+  const to = target.heading;
+  if (to === undefined || !Number.isFinite(to)) return;
+
+  const from = map.getHeading() ?? 0;
+  let delta = ((to - from) % 360 + 540) % 360 - 180; // shortest way round
+  if (Math.abs(delta) < 0.5) return;
+  if (durationMs <= 0) {
+    map.setHeading(to);
+    return;
+  }
+
+  const startedAt = performance.now();
+  const step = (now: number): void => {
+    const t = Math.min(1, (now - startedAt) / durationMs);
+    const k = 1 - (1 - t) ** 3;
+    map.setHeading(from + delta * k);
+    if (t < 1) orientationFrames.set(map, requestAnimationFrame(step));
+    else orientationFrames.delete(map);
+  };
+  orientationFrames.set(map, requestAnimationFrame(step));
 }
 
 /**

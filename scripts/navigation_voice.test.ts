@@ -840,17 +840,34 @@ test('exactly one module touches the browser speech API', () => {
 });
 
 test('the voice engine is fed from courier navigation only', () => {
+  // Only courier surfaces may CALL into the engine. The full-screen chrome
+  // imports a UI-state type from the module but never drives it — it receives
+  // state and a toggle callback as props instead.
+  assert.deepEqual(filesWith('navigationVoice.'), [
+    'src/components/courier/CourierLiveMap.tsx',
+  ]);
   assert.deepEqual(filesWith('navigationVoice'), [
     'src/components/courier/CourierLiveMap.tsx',
+    'src/components/navigation/NavigationChrome.tsx',
     'src/lib/navigationVoice.ts',
   ]);
+  const chrome = stripComments(read('src', 'components', 'navigation', 'NavigationChrome.tsx'));
+  assert.equal(/navigationVoice\s*\./.test(chrome), false, 'the chrome never calls the engine');
 });
 
 test('the map feeds voice only behind the courier HUD flag, with attach/detach', () => {
   const map = stripComments(read('src', 'components', 'courier', 'CourierLiveMap.tsx'));
   assert.ok(
-    /if \(showNavigationHud\) \{\s*navigationVoice\.update\(/.test(map),
-    'every update is gated on the courier-only HUD flag'
+    /if \(voiceActive\) \{\s*navigationVoice\.update\(/.test(map),
+    'every update is gated on the courier-only voice flag'
+  );
+  assert.ok(
+    /const voiceActive = showNavigationHud \|\| isNavigationVariant;/.test(map),
+    'the flag is the courier HUD OR the courier-only navigation variant'
+  );
+  assert.ok(
+    /showNavigationHud\?: boolean;/.test(map),
+    'the courier-only prop still exists'
   );
   assert.ok(map.includes('navigationVoice.attach('), 'the screen joins the session');
   assert.ok(map.includes('navigationVoice.detach('), 'and leaves it on unmount');
