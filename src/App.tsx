@@ -10,6 +10,7 @@ import { SplashScreen } from './components/common/SplashScreen';
 
 // Pages
 import { HomePage } from './pages/customer/HomePage';
+import { ErrandsPage } from './pages/customer/ErrandsPage';
 import { RestaurantsExplorePage } from './pages/public/RestaurantsExplorePage';
 import { RestaurantDetailPage } from './pages/customer/RestaurantDetailPage';
 import { CartPage } from './pages/customer/CartPage';
@@ -75,6 +76,14 @@ export default function App() {
                   element={
                     <ProtectedRoute>
                       <ProfilePage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/errands"
+                  element={
+                    <ProtectedRoute allowedRoles={['CUSTOMER', 'SUPER_ADMIN']}>
+                      <ErrandsPage />
                     </ProtectedRoute>
                   }
                 />

@@ -4,6 +4,7 @@ import {
   AlertCircle,
   Bell,
   Bike,
+  Car,
   ChartColumn,
   CheckCircle,
   ChefHat,
@@ -19,6 +20,7 @@ import {
   Map as MapIcon,
   MapPin,
   Menu,
+  Package,
   Percent,
   Phone,
   Receipt,
@@ -63,6 +65,26 @@ import {
   MAX_RESTAURANT_COMMISSION_PERCENTAGE,
 } from '../../lib/commission';
 import { VERIFICATION_META } from '../../lib/verification';
+import {
+  ACTIVE_ERRANDS_STATUSES,
+  ERRANDS_SERVICE_LABELS,
+  ERRANDS_STATUS_LABELS,
+  canTransition,
+  type ErrandsBooking,
+  type ErrandsBookingDetails,
+  type ErrandsBookingStatus,
+  type ErrandsConfig,
+  type ErrandsDriverCapability,
+  type ErrandsPricingSettings,
+} from '../../lib/errands/types';
+import { calculateErrandsFare, ERRANDS_PRICING_UNCONFIGURED_MESSAGE } from '../../lib/errands/pricing';
+import {
+  fetchErrandsConfig,
+  fetchErrandsPricingSettings,
+  parseConfig,
+  parsePricingSettings,
+} from '../../lib/errands/config';
+import { parseBooking, setErrandsBookingStatus } from '../../lib/errands/booking';
 import { DocumentImage } from '../../components/common/DocumentImage';
 import { AdminDispatchMap } from '../../components/admin/AdminDispatchMap';
 import type { LucideIcon } from 'lucide-react';
@@ -73,6 +95,7 @@ type AdminTab =
   | 'RESTAURANTS'
   | 'COURIERS'
   | 'ORDERS'
+  | 'ERRANDS'
   | 'SETTINGS'
   | 'AUDIT';
 
@@ -90,6 +113,7 @@ const TAB_KEYS: AdminTab[] = [
   'RESTAURANTS',
   'COURIERS',
   'ORDERS',
+  'ERRANDS',
   'SETTINGS',
   'AUDIT',
 ];
@@ -104,6 +128,7 @@ const DEFAULT_NAV_LABEL: Record<AdminTab, string> = {
   RESTAURANTS: 'Kitchen Queue',
   COURIERS: 'Courier Map',
   ORDERS: 'Dispatch',
+  ERRANDS: 'Errands & Rides',
   SETTINGS: 'Settings',
   AUDIT: 'Analytics',
 };
@@ -499,6 +524,232 @@ const DashboardSkeleton = () => (
 /** Distance used by the pricing preview panel. */
 const SAMPLE_DISTANCE_KM = 5;
 
+/** ---- Errands & On-Demand Rides — console helpers ------------------------- */
+
+const errandsStatusStyle = (status: ErrandsBookingStatus): string => {
+  switch (status) {
+    case 'COMPLETED':
+      return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-500/20';
+    case 'CANCELLED':
+    case 'FAILED':
+      return 'bg-rose-50 text-rose-700 ring-1 ring-rose-500/20';
+    case 'EXPIRED':
+      return 'bg-amber-50 text-amber-700 ring-1 ring-amber-500/25';
+    default:
+      return 'bg-sky-50 text-sky-700 ring-1 ring-sky-500/20';
+  }
+};
+
+const errandsStatusDot = (status: ErrandsBookingStatus): string => {
+  switch (status) {
+    case 'COMPLETED':
+      return 'bg-emerald-500';
+    case 'CANCELLED':
+    case 'FAILED':
+      return 'bg-rose-500';
+    case 'EXPIRED':
+      return 'bg-amber-500';
+    default:
+      return 'bg-sky-500';
+  }
+};
+
+const errandsStatusIsLive = (status: ErrandsBookingStatus): boolean =>
+  ACTIVE_ERRANDS_STATUSES.includes(status);
+
+interface SwitchProps {
+  id: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  disabled?: boolean;
+  label: string;
+  hint?: React.ReactNode;
+}
+
+/** On/off switch used by the Errands operator and driver-capability toggles. */
+const Switch: React.FC<SwitchProps> = ({ id, checked, onChange, disabled, label, hint }) => (
+  <div className="flex items-start justify-between gap-4">
+    <div className="min-w-0">
+      <label htmlFor={id} className="block text-[13px] font-black text-slate-900">
+        {label}
+      </label>
+      {hint && <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500">{hint}</p>}
+    </div>
+    <button
+      id={id}
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`relative mt-0.5 h-6 w-11 shrink-0 rounded-full transition disabled:opacity-50 ${
+        checked ? 'bg-emerald-500' : 'bg-slate-300'
+      }`}
+    >
+      <span
+        className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
+          checked ? 'left-[22px]' : 'left-0.5'
+        }`}
+      />
+    </button>
+  </div>
+);
+
+/** Fare-rules form draft — kept as strings so an optional field can be empty. */
+interface ErrandsPricingDraft {
+  baseFare: string;
+  perKmRate: string;
+  minFare: string;
+  maxFare: string;
+  bookingFee: string;
+  taxRatePercent: string;
+  driverEarningPercentage: string;
+  surgeMultiplier: string;
+}
+
+interface ErrandsPricingDraftValues {
+  baseFare: number;
+  perKmRate: number;
+  minFare: number;
+  /** `null` = no ceiling. */
+  maxFare: number | null;
+  bookingFee: number;
+  taxRatePercent: number;
+  driverEarningPercentage: number;
+  surgeMultiplier: number;
+}
+
+/**
+ * Mirrors the bounds enforced by `set_errands_pricing()` in the database, so
+ * the admin gets a fast, friendly message; the database validates again and
+ * remains the authority (its sentences are shown verbatim on failure).
+ */
+const parseErrandsPricingDraft = (
+  draft: ErrandsPricingDraft
+): { ok: true; values: ErrandsPricingDraftValues } | { ok: false; error: string } => {
+  const read = (raw: string): number | null => {
+    const trimmed = raw.trim();
+    if (trimmed === '') return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  const base = read(draft.baseFare);
+  if (base === null || base < 0 || base > 9999.99) {
+    return { ok: false, error: 'Base fare must be a number between 0 and 9999.99.' };
+  }
+  const perKm = read(draft.perKmRate);
+  if (perKm === null || perKm < 0 || perKm > 9999.99) {
+    return { ok: false, error: 'Price per kilometre must be a number between 0 and 9999.99.' };
+  }
+  const min = read(draft.minFare);
+  if (min === null || min < 0 || min > 999999.99) {
+    return { ok: false, error: 'Minimum fare must be a number between 0 and 999999.99.' };
+  }
+  let max: number | null = null;
+  if (draft.maxFare.trim() !== '') {
+    max = read(draft.maxFare);
+    if (max === null || max < 0 || max > 999999.99) {
+      return {
+        ok: false,
+        error: 'Maximum fare must be empty (no cap) or a number between 0 and 999999.99.',
+      };
+    }
+    if (max < min) {
+      return { ok: false, error: 'The maximum fare cannot be lower than the minimum fare.' };
+    }
+  }
+  const fee = read(draft.bookingFee);
+  if (fee === null || fee < 0 || fee > 9999.99) {
+    return { ok: false, error: 'Booking fee must be a number between 0 and 9999.99.' };
+  }
+  const tax = read(draft.taxRatePercent);
+  if (tax === null || tax < 0 || tax > 100) {
+    return { ok: false, error: 'Tax rate must be between 0 and 100 percent.' };
+  }
+  const earning = read(draft.driverEarningPercentage);
+  if (earning === null || earning < 0 || earning > 100) {
+    return { ok: false, error: 'Driver earning percentage must be between 0 and 100.' };
+  }
+  const surge = read(draft.surgeMultiplier);
+  if (surge === null || surge < 0.1 || surge > 5) {
+    return {
+      ok: false,
+      error:
+        'Surge multiplier must be between 0.1 and 5 (use 1 when surge pricing is not in effect).',
+    };
+  }
+  return {
+    ok: true,
+    values: {
+      baseFare: base,
+      perKmRate: perKm,
+      minFare: min,
+      maxFare: max,
+      bookingFee: fee,
+      taxRatePercent: tax,
+      driverEarningPercentage: earning,
+      surgeMultiplier: surge,
+    },
+  };
+};
+
+const asNullableNum = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+const asText = (value: unknown): string | null =>
+  typeof value === 'string' && value.trim() ? value.trim() : null;
+
+/** `errands_booking_details` row → the shape the console renders. */
+const parseErrandsDetailsRow = (raw: unknown): ErrandsBookingDetails | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  const row = raw as Record<string, unknown>;
+  return {
+    pickupLatitude: asNullableNum(row.pickup_latitude),
+    pickupLongitude: asNullableNum(row.pickup_longitude),
+    pickupAddress: asText(row.pickup_address),
+    destinationLatitude: asNullableNum(row.destination_latitude),
+    destinationLongitude: asNullableNum(row.destination_longitude),
+    destinationAddress: asText(row.destination_address),
+    customerName: asText(row.customer_name),
+    customerPhone: asText(row.customer_phone),
+    driverName: asText(row.driver_name),
+    driverAvatarUrl: asText(row.driver_avatar_url),
+    driverVehicleType: asText(row.driver_vehicle_type),
+    driverVehiclePlate: asText(row.driver_vehicle_plate),
+    driverRating: asNullableNum(row.driver_rating),
+  };
+};
+
+interface ErrandsHistoryEntry {
+  id: string;
+  from_status: string | null;
+  to_status: string;
+  note: string | null;
+  created_at: string;
+  actor?: { full_name?: string | null; role?: string | null } | null;
+}
+
+/** `errands_status_history` rows, oldest first (the audit order). */
+const parseErrandsHistoryRows = (raw: unknown): ErrandsHistoryEntry[] => {
+  if (!Array.isArray(raw)) return [];
+  return (raw as Record<string, unknown>[])
+    .filter((row) => typeof row?.id === 'string')
+    .map((row) => ({
+      id: String(row.id),
+      from_status: asText(row.from_status),
+      to_status: String(row.to_status ?? ''),
+      note: asText(row.note),
+      created_at: String(row.created_at ?? ''),
+      actor: (row.actor ?? null) as ErrandsHistoryEntry['actor'],
+    }));
+};
+
+/** Short form of an ID for the console lists (full value stays in titles). */
+const shortId = (value: string | null | undefined): string =>
+  value ? value.slice(0, 8) : '—';
+
 export const AdminDashboard: React.FC = () => {
   const { user, profile, signOut } = useAuth();
   const navigate = useNavigate();
@@ -528,6 +779,60 @@ export const AdminDashboard: React.FC = () => {
   const [commissionError, setCommissionError] = useState('');
   const [commissionConfirm, setCommissionConfirm] = useState<number | null>(null);
   const [isSavingCommission, setIsSavingCommission] = useState(false);
+
+  // ---- Errands & On-Demand Rides (super admin console) ----
+  // Bookings are fetched newest-first (latest 200) and every metric on the
+  // tab is computed from those real rows — nothing here is a placeholder.
+  const [errandsBookings, setErrandsBookings] = useState<ErrandsBooking[]>([]);
+  const [errandsCapabilities, setErrandsCapabilities] = useState<ErrandsDriverCapability[]>([]);
+  const [errandsConfig, setErrandsConfig] = useState<ErrandsConfig | null>(null);
+  const [errandsPricing, setErrandsPricing] = useState<ErrandsPricingSettings | null>(null);
+  const [isErrandsLoading, setIsErrandsLoading] = useState(true);
+
+  // Service switches (module enabled + per-category), saved via set_errands_config.
+  const [errandsConfigDraft, setErrandsConfigDraft] = useState({
+    enabled: true,
+    motorcycle: true,
+    rideCar: false,
+  });
+  const [isSavingErrandsConfig, setIsSavingErrandsConfig] = useState(false);
+
+  // Fare rules draft, saved via set_errands_pricing (the ONLY write path).
+  const [errandsPricingDraft, setErrandsPricingDraft] = useState<ErrandsPricingDraft>({
+    baseFare: '',
+    perKmRate: '',
+    minFare: '',
+    maxFare: '',
+    bookingFee: '',
+    taxRatePercent: '',
+    driverEarningPercentage: '',
+    surgeMultiplier: '',
+  });
+  const [errandsPricingFormError, setErrandsPricingFormError] = useState('');
+  const [isSavingErrandsPricing, setIsSavingErrandsPricing] = useState(false);
+  // Admin-only preview distance (never a customer price — see pricing.ts).
+  const [errandsPreviewKmInput, setErrandsPreviewKmInput] = useState(
+    String(SAMPLE_DISTANCE_KM)
+  );
+
+  // Bookings: text search, status filter and the lazily-loaded expand row.
+  const [errandsQuery, setErrandsQuery] = useState('');
+  const [errandsStatusFilter, setErrandsStatusFilter] = useState<'ALL' | ErrandsBookingStatus>(
+    'ALL'
+  );
+  const [errandsExpandedId, setErrandsExpandedId] = useState<string | null>(null);
+  const [errandsExpanded, setErrandsExpanded] = useState<{
+    loading: boolean;
+    details: ErrandsBookingDetails | null;
+    history: ErrandsHistoryEntry[];
+    error: string;
+  } | null>(null);
+  const [errandsCancelTarget, setErrandsCancelTarget] = useState<ErrandsBooking | null>(null);
+  const [isCancellingErrands, setIsCancellingErrands] = useState(false);
+
+  // Driver service capabilities (motorcycle errands / passenger rides).
+  const [savingCapabilityId, setSavingCapabilityId] = useState<string | null>(null);
+
   // Refund dialog (server-side validated through the record_order_refund RPC).
   const [refundOrder, setRefundOrder] = useState<Order | null>(null);
   const [refundAmount, setRefundAmount] = useState('');
@@ -1001,6 +1306,268 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
+  // ---- Errands & On-Demand Rides: data, operators switches and actions ----
+
+  // The tab loads its own data (bookings, switches, pricing, capabilities)
+  // the first time it is opened and on every explicit refresh, instead of
+  // adding four queries to every dashboard mount.
+  const fetchErrandsData = async () => {
+    if (!isSupabaseConfigured) {
+      setIsErrandsLoading(false);
+      return;
+    }
+    try {
+      const [bookingsResult, config, pricing, capsResult] = await Promise.all([
+        supabase
+          .from('errands_bookings')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(200),
+        fetchErrandsConfig(),
+        fetchErrandsPricingSettings(),
+        supabase
+          .from('driver_service_capabilities')
+          .select('courier_id, errands_enabled, motorcycle_errands, car_rides'),
+      ]);
+
+      const bookingRows = Array.isArray(bookingsResult.data)
+        ? (bookingsResult.data as unknown[])
+        : [];
+      setErrandsBookings(
+        bookingRows
+          .map((row) => parseBooking(row as Parameters<typeof parseBooking>[0] | null))
+          .filter((booking): booking is ErrandsBooking => booking !== null)
+      );
+
+      setErrandsConfig(config);
+      setErrandsPricing(pricing);
+
+      const capRows = Array.isArray(capsResult.data)
+        ? (capsResult.data as Record<string, unknown>[])
+        : [];
+      setErrandsCapabilities(
+        capRows
+          .map((row) => ({
+            courierId: String(row.courier_id ?? ''),
+            errandsEnabled: row.errands_enabled === true,
+            motorcycleErrands: row.motorcycle_errands === true,
+            carRides: row.car_rides === true,
+          }))
+          .filter((cap) => cap.courierId !== '')
+      );
+    } catch {
+      // Each reader never throws; a failure simply leaves the honest empty state.
+    } finally {
+      setIsErrandsLoading(false);
+    }
+  };
+
+  // Open = first visit to the tab; the refresh button inside the tab repeats it.
+  useEffect(() => {
+    if (activeTab === 'ERRANDS') fetchErrandsData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // Keep both form drafts in step with whatever the database last saved (first
+  // load and every successful save — the server response is the source of truth).
+  useEffect(() => {
+    if (!errandsConfig) return;
+    setErrandsConfigDraft({
+      enabled: errandsConfig.enabled,
+      motorcycle: errandsConfig.services.ERRAND_MOTORCYCLE,
+      rideCar: errandsConfig.services.RIDE_CAR,
+    });
+  }, [errandsConfig]);
+
+  useEffect(() => {
+    if (!errandsPricing) return;
+    setErrandsPricingDraft({
+      baseFare: String(errandsPricing.baseFare),
+      perKmRate: String(errandsPricing.perKmRate),
+      minFare: String(errandsPricing.minFare),
+      maxFare: errandsPricing.maxFare === null ? '' : String(errandsPricing.maxFare),
+      bookingFee: String(errandsPricing.bookingFee),
+      taxRatePercent: String(errandsPricing.taxRatePercent),
+      driverEarningPercentage: String(errandsPricing.driverEarningPercentage),
+      surgeMultiplier: String(errandsPricing.surgeMultiplier),
+    });
+    setErrandsPricingFormError('');
+  }, [errandsPricing]);
+
+  // Service switches — the database (set_errands_config) validates and audits.
+  const handleSaveErrandsConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingErrandsConfig(true);
+    try {
+      const { data, error } = await supabase.rpc('set_errands_config', {
+        p_enabled: errandsConfigDraft.enabled,
+        p_service_motorcycle: errandsConfigDraft.motorcycle,
+        p_service_ride_car: errandsConfigDraft.rideCar,
+      });
+      if (error) throw error;
+      const saved = parseConfig(data);
+      if (saved) setErrandsConfig(saved);
+      notify('Errands service switches saved.');
+    } catch (err) {
+      notify(
+        cleanRpcErrorMessage(
+          err instanceof Error ? err.message : null,
+          'Failed to save the Errands service switches. Please try again.'
+        ),
+        'error'
+      );
+    } finally {
+      setIsSavingErrandsConfig(false);
+    }
+  };
+
+  // Fare rules — validated here for a fast message AND again by
+  // set_errands_pricing(), whose exact sentence is surfaced on failure.
+  const handleSaveErrandsPricing = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const check = parseErrandsPricingDraft(errandsPricingDraft);
+    if (!check.ok) {
+      setErrandsPricingFormError(check.error);
+      return;
+    }
+    setErrandsPricingFormError('');
+    setIsSavingErrandsPricing(true);
+    try {
+      const { data, error } = await supabase.rpc('set_errands_pricing', {
+        p_base_fare: check.values.baseFare,
+        p_per_km_rate: check.values.perKmRate,
+        p_min_fare: check.values.minFare,
+        p_max_fare: check.values.maxFare,
+        p_booking_fee: check.values.bookingFee,
+        p_tax_rate_percent: check.values.taxRatePercent,
+        p_driver_earning_percentage: check.values.driverEarningPercentage,
+        p_surge_multiplier: check.values.surgeMultiplier,
+      });
+      if (error) throw error;
+      const saved = parsePricingSettings(data);
+      if (saved) setErrandsPricing(saved);
+      notify(
+        `Errands fare rules saved — pricing version ${
+          saved?.pricingVersion ?? 'updated'
+        }. New quotes use them; existing bookings never change.`
+      );
+    } catch (err) {
+      notify(
+        cleanRpcErrorMessage(
+          err instanceof Error ? err.message : null,
+          'Failed to save the Errands fare rules. Please try again.'
+        ),
+        'error'
+      );
+    } finally {
+      setIsSavingErrandsPricing(false);
+    }
+  };
+
+  // Expanded row: exact endpoints, contacts and the audit trail, loaded only
+  // when a booking is opened (never bulk-fetched for the whole table).
+  const toggleErrandsBookingDetails = async (booking: ErrandsBooking) => {
+    if (errandsExpandedId === booking.id) {
+      setErrandsExpandedId(null);
+      setErrandsExpanded(null);
+      return;
+    }
+    setErrandsExpandedId(booking.id);
+    setErrandsExpanded({ loading: true, details: null, history: [], error: '' });
+
+    const [detailsResult, historyResult] = await Promise.all([
+      supabase.from('errands_booking_details').select('*').eq('booking_id', booking.id).maybeSingle(),
+      supabase
+        .from('errands_status_history')
+        .select('id, from_status, to_status, note, created_at, actor:profiles(full_name, role)')
+        .eq('booking_id', booking.id)
+        .order('created_at', { ascending: true }),
+    ]);
+
+    const failed = detailsResult.error ?? historyResult.error;
+    setErrandsExpanded({
+      loading: false,
+      details: parseErrandsDetailsRow(detailsResult.data),
+      history: parseErrandsHistoryRows(historyResult.data),
+      error: failed
+        ? cleanRpcErrorMessage(
+            failed.message,
+            "Could not load this booking's details and history."
+          )
+        : '',
+    });
+  };
+
+  // Admin cancellation — the same guarded transition the drivers and
+  // customers use; the database re-checks the actor and the status move.
+  const confirmErrandsCancel = async () => {
+    const booking = errandsCancelTarget;
+    if (!booking) return;
+    setIsCancellingErrands(true);
+    const result = await setErrandsBookingStatus({
+      bookingId: booking.id,
+      status: 'CANCELLED',
+      note: 'Cancelled by administration',
+    });
+    setIsCancellingErrands(false);
+    if (!result.ok) {
+      notify(result.error, 'error');
+      return;
+    }
+    setErrandsBookings((prev) =>
+      prev.map((row) => (row.id === result.booking.id ? result.booking : row))
+    );
+    setErrandsCancelTarget(null);
+    notify(`${result.booking.bookingNumber || 'Booking'} cancelled by administration.`);
+  };
+
+  // Per-driver service capabilities — super-admin grant, never self-service.
+  const handleSaveErrandsCapability = async (
+    courierId: string,
+    motorcycleErrands: boolean,
+    carRides: boolean
+  ) => {
+    setSavingCapabilityId(courierId);
+    try {
+      const { data, error } = await supabase.rpc('set_driver_service_capabilities', {
+        p_courier_id: courierId,
+        p_motorcycle_errands: motorcycleErrands,
+        p_car_rides: carRides,
+      });
+      if (error) throw error;
+
+      const payload = data as {
+        courier_id?: string;
+        errands_enabled?: boolean;
+        motorcycle_errands?: boolean;
+        car_rides?: boolean;
+      } | null;
+      const savedFor = String(payload?.courier_id ?? courierId);
+      const next: ErrandsDriverCapability = {
+        courierId: savedFor,
+        errandsEnabled: payload?.errands_enabled === true,
+        motorcycleErrands: payload?.motorcycle_errands === true,
+        carRides: payload?.car_rides === true,
+      };
+      setErrandsCapabilities((prev) =>
+        prev.some((cap) => cap.courierId === savedFor)
+          ? prev.map((cap) => (cap.courierId === savedFor ? next : cap))
+          : [...prev, next]
+      );
+      notify('Driver service capabilities saved.');
+    } catch (err) {
+      notify(
+        cleanRpcErrorMessage(
+          err instanceof Error ? err.message : null,
+          "Failed to save this driver's service capabilities. Please try again."
+        ),
+        'error'
+      );
+    } finally {
+      setSavingCapabilityId(null);
+    }
+  };
+
   // Real aggregations — every money figure is read from the per-order
   // financial snapshot the database wrote (commission_rate, commission_amount,
   // *_amount), net of refund adjustments. No hard-coded percentages anywhere.
@@ -1277,6 +1844,97 @@ export const AdminDashboard: React.FC = () => {
     (sampleFoodOrder * commissionSettings.restaurant_commission_percentage) / 100
   );
 
+  // ---- Errands & On-Demand Rides: real metrics, filters and preview --------
+  // Every number below is summed from the fetched `errands_bookings` rows —
+  // the tab never shows a fabricated total. Fare volume and driver earnings
+  // count COMPLETED bookings only (that is when money actually settles).
+  const errandsStats = useMemo(() => {
+    const rows = errandsBookings;
+    const completedRows = rows.filter((b) => b.status === 'COMPLETED');
+    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const completedLast7Days = completedRows.filter((b) => {
+      const settledAt = Date.parse(b.completedAt ?? b.createdAt);
+      return Number.isFinite(settledAt) && settledAt >= sevenDaysAgo;
+    }).length;
+    return {
+      active: rows.filter((b) => ACTIVE_ERRANDS_STATUSES.includes(b.status)).length,
+      completed: completedRows.length,
+      completedLast7Days,
+      cancelled: rows.filter((b) => b.status === 'CANCELLED').length,
+      expired: rows.filter((b) => b.status === 'EXPIRED').length,
+      failed: rows.filter((b) => b.status === 'FAILED').length,
+      completedFareVolume: round2(
+        completedRows.reduce((sum, b) => sum + (b.finalFare ?? b.estimatedFare), 0)
+      ),
+      driverEarningsPaid: round2(completedRows.reduce((sum, b) => sum + b.driverEarning, 0)),
+    };
+  }, [errandsBookings]);
+
+  const filteredErrandsBookings = useMemo(() => {
+    const query = errandsQuery.trim().toLowerCase();
+    return errandsBookings.filter((b) => {
+      // Search covers the booking number and the coarse areas (exact addresses
+      // live in `errands_booking_details` and are only loaded per expanded row).
+      const matchesQuery =
+        !query ||
+        [b.bookingNumber, b.pickupArea, b.destinationArea].some(
+          (field) => (field ?? '').toLowerCase().includes(query)
+        );
+      if (!matchesQuery) return false;
+      return errandsStatusFilter === 'ALL' || b.status === errandsStatusFilter;
+    });
+  }, [errandsBookings, errandsQuery, errandsStatusFilter]);
+
+  // Live preview of the fare rules as they are being typed. This is the
+  // admin-preview copy of the formula (see errands/pricing.ts) — customers
+  // only ever see what create_errands_quote() answers for their own route.
+  const errandsPreviewSettings = useMemo<ErrandsPricingSettings>(() => {
+    const previewNumber = (raw: string, fallback: number): number => {
+      const parsed = Number(raw.trim());
+      return raw.trim() !== '' && Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const maxFare =
+      errandsPricingDraft.maxFare.trim() === ''
+        ? null
+        : previewNumber(errandsPricingDraft.maxFare, 0);
+    return {
+      configured: true,
+      currency: errandsPricing?.currency ?? 'GHS',
+      pricingVersion: errandsPricing?.pricingVersion ?? 1,
+      baseFare: previewNumber(errandsPricingDraft.baseFare, errandsPricing?.baseFare ?? 0),
+      perKmRate: previewNumber(errandsPricingDraft.perKmRate, errandsPricing?.perKmRate ?? 0),
+      minFare: previewNumber(errandsPricingDraft.minFare, errandsPricing?.minFare ?? 0),
+      maxFare,
+      bookingFee: previewNumber(errandsPricingDraft.bookingFee, errandsPricing?.bookingFee ?? 0),
+      taxRatePercent: previewNumber(
+        errandsPricingDraft.taxRatePercent,
+        errandsPricing?.taxRatePercent ?? 0
+      ),
+      surgeMultiplier: previewNumber(
+        errandsPricingDraft.surgeMultiplier,
+        errandsPricing?.surgeMultiplier ?? 1
+      ),
+      driverEarningPercentage: previewNumber(
+        errandsPricingDraft.driverEarningPercentage,
+        errandsPricing?.driverEarningPercentage ?? 100
+      ),
+      quoteTtlMinutes: errandsPricing?.quoteTtlMinutes ?? 5,
+      requestTtlSeconds: errandsPricing?.requestTtlSeconds ?? 90,
+    };
+  }, [errandsPricingDraft, errandsPricing]);
+
+  const errandsPreviewKm = Number(errandsPreviewKmInput.trim());
+  const errandsPreview = calculateErrandsFare(
+    Number.isFinite(errandsPreviewKm) && errandsPreviewKm > 0 ? errandsPreviewKm : 0,
+    errandsPreviewSettings
+  );
+
+  const errandsCapabilityByCourier = useMemo(() => {
+    const map = new Map<string, ErrandsDriverCapability>();
+    errandsCapabilities.forEach((cap) => map.set(cap.courierId, cap));
+    return map;
+  }, [errandsCapabilities]);
+
   // Single source of truth for the sidebar: desktop rail, mobile drawer and the
   // mobile top bar all render from this list, so a section can never drift.
   // Labels follow the operations mockup; `key` maps each row to the console
@@ -1289,6 +1947,9 @@ export const AdminDashboard: React.FC = () => {
     { key: 'ORDERS', label: 'Dispatch', icon: Send },
     { key: 'AUDIT', label: 'Analytics', icon: ChartColumn },
     { key: 'OVERVIEW', label: 'Earnings', icon: Wallet },
+    // Inserted just above Settings so the index-based KPI shortcuts above
+    // (navItems[2]/[3]/[5]) keep pointing at the sections they always did.
+    { key: 'ERRANDS', label: 'Errands & Rides', icon: Bike },
     { key: 'SETTINGS', label: 'Settings', icon: Settings },
   ];
 
@@ -3232,6 +3893,1145 @@ export const AdminDashboard: React.FC = () => {
                 </div>
               )}
 
+              {/* ================= ERRANDS & ON-DEMAND RIDES ================= */}
+              {activeTab === 'ERRANDS' && (
+                <div className="space-y-6">
+                  {/* ===== A. Module status + real metrics ===== */}
+                  <SectionCard
+                    title="Errands & On-Demand Rides — module status"
+                    subtitle="Every figure is computed from the 200 most recent bookings; fare volume and driver earnings count COMPLETED trips only (that is when money settles)"
+                    action={
+                      <button
+                        type="button"
+                        onClick={fetchErrandsData}
+                        disabled={isErrandsLoading}
+                        className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-black text-slate-600 transition hover:bg-slate-50 disabled:opacity-60"
+                      >
+                        <RefreshCw className={`h-3.5 w-3.5 ${isErrandsLoading ? 'animate-spin' : ''}`} />
+                        Refresh
+                      </button>
+                    }
+                  >
+                    {/* Config summary chips */}
+                    <div className="mb-4 flex flex-wrap items-center gap-2">
+                      {errandsConfig ? (
+                        <>
+                          <span
+                            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-black ring-1 ${
+                              errandsConfig.enabled
+                                ? 'bg-emerald-50 text-emerald-700 ring-emerald-500/20'
+                                : 'bg-slate-100 text-slate-600 ring-slate-200'
+                            }`}
+                          >
+                            <span
+                              className={`h-1.5 w-1.5 rounded-full ${
+                                errandsConfig.enabled ? 'bg-emerald-500' : 'bg-slate-400'
+                              }`}
+                            />
+                            Module {errandsConfig.enabled ? 'on' : 'off'}
+                          </span>
+                          <span
+                            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-black ring-1 ${
+                              errandsConfig.services.ERRAND_MOTORCYCLE
+                                ? 'bg-emerald-50 text-emerald-700 ring-emerald-500/20'
+                                : 'bg-slate-100 text-slate-600 ring-slate-200'
+                            }`}
+                          >
+                            Motorcycle errands{' '}
+                            {errandsConfig.services.ERRAND_MOTORCYCLE ? 'on' : 'off'}
+                          </span>
+                          <span
+                            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-black ring-1 ${
+                              errandsConfig.services.RIDE_CAR
+                                ? 'bg-emerald-50 text-emerald-700 ring-emerald-500/20'
+                                : 'bg-slate-100 text-slate-600 ring-slate-200'
+                            }`}
+                          >
+                            Passenger rides {errandsConfig.services.RIDE_CAR ? 'on' : 'off'}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[11px] font-black text-slate-500 ring-1 ring-slate-200">
+                          Service switches —
+                        </span>
+                      )}
+                      {errandsPricing ? (
+                        errandsPricing.configured ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-black text-emerald-700 ring-1 ring-emerald-500/20">
+                            <CheckCircle className="h-3.5 w-3.5" />
+                            Pricing configured · v{errandsPricing.pricingVersion}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1.5 text-[11px] font-black text-amber-700 ring-1 ring-amber-500/25">
+                            <AlertCircle className="h-3.5 w-3.5" />
+                            Pricing NOT configured
+                          </span>
+                        )
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[11px] font-black text-slate-500 ring-1 ring-slate-200">
+                          Pricing —
+                        </span>
+                      )}
+                    </div>
+                    {errandsPricing && !errandsPricing.configured && (
+                      <p className="mb-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-[11px] font-bold leading-relaxed text-amber-800">
+                        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+                        Customers cannot see a fare until pricing is saved below.
+                      </p>
+                    )}
+
+                    {isErrandsLoading ? (
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+                        {[
+                          'Active trips',
+                          'Completed',
+                          'Completed (7 days)',
+                          'Cancelled',
+                          'Completed fare volume',
+                          'Driver earnings paid',
+                        ].map((label) => (
+                          <SummaryTile
+                            key={label}
+                            label={label}
+                            value="—"
+                            icon={Bike}
+                            tone="sky"
+                          />
+                        ))}
+                      </div>
+                    ) : errandsBookings.length === 0 ? (
+                      <EmptyState
+                        icon={Package}
+                        title="No Errands bookings yet."
+                        hint="Real trips booked by customers will appear here — this console never shows placeholder totals."
+                      />
+                    ) : (
+                      <>
+                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+                          <SummaryTile
+                            label="Active trips"
+                            value={String(errandsStats.active)}
+                            icon={Bike}
+                            tone="sky"
+                          />
+                          <SummaryTile
+                            label="Completed"
+                            value={String(errandsStats.completed)}
+                            icon={CheckCircle}
+                            tone="emerald"
+                          />
+                          <SummaryTile
+                            label="Completed (7 days)"
+                            value={String(errandsStats.completedLast7Days)}
+                            icon={Receipt}
+                            tone="sky"
+                          />
+                          <SummaryTile
+                            label="Cancelled"
+                            value={String(errandsStats.cancelled)}
+                            icon={X}
+                            tone="rose"
+                          />
+                          <SummaryTile
+                            label="Completed fare volume"
+                            value={formatGHS(errandsStats.completedFareVolume)}
+                            icon={Wallet}
+                            tone="emerald"
+                          />
+                          <SummaryTile
+                            label="Driver earnings paid"
+                            value={formatGHS(errandsStats.driverEarningsPaid)}
+                            icon={Car}
+                            tone="violet"
+                          />
+                        </div>
+                        <p className="mt-3 text-[11px] text-slate-400">
+                          {errandsStats.expired} expired · {errandsStats.failed} failed ·{' '}
+                          {errandsBookings.length} booking
+                          {errandsBookings.length === 1 ? '' : 's'} in view (newest 200)
+                        </p>
+                      </>
+                    )}
+                  </SectionCard>
+
+                  {/* ===== B. Service switches ===== */}
+                  <SectionCard
+                    title="Service switches"
+                    subtitle="The master switch plus the two service categories customers can book — saved through set_errands_config and audited by the database"
+                  >
+                    {errandsConfig ? (
+                      <form onSubmit={handleSaveErrandsConfig} className="space-y-4">
+                        <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
+                          <Switch
+                            id="errands_module_enabled"
+                            label="Errands module enabled"
+                            hint="When the module is off, neither motorcycle errands nor passenger rides can be quoted or booked."
+                            checked={errandsConfigDraft.enabled}
+                            disabled={isSavingErrandsConfig}
+                            onChange={(next) =>
+                              setErrandsConfigDraft((d) => ({ ...d, enabled: next }))
+                            }
+                          />
+                          <div className="border-t border-slate-200 pt-4">
+                            <Switch
+                              id="errands_service_motorcycle"
+                              label="Motorcycle errands (ERRAND_MOTORCYCLE)"
+                              hint="Parcels, food and small deliveries across town."
+                              checked={errandsConfigDraft.motorcycle}
+                              disabled={isSavingErrandsConfig}
+                              onChange={(next) =>
+                                setErrandsConfigDraft((d) => ({ ...d, motorcycle: next }))
+                              }
+                            />
+                          </div>
+                          <div className="border-t border-slate-200 pt-4">
+                            <Switch
+                              id="errands_service_ride_car"
+                              label="Passenger rides (RIDE_CAR)"
+                              hint={
+                                <span className="flex gap-1.5 text-amber-700">
+                                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                  Passenger rides must only be enabled after the operational and
+                                  regulatory requirements for carrying passengers have been
+                                  reviewed.
+                                </span>
+                              }
+                              checked={errandsConfigDraft.rideCar}
+                              disabled={isSavingErrandsConfig}
+                              onChange={(next) =>
+                                setErrandsConfigDraft((d) => ({ ...d, rideCar: next }))
+                              }
+                            />
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <button
+                            type="submit"
+                            disabled={isSavingErrandsConfig}
+                            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-6 py-2.5 text-xs font-bold text-white shadow-lg shadow-emerald-600/20 transition hover:bg-emerald-700 disabled:opacity-50"
+                          >
+                            <CheckCircle className="h-4 w-4" />
+                            {isSavingErrandsConfig ? 'Saving…' : 'Save service switches'}
+                          </button>
+                          <span className="text-[11px] text-slate-400">
+                            Applies immediately to new quotes · current:{' '}
+                            {errandsConfig.enabled ? 'module on' : 'module off'}
+                          </span>
+                        </div>
+                      </form>
+                    ) : (
+                      <EmptyState
+                        icon={AlertCircle}
+                        title="Service switches unavailable"
+                        hint="The configuration could not be loaded — connect Supabase and make sure the Errands migration is applied, then refresh."
+                      />
+                    )}
+                  </SectionCard>
+
+                  {/* ===== C. Fare rules ===== */}
+                  <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+                    <SectionCard
+                      title="Fare rules"
+                      subtitle="Base + (distance × per-km), clamped by the floor and an optional ceiling, then booking fee, tax and the driver's share"
+                    >
+                      {errandsPricing && !errandsPricing.configured && (
+                        <div className="mb-4 flex items-start gap-2.5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                          <div className="min-w-0">
+                            <p className="text-xs font-bold leading-relaxed text-amber-800">
+                              Fare rules have not been configured yet.
+                            </p>
+                            <p className="mt-1 text-[11px] leading-relaxed text-amber-700">
+                              {ERRANDS_PRICING_UNCONFIGURED_MESSAGE}
+                            </p>
+                            <p className="mt-1 text-[11px] font-bold leading-relaxed text-amber-800">
+                              Customers cannot see a fare until pricing is saved below.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                      <form onSubmit={handleSaveErrandsPricing} className="space-y-4">
+                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                          <div>
+                            <label htmlFor="errands_base_fare" className="mb-1.5 block text-xs font-bold text-slate-600">
+                              Base fare (GH₵)
+                            </label>
+                            <input
+                              id="errands_base_fare"
+                              type="number"
+                              step="0.50"
+                              min={0}
+                              max={9999.99}
+                              value={errandsPricingDraft.baseFare}
+                              onChange={(e) =>
+                                setErrandsPricingDraft((d) => ({ ...d, baseFare: e.target.value }))
+                              }
+                              className={INPUT_CLASS}
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor="errands_per_km" className="mb-1.5 block text-xs font-bold text-slate-600">
+                              Price per kilometre (GH₵ / km)
+                            </label>
+                            <input
+                              id="errands_per_km"
+                              type="number"
+                              step="0.10"
+                              min={0}
+                              max={9999.99}
+                              value={errandsPricingDraft.perKmRate}
+                              onChange={(e) =>
+                                setErrandsPricingDraft((d) => ({ ...d, perKmRate: e.target.value }))
+                              }
+                              className={INPUT_CLASS}
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor="errands_min_fare" className="mb-1.5 block text-xs font-bold text-slate-600">
+                              Minimum fare floor (GH₵)
+                            </label>
+                            <input
+                              id="errands_min_fare"
+                              type="number"
+                              step="0.50"
+                              min={0}
+                              value={errandsPricingDraft.minFare}
+                              onChange={(e) =>
+                                setErrandsPricingDraft((d) => ({ ...d, minFare: e.target.value }))
+                              }
+                              className={INPUT_CLASS}
+                            />
+                            <p className="mt-1 text-[10px] text-slate-400">
+                              0 means no floor.
+                            </p>
+                          </div>
+                          <div>
+                            <label htmlFor="errands_max_fare" className="mb-1.5 block text-xs font-bold text-slate-600">
+                              Maximum fare cap (GH₵){' '}
+                              <span className="font-normal text-slate-400">— optional</span>
+                            </label>
+                            <input
+                              id="errands_max_fare"
+                              type="number"
+                              step="1.00"
+                              min={0}
+                              placeholder="No maximum"
+                              value={errandsPricingDraft.maxFare}
+                              onChange={(e) =>
+                                setErrandsPricingDraft((d) => ({ ...d, maxFare: e.target.value }))
+                              }
+                              className={INPUT_CLASS}
+                            />
+                            <p className="mt-1 text-[10px] text-slate-400">
+                              Leave empty to charge the calculated fare with no ceiling.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-4 border-t border-slate-100 pt-4 sm:grid-cols-2">
+                          <div>
+                            <label htmlFor="errands_booking_fee" className="mb-1.5 block text-xs font-bold text-slate-600">
+                              Booking fee (GH₵)
+                            </label>
+                            <input
+                              id="errands_booking_fee"
+                              type="number"
+                              step="0.50"
+                              min={0}
+                              max={9999.99}
+                              value={errandsPricingDraft.bookingFee}
+                              onChange={(e) =>
+                                setErrandsPricingDraft((d) => ({ ...d, bookingFee: e.target.value }))
+                              }
+                              className={INPUT_CLASS}
+                            />
+                            <p className="mt-1 text-[10px] text-slate-400">
+                              Added after the clamp, then taxed with the trip fare.
+                            </p>
+                          </div>
+                          <div>
+                            <label htmlFor="errands_tax_rate" className="mb-1.5 block text-xs font-bold text-slate-600">
+                              Tax rate (%)
+                            </label>
+                            <input
+                              id="errands_tax_rate"
+                              type="number"
+                              step="0.5"
+                              min={0}
+                              max={100}
+                              value={errandsPricingDraft.taxRatePercent}
+                              onChange={(e) =>
+                                setErrandsPricingDraft((d) => ({ ...d, taxRatePercent: e.target.value }))
+                              }
+                              className={INPUT_CLASS}
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor="errands_earning_pct" className="mb-1.5 block text-xs font-bold text-slate-600">
+                              Driver earning (% of the total the customer pays)
+                            </label>
+                            <input
+                              id="errands_earning_pct"
+                              type="number"
+                              step="1"
+                              min={0}
+                              max={100}
+                              value={errandsPricingDraft.driverEarningPercentage}
+                              onChange={(e) =>
+                                setErrandsPricingDraft((d) => ({
+                                  ...d,
+                                  driverEarningPercentage: e.target.value,
+                                }))
+                              }
+                              className={INPUT_CLASS}
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor="errands_surge" className="mb-1.5 block text-xs font-bold text-slate-600">
+                              Surge multiplier
+                            </label>
+                            <input
+                              id="errands_surge"
+                              type="number"
+                              step="0.1"
+                              min={0.1}
+                              max={5}
+                              value={errandsPricingDraft.surgeMultiplier}
+                              onChange={(e) =>
+                                setErrandsPricingDraft((d) => ({ ...d, surgeMultiplier: e.target.value }))
+                              }
+                              className={INPUT_CLASS}
+                            />
+                            <p className="mt-1 text-[10px] text-slate-400">
+                              Between 0.1 and 5 — use 1 when surge pricing is not in effect.
+                            </p>
+                          </div>
+                        </div>
+
+                        {errandsPricingFormError && (
+                          <p className="text-[11px] font-bold text-rose-600">
+                            {errandsPricingFormError}
+                          </p>
+                        )}
+
+                        <div className="flex flex-wrap items-center gap-3 pt-1">
+                          <button
+                            type="submit"
+                            disabled={isSavingErrandsPricing}
+                            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-6 py-2.5 text-xs font-bold text-white shadow-lg shadow-emerald-600/20 transition hover:bg-emerald-700 disabled:opacity-50"
+                          >
+                            <CheckCircle className="h-4 w-4" />
+                            {isSavingErrandsPricing ? 'Saving…' : 'Apply fare rules'}
+                          </button>
+                          <span className="text-[11px] text-slate-400">
+                            Applies to new quotes and bookings only ·{' '}
+                            {errandsPricing?.configured
+                              ? `pricing version ${errandsPricing.pricingVersion}`
+                              : 'not configured yet'}
+                          </span>
+                        </div>
+                      </form>
+                    </SectionCard>
+
+                    <aside className="space-y-4">
+                      <div className={`${CARD} p-5`}>
+                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-600">
+                          Live preview
+                        </p>
+                        <p className="mt-1 text-sm font-black text-slate-900">
+                          A {Number.isFinite(errandsPreviewKm) && errandsPreviewKm > 0 ? errandsPreviewKm : 0} km trip
+                        </p>
+                        <div className="mt-3 flex items-center gap-2">
+                          <input
+                            id="errands_preview_km"
+                            type="number"
+                            min={0.1}
+                            step="0.5"
+                            inputMode="decimal"
+                            value={errandsPreviewKmInput}
+                            onChange={(e) => setErrandsPreviewKmInput(e.target.value)}
+                            aria-label="Preview distance in kilometres"
+                            className={INPUT_CLASS}
+                          />
+                          <div className="flex shrink-0 gap-1.5">
+                            {[5, 10].map((km) => (
+                              <button
+                                key={km}
+                                type="button"
+                                onClick={() => setErrandsPreviewKmInput(String(km))}
+                                className={`rounded-lg px-2.5 py-1.5 text-[10px] font-black transition ${
+                                  errandsPreviewKm === km
+                                    ? 'bg-slate-900 text-white'
+                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                }`}
+                              >
+                                {km} km
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        {errandsPreview ? (
+                          <div className="mt-4 space-y-2.5 text-xs">
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-slate-500">Trip fare (after floor/cap)</span>
+                              <span className="font-black tabular-nums text-slate-900">
+                                {formatGHS(errandsPreview.tripFare)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-slate-500">Booking fee</span>
+                              <span className="font-black tabular-nums text-slate-900">
+                                {formatGHS(errandsPreview.bookingFee)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-slate-500">
+                                Tax ({errandsPreviewSettings.taxRatePercent}%)
+                              </span>
+                              <span className="font-black tabular-nums text-slate-900">
+                                {formatGHS(errandsPreview.taxAmount)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-2.5">
+                              <span className="font-bold text-slate-700">Customer pays</span>
+                              <span className="text-base font-black tabular-nums text-slate-900">
+                                {formatGHS(errandsPreview.total)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-slate-500">
+                                Driver earns ({errandsPreviewSettings.driverEarningPercentage}%)
+                              </span>
+                              <span className="font-black tabular-nums text-emerald-700">
+                                {formatGHS(errandsPreview.driverEarning)}
+                              </span>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="mt-4 text-[11px] font-bold text-amber-600">
+                            Enter a distance above 0 km to preview these rules.
+                          </p>
+                        )}
+                        <p className="mt-4 border-t border-slate-100 pt-3 text-[11px] leading-relaxed text-slate-400">
+                          Preview only — it applies the formula in
+                          {' '}<code className="font-bold">errands/pricing.ts</code> to the numbers
+                          typed above. The price a customer sees is always computed by the server
+                          for their real route.
+                        </p>
+                        <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
+                          Floor {formatGHS(errandsPreviewSettings.minFare)} ·{' '}
+                          {errandsPreviewSettings.maxFare !== null
+                            ? `cap ${formatGHS(errandsPreviewSettings.maxFare)}`
+                            : 'no maximum cap'}{' '}
+                          · ×{errandsPreviewSettings.surgeMultiplier} surge
+                        </p>
+                      </div>
+
+                      <div className={`${CARD} p-5`}>
+                        <p className="text-[10px] font-black uppercase tracking-[0.18em]">
+                          How fares are calculated
+                        </p>
+                        <ul className="mt-3 space-y-2.5 text-[11px] leading-relaxed text-slate-500">
+                          <li className="flex gap-2">
+                            <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                            Trip fare = (base + km × per-km rate) × surge, clamped by the floor
+                            and the optional cap
+                          </li>
+                          <li className="flex gap-2">
+                            <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                            Booking fee is added after the clamp, so the minimum fare never
+                            swallows it
+                          </li>
+                          <li className="flex gap-2">
+                            <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                            Tax applies to trip fare + booking fee; the driver's share is a
+                            percentage of the customer's total
+                          </li>
+                          <li className="flex gap-2">
+                            <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                            A rate change bumps the pricing version — existing bookings keep the
+                            rules they were priced with
+                          </li>
+                        </ul>
+                      </div>
+                    </aside>
+                  </div>
+
+                  {/* ===== D. Bookings ===== */}
+                  <SectionCard
+                    title="Bookings"
+                    subtitle={`${errandsBookings.length} most recent booking${errandsBookings.length === 1 ? '' : 's'} · ${errandsStats.active} active right now`}
+                  >
+                    <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="relative w-full lg:max-w-xs">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="search"
+                          value={errandsQuery}
+                          onChange={(e) => setErrandsQuery(e.target.value)}
+                          placeholder="Search booking number or area…"
+                          aria-label="Search Errands bookings"
+                          className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-xs font-bold text-slate-900 transition placeholder:font-medium placeholder:text-slate-400 focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                        />
+                      </div>
+                      <select
+                        value={errandsStatusFilter}
+                        onChange={(e) =>
+                          setErrandsStatusFilter(e.target.value as 'ALL' | ErrandsBookingStatus)
+                        }
+                        aria-label="Filter bookings by status"
+                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-bold text-slate-900 transition focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                      >
+                        <option value="ALL">All statuses</option>
+                        {(
+                          [
+                            'REQUESTED',
+                            'DRIVER_ACCEPTED',
+                            'DRIVER_ARRIVING',
+                            'DRIVER_ARRIVED',
+                            'IN_PROGRESS',
+                            'COMPLETED',
+                            'CANCELLED',
+                            'EXPIRED',
+                            'FAILED',
+                          ] as ErrandsBookingStatus[]
+                        ).map((status) => (
+                          <option key={status} value={status}>
+                            {ERRANDS_STATUS_LABELS[status]}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {isErrandsLoading ? (
+                      <div className="space-y-3">
+                        <SkeletonBlock className="h-16 w-full" />
+                        <SkeletonBlock className="h-16 w-full" />
+                        <SkeletonBlock className="h-16 w-full" />
+                      </div>
+                    ) : errandsBookings.length === 0 ? (
+                      <EmptyState
+                        icon={Package}
+                        title="No Errands bookings yet."
+                        hint="Trips booked by customers appear here the moment the first one is placed."
+                      />
+                    ) : filteredErrandsBookings.length === 0 ? (
+                      <EmptyState
+                        icon={Search}
+                        title="No bookings match your search"
+                        hint="Try a booking number or an area — or clear the search and filter."
+                        action={
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setErrandsQuery('');
+                              setErrandsStatusFilter('ALL');
+                            }}
+                            className="rounded-xl bg-slate-900 px-4 py-2 text-[11px] font-black text-white transition hover:bg-slate-800"
+                          >
+                            Clear search & filters
+                          </button>
+                        }
+                      />
+                    ) : (
+                      <ul className="divide-y divide-slate-100">
+                        {filteredErrandsBookings.map((b) => {
+                          const live = errandsStatusIsLive(b.status);
+                          const isExpanded = errandsExpandedId === b.id;
+                          const ServiceIcon =
+                            b.serviceCategory === 'RIDE_CAR' ? Car : Package;
+                          return (
+                            <li
+                              key={b.id}
+                              className={`group relative -mx-2 px-2 py-4 transition first:pt-0 last:pb-0 ${
+                                live
+                                  ? 'bg-emerald-50/40 hover:bg-emerald-50/70'
+                                  : 'hover:bg-slate-50/70'
+                              }`}
+                            >
+                              {live && (
+                                <span
+                                  aria-hidden="true"
+                                  className="absolute inset-y-0 left-0 w-1 rounded-full bg-gradient-to-b from-emerald-400 to-teal-500 sm:-left-2"
+                                />
+                              )}
+
+                              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+                                <div className="flex min-w-0 flex-1 items-start gap-3">
+                                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-slate-100 text-slate-600 ring-1 ring-slate-200">
+                                    <ServiceIcon className="h-4 w-4" />
+                                  </span>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <p className="text-[13px] font-black tabular-nums text-slate-900">
+                                        {b.bookingNumber || shortId(b.id)}
+                                      </p>
+                                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider text-slate-600 ring-1 ring-slate-200">
+                                        {ERRANDS_SERVICE_LABELS[b.serviceCategory]}
+                                      </span>
+                                      <span
+                                        title={ERRANDS_STATUS_LABELS[b.status]}
+                                        className={`inline-flex max-w-[240px] items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[9px] font-black uppercase tracking-wider ${errandsStatusStyle(
+                                          b.status
+                                        )}`}
+                                      >
+                                        <span
+                                          className={`h-1.5 w-1.5 shrink-0 rounded-full ${errandsStatusDot(
+                                            b.status
+                                          )} ${live ? 'animate-pulse' : ''}`}
+                                        />
+                                        <span className="truncate">
+                                          {ERRANDS_STATUS_LABELS[b.status]}
+                                        </span>
+                                      </span>
+                                    </div>
+
+                                    <p className="mt-1 flex items-center gap-1 truncate text-[11px] text-slate-500">
+                                      <MapPin className="h-3 w-3 shrink-0 text-slate-400" />
+                                      <span className="truncate font-bold text-slate-700">
+                                        {b.pickupArea ?? '—'}
+                                      </span>
+                                      <ChevronRight className="h-3 w-3 shrink-0 text-slate-300" />
+                                      <span className="truncate font-bold text-slate-700">
+                                        {b.destinationArea ?? '—'}
+                                      </span>
+                                    </p>
+
+                                    <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
+                                      <span>
+                                        {b.routeDistanceKm.toFixed(1)} km ·{' '}
+                                        {b.distanceSource === 'ROAD_ROUTE'
+                                          ? 'road route'
+                                          : 'straight line'}
+                                      </span>
+                                      <span>Placed {formatRelativeTime(b.createdAt)}</span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="flex shrink-0 flex-col items-start gap-1 sm:items-end sm:text-right">
+                                  <span className="text-base font-black leading-none tabular-nums text-slate-900">
+                                    {formatGHS(b.finalFare ?? b.estimatedFare)}
+                                  </span>
+                                  <span className="text-[10px] font-bold tabular-nums text-emerald-700">
+                                    driver {formatGHS(b.driverEarning)}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleErrandsBookingDetails(b)}
+                                    aria-expanded={isExpanded}
+                                    className="mt-1 inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-black text-slate-600 transition hover:bg-slate-50"
+                                  >
+                                    {isExpanded ? 'Hide details' : 'View details'}
+                                    <ChevronDown
+                                      className={`h-3 w-3 transition-transform ${
+                                        isExpanded ? 'rotate-180' : ''
+                                      }`}
+                                    />
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* ---- Expanded: everything on the row + details + history ---- */}
+                              {isExpanded && errandsExpanded && (
+                                <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                                  {errandsExpanded.loading ? (
+                                    <div className="space-y-2" role="status">
+                                      <SkeletonBlock className="h-3 w-1/3" />
+                                      <SkeletonBlock className="h-3 w-1/2" />
+                                      <SkeletonBlock className="h-3 w-2/3" />
+                                      <span className="sr-only">Loading booking details…</span>
+                                    </div>
+                                  ) : (
+                                    <>
+                                      {errandsExpanded.error && (
+                                        <p className="mb-3 text-[11px] font-bold text-rose-600">
+                                          {errandsExpanded.error}
+                                        </p>
+                                      )}
+
+                                      <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Booking ID</dt>
+                                          <dd className="font-bold tabular-nums text-slate-700" title={b.id}>
+                                            {shortId(b.id)}
+                                          </dd>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Service</dt>
+                                          <dd className="font-bold text-slate-700">
+                                            {ERRANDS_SERVICE_LABELS[b.serviceCategory]}
+                                          </dd>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Customer</dt>
+                                          <dd className="font-bold tabular-nums text-slate-700" title={b.customerId}>
+                                            {shortId(b.customerId)}
+                                          </dd>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Driver</dt>
+                                          <dd className="font-bold tabular-nums text-slate-700" title={b.driverId}>
+                                            {shortId(b.driverId)}
+                                          </dd>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Distance</dt>
+                                          <dd className="font-bold tabular-nums text-slate-700">
+                                            {b.routeDistanceKm.toFixed(2)} km ·{' '}
+                                            {b.distanceSource === 'ROAD_ROUTE'
+                                              ? 'road route'
+                                              : 'straight line'}
+                                          </dd>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Estimated duration</dt>
+                                          <dd className="font-bold tabular-nums text-slate-700">
+                                            {b.estimatedDurationSeconds
+                                              ? `${Math.max(1, Math.round(b.estimatedDurationSeconds / 60))} min`
+                                              : '—'}
+                                          </dd>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Estimated fare</dt>
+                                          <dd className="font-bold tabular-nums text-slate-700">
+                                            {formatGHS(b.estimatedFare)}
+                                          </dd>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Final fare</dt>
+                                          <dd className="font-bold tabular-nums text-slate-700">
+                                            {b.finalFare !== null
+                                              ? formatGHS(b.finalFare)
+                                              : '— (not completed)'}
+                                          </dd>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Driver earning</dt>
+                                          <dd className="font-bold tabular-nums text-emerald-700">
+                                            {formatGHS(b.driverEarning)}
+                                          </dd>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Pricing version</dt>
+                                          <dd className="font-bold tabular-nums text-slate-700">
+                                            v{b.pricingVersion} · {b.currency}
+                                          </dd>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Quote</dt>
+                                          <dd className="font-bold tabular-nums text-slate-700" title={b.quoteId ?? ''}>
+                                            {shortId(b.quoteId)}
+                                          </dd>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3">
+                                          <dt className="text-slate-500">Placed</dt>
+                                          <dd className="font-bold tabular-nums text-slate-700">
+                                            {new Date(b.createdAt).toLocaleString('en-GH', {
+                                              dateStyle: 'medium',
+                                              timeStyle: 'short',
+                                            })}
+                                          </dd>
+                                        </div>
+                                        {b.acceptedAt && (
+                                          <div className="flex items-center justify-between gap-3">
+                                            <dt className="text-slate-500">Accepted</dt>
+                                            <dd className="font-bold tabular-nums text-slate-700">
+                                              {formatRelativeTime(b.acceptedAt)}
+                                            </dd>
+                                          </div>
+                                        )}
+                                        {b.startedAt && (
+                                          <div className="flex items-center justify-between gap-3">
+                                            <dt className="text-slate-500">Started</dt>
+                                            <dd className="font-bold tabular-nums text-slate-700">
+                                              {formatRelativeTime(b.startedAt)}
+                                            </dd>
+                                          </div>
+                                        )}
+                                        {b.completedAt && (
+                                          <div className="flex items-center justify-between gap-3">
+                                            <dt className="text-slate-500">Completed</dt>
+                                            <dd className="font-bold tabular-nums text-slate-700">
+                                              {formatRelativeTime(b.completedAt)}
+                                            </dd>
+                                          </div>
+                                        )}
+                                        {b.cancellationReason && (
+                                          <div className="flex items-center justify-between gap-3">
+                                            <dt className="text-slate-500">Cancellation reason</dt>
+                                            <dd className="text-right font-bold text-slate-700">
+                                              {b.cancellationReason}
+                                            </dd>
+                                          </div>
+                                        )}
+                                        {b.failureNote && (
+                                          <div className="flex items-center justify-between gap-3">
+                                            <dt className="text-slate-500">Failure note</dt>
+                                            <dd className="text-right font-bold text-slate-700">
+                                              {b.failureNote}
+                                            </dd>
+                                          </div>
+                                        )}
+                                      </dl>
+
+                                      {/* Exact endpoints + contacts (admins may see them) */}
+                                      <div className="mt-4 border-t border-slate-200 pt-3">
+                                        <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                                          Route &amp; contacts
+                                        </p>
+                                        {errandsExpanded.details ? (
+                                          <dl className="mt-2 grid grid-cols-1 gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
+                                            <div className="flex items-start justify-between gap-3">
+                                              <dt className="shrink-0 text-slate-500">Pickup</dt>
+                                              <dd className="text-right font-bold text-slate-700">
+                                                {errandsExpanded.details.pickupAddress ?? '—'}
+                                                {errandsExpanded.details.pickupLatitude !== null &&
+                                                  errandsExpanded.details.pickupLongitude !== null && (
+                                                    <span className="block text-[10px] font-medium text-slate-400">
+                                                      {errandsExpanded.details.pickupLatitude.toFixed(5)},{' '}
+                                                      {errandsExpanded.details.pickupLongitude.toFixed(5)}
+                                                    </span>
+                                                  )}
+                                              </dd>
+                                            </div>
+                                            <div className="flex items-start justify-between gap-3">
+                                              <dt className="shrink-0 text-slate-500">Destination</dt>
+                                              <dd className="text-right font-bold text-slate-700">
+                                                {errandsExpanded.details.destinationAddress ?? '—'}
+                                                {errandsExpanded.details.destinationLatitude !== null &&
+                                                  errandsExpanded.details.destinationLongitude !== null && (
+                                                    <span className="block text-[10px] font-medium text-slate-400">
+                                                      {errandsExpanded.details.destinationLatitude.toFixed(5)},{' '}
+                                                      {errandsExpanded.details.destinationLongitude.toFixed(5)}
+                                                    </span>
+                                                  )}
+                                              </dd>
+                                            </div>
+                                            <div className="flex items-center justify-between gap-3">
+                                              <dt className="text-slate-500">Customer</dt>
+                                              <dd className="text-right font-bold text-slate-700">
+                                                {errandsExpanded.details.customerName ?? '—'}
+                                                {errandsExpanded.details.customerPhone && (
+                                                  <span className="block text-[10px] font-medium text-slate-500">
+                                                    {errandsExpanded.details.customerPhone}
+                                                  </span>
+                                                )}
+                                              </dd>
+                                            </div>
+                                            <div className="flex items-center justify-between gap-3">
+                                              <dt className="text-slate-500">Driver</dt>
+                                              <dd className="text-right font-bold text-slate-700">
+                                                {errandsExpanded.details.driverName ?? '—'}
+                                                <span className="block text-[10px] font-medium text-slate-500">
+                                                  {[
+                                                    errandsExpanded.details.driverVehicleType,
+                                                    errandsExpanded.details.driverVehiclePlate,
+                                                  ]
+                                                    .filter(Boolean)
+                                                    .join(' · ') || 'Vehicle on file: —'}
+                                                </span>
+                                              </dd>
+                                            </div>
+                                          </dl>
+                                        ) : (
+                                          <p className="mt-2 text-[11px] text-slate-400">
+                                            No exact addresses or contacts are on file for this
+                                            booking.
+                                          </p>
+                                        )}
+                                      </div>
+
+                                      {/* Status history (audit trail) */}
+                                      <div className="mt-4 border-t border-slate-200 pt-3">
+                                        <p className="text-[10px] font-black uppercase tracking-wider text-slate-400">
+                                          Status history
+                                        </p>
+                                        {errandsExpanded.history.length === 0 ? (
+                                          <p className="mt-2 text-[11px] text-slate-400">
+                                            No status history recorded for this booking.
+                                          </p>
+                                        ) : (
+                                          <ol className="mt-2 space-y-1.5">
+                                            {errandsExpanded.history.map((entry) => (
+                                              <li
+                                                key={entry.id}
+                                                className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-600"
+                                              >
+                                                <span className="font-bold text-slate-700">
+                                                  {entry.from_status
+                                                    ? `${entry.from_status.replace(/_/g, ' ')} → `
+                                                    : ''}
+                                                  {entry.to_status.replace(/_/g, ' ')}
+                                                </span>
+                                                <span className="text-slate-400">
+                                                  {entry.actor?.full_name
+                                                    ? `by ${entry.actor.full_name}${
+                                                        entry.actor.role
+                                                          ? ` (${entry.actor.role.replace(/_/g, ' ')})`
+                                                          : ''
+                                                      }`
+                                                    : ''}
+                                                </span>
+                                                {entry.note && (
+                                                  <span className="text-slate-400">
+                                                    — {entry.note}
+                                                  </span>
+                                                )}
+                                                <span className="ml-auto text-slate-400">
+                                                  {entry.created_at
+                                                    ? formatRelativeTime(entry.created_at)
+                                                    : ''}
+                                                </span>
+                                              </li>
+                                            ))}
+                                          </ol>
+                                        )}
+                                      </div>
+
+                                      {canTransition(b.status, 'CANCELLED', 'ADMIN') && (
+                                        <div className="mt-4 border-t border-slate-200 pt-3">
+                                          <button
+                                            type="button"
+                                            onClick={() => setErrandsCancelTarget(b)}
+                                            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-[11px] font-black text-rose-700 transition hover:bg-rose-100"
+                                            title="Admin cancellation uses the same validated transition as drivers and customers"
+                                          >
+                                            <X className="h-3 w-3" />
+                                            Cancel booking
+                                          </button>
+                                          <p className="mt-1.5 text-[10px] text-slate-400">
+                                            Only allowed while the driver can still decline —
+                                            in-progress trips must be failed instead.
+                                          </p>
+                                        </div>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </SectionCard>
+
+                  {/* ===== E. Driver services ===== */}
+                  <SectionCard
+                    title="Driver services"
+                    subtitle="Errands opt-in is the driver's own decision; the motorcycle-errand and passenger-ride categories are granted by super admin only"
+                  >
+                    {couriers.length === 0 ? (
+                      <EmptyState
+                        icon={Users}
+                        title="No drivers registered yet"
+                        hint="Approved couriers show up here with their Errands service categories."
+                      />
+                    ) : errandsCapabilities.length === 0 ? (
+                      <EmptyState
+                        icon={Bike}
+                        title="No driver has an Errands capability yet"
+                        hint="A driver becomes listed here once they opt in to Errands from their driver app — until then there is nothing to grant or withdraw."
+                      />
+                    ) : (
+                      <ul className="divide-y divide-slate-100">
+                        {couriers.map((c) => {
+                          const cap = errandsCapabilityByCourier.get(c.id);
+                          const isSaving = savingCapabilityId === c.id;
+                          const driverName =
+                            c.profile?.full_name || c.profile?.email || `Driver ${shortId(c.id)}`;
+                          return (
+                            <li key={c.id} className="py-4 first:pt-0 last:pb-0">
+                              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                <div className="flex min-w-0 items-center gap-3">
+                                  <span className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-2xl bg-gradient-to-br from-emerald-400 to-emerald-600 text-[11px] font-black text-white ring-1 ring-emerald-600/20">
+                                    {c.profile?.avatar_url ? (
+                                      <img
+                                        src={c.profile.avatar_url}
+                                        alt=""
+                                        className="h-full w-full object-cover"
+                                        loading="lazy"
+                                      />
+                                    ) : (
+                                      monogram(driverName)
+                                    )}
+                                  </span>
+                                  <div className="min-w-0">
+                                    <p className="truncate text-[13px] font-black text-slate-900">
+                                      {driverName}
+                                    </p>
+                                    <p className="truncate text-[11px] text-slate-500">
+                                      {c.vehicle_type || 'Vehicle not set'}
+                                      {c.vehicle_plate ? ` · ${c.vehicle_plate}` : ''}
+                                    </p>
+                                  </div>
+                                </div>
+                                <span
+                                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-black ring-1 ${
+                                    cap?.errandsEnabled
+                                      ? 'bg-emerald-50 text-emerald-700 ring-emerald-500/20'
+                                      : 'bg-slate-100 text-slate-500 ring-slate-200'
+                                  }`}
+                                  title="Opting in to Errands discovery is the driver's own decision — it cannot be granted from here"
+                                >
+                                  <span
+                                    className={`h-1.5 w-1.5 rounded-full ${
+                                      cap?.errandsEnabled ? 'bg-emerald-500' : 'bg-slate-400'
+                                    }`}
+                                  />
+                                  Errands opted-in: {cap?.errandsEnabled ? 'Yes' : 'No'}
+                                  {cap ? '' : ' (no capability row)'}
+                                </span>
+                              </div>
+
+                              <div className="mt-3 grid grid-cols-1 gap-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:grid-cols-2">
+                                <Switch
+                                  id={`cap_motorcycle_${c.id}`}
+                                  label="Motorcycle errands"
+                                  hint="Parcels, food and small deliveries."
+                                  checked={cap?.motorcycleErrands ?? false}
+                                  disabled={isSaving}
+                                  onChange={(next) =>
+                                    handleSaveErrandsCapability(
+                                      c.id,
+                                      next,
+                                      cap?.carRides ?? false
+                                    )
+                                  }
+                                />
+                                <Switch
+                                  id={`cap_car_${c.id}`}
+                                  label="Passenger rides"
+                                  hint={
+                                    <span className="flex gap-1.5 text-amber-700">
+                                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                      Passenger rides must only be enabled after the operational
+                                      and regulatory requirements for carrying passengers have
+                                      been reviewed.
+                                    </span>
+                                  }
+                                  checked={cap?.carRides ?? false}
+                                  disabled={isSaving}
+                                  onChange={(next) =>
+                                    handleSaveErrandsCapability(
+                                      c.id,
+                                      cap?.motorcycleErrands ?? false,
+                                      next
+                                    )
+                                  }
+                                />
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </SectionCard>
+                </div>
+              )}
+
               {/* ================= AUDIT ================= */}
               {activeTab === 'AUDIT' && (
                 <SectionCard
@@ -3479,6 +5279,54 @@ export const AdminDashboard: React.FC = () => {
                 {isAdvancingSettlement
                   ? 'Saving…'
                   : `Yes, mark ${settlementConfirm.status}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== Errands admin cancellation confirm ===== */}
+      {errandsCancelTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/60 p-4 backdrop-blur-sm sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="errands_cancel_dialog_title"
+        >
+          <div className={`${CARD} w-full max-w-md p-5 sm:p-6`}>
+            <p className="text-[10px] font-black uppercase tracking-wider text-rose-600">
+              Cancel Errands booking
+            </p>
+            <h3
+              id="errands_cancel_dialog_title"
+              className="mt-1 text-base font-black text-slate-900"
+            >
+              {errandsCancelTarget.bookingNumber || 'This booking'}
+            </h3>
+            <p className="mt-2 text-xs leading-relaxed text-slate-500">
+              {ERRANDS_SERVICE_LABELS[errandsCancelTarget.serviceCategory]} ·{' '}
+              {errandsCancelTarget.pickupArea ?? '—'} → {errandsCancelTarget.destinationArea ?? '—'}{' '}
+              · status {ERRANDS_STATUS_LABELS[errandsCancelTarget.status]}. This uses the same
+              validated status transition as drivers and customers, recorded as{' '}
+              <strong className="text-slate-700">Cancelled by administration</strong>. The driver
+              is released and no fare is charged.
+            </p>
+            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setErrandsCancelTarget(null)}
+                disabled={isCancellingErrands}
+                className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+              >
+                Keep booking
+              </button>
+              <button
+                type="button"
+                onClick={confirmErrandsCancel}
+                disabled={isCancellingErrands}
+                className="rounded-xl bg-rose-600 px-5 py-2.5 text-xs font-black text-white transition hover:bg-rose-700 disabled:opacity-50"
+              >
+                {isCancellingErrands ? 'Cancelling…' : 'Yes, cancel this booking'}
               </button>
             </div>
           </div>

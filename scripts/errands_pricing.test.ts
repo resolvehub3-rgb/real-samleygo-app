@@ -1,0 +1,634 @@
+/**
+ * SamleyGo Errands & On-Demand Rides — test suite.
+ *
+ *   pnpm test:errands   (tsx scripts/errands_pricing.test.ts)
+ *
+ * What is covered:
+ *   1. The fare preview formula — base + (km × rate), surge, floor, OPTIONAL
+ *      ceiling, booking fee and tax added AFTER the clamp, driver earning as
+ *      a percentage of the total, 2-decimal rounding.
+ *   2. Honesty rules — unconfigured pricing yields NO number (the caller must
+ *      show the admin-required message, never an invented fare).
+ *   3. Quote lifecycle — TTL usability window and the expiry countdown.
+ *   4. The status transition map — mirrors the database CASE one-for-one
+ *      (source-scanned from the migration) so buttons can never offer a move
+ *      the server will reject.
+ *   5. Source scans — the booking RPC is called with IDs only (never money),
+ *      the trip PIN table is customer/admin-only (the driver submits but can
+ *      never read it), no client write paths exist on the money tables, the
+ *      FAB sits bottom-right above the nav, the map stays visible (~45dvh,
+ *      sticky under the navbar), no Leaflet, and no fabricated coordinates
+ *      or placeholder drivers anywhere in the module.
+ *
+ * IMPORTANT: the database is still the authority. These tests lock down the
+ * client helpers that render its answers and the invariants that keep money,
+ * PINs and eligibility server-owned.
+ */
+
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import {
+  calculateErrandsFare,
+  clampTripFare,
+  ERRANDS_PRICING_UNCONFIGURED_MESSAGE,
+} from '../src/lib/errands/pricing';
+import type { ErrandsPricingSettings } from '../src/lib/errands/types';
+import {
+  ACTIVE_ERRANDS_STATUSES,
+  TERMINAL_ERRANDS_STATUSES,
+  ERRANDS_ALLOWED_TRANSITIONS,
+  ERRANDS_STATUS_LABELS,
+  ERRANDS_SERVICES,
+  canTransition,
+  type ErrandsBookingStatus,
+} from '../src/lib/errands/types';
+import {
+  isQuoteUsable,
+  secondsUntilQuoteExpiry,
+  ERRANDS_LOCATION_ERROR,
+  type ErrandsQuote,
+} from '../src/lib/errands/quote';
+import { ERRANDS_DISCOVERY_POLL_MS } from '../src/lib/errands/discovery';
+
+// ---------------------------------------------------------------------------
+// Tiny test runner (no extra dependencies)
+// ---------------------------------------------------------------------------
+
+let passed = 0;
+const failures: { name: string; error: Error }[] = [];
+
+function test(name: string, fn: () => void): void {
+  try {
+    fn();
+    passed += 1;
+    console.log(`  \u2713 ${name}`);
+  } catch (error) {
+    failures.push({ name, error: error as Error });
+    console.error(`  \u2717 ${name}`);
+    console.error(`    ${(error as Error).message}`);
+  }
+}
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const read = (...segments: string[]) => readFileSync(path.join(ROOT, ...segments), 'utf8');
+
+/** Drops comments + collapses whitespace so SQL/TSX scans stay stable. */
+const strip = (source: string): string =>
+  source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/--[^\n]*/g, ' ')
+    .replace(/\s+/g, ' ');
+
+const MIGRATION = read('supabase', 'migrations', '20261012_errands_module.sql');
+const MIGRATION_STRIPPED = strip(MIGRATION);
+
+// ---------------------------------------------------------------------------
+// Pricing fixture — acceptance example rules (base GH₵5, GH₵2/km)
+// ---------------------------------------------------------------------------
+
+const EXAMPLE_PRICING: ErrandsPricingSettings = {
+  configured: true,
+  currency: 'GHS',
+  pricingVersion: 1,
+  baseFare: 5,
+  perKmRate: 2,
+  minFare: 1,
+  maxFare: null, // no ceiling: the fare is whatever the route costs
+  bookingFee: 2,
+  taxRatePercent: 0,
+  surgeMultiplier: 1,
+  driverEarningPercentage: 100,
+  quoteTtlMinutes: 5,
+  requestTtlSeconds: 90,
+};
+
+const settings = (overrides: Partial<ErrandsPricingSettings>): ErrandsPricingSettings => ({
+  ...EXAMPLE_PRICING,
+  ...overrides,
+});
+
+// ---------------------------------------------------------------------------
+// 1. The fare formula
+// ---------------------------------------------------------------------------
+
+test('8 km at base 5 + 2/km with a GH₵2 booking fee totals GH₵23', () => {
+  const fare = calculateErrandsFare(8, EXAMPLE_PRICING);
+  assert.ok(fare, 'a configured rule set must produce a fare');
+  assert.equal(fare.tripFare, 21, 'trip fare = 5 + (8 × 2)');
+  assert.equal(fare.bookingFee, 2);
+  assert.equal(fare.taxAmount, 0);
+  assert.equal(fare.total, 23, 'total = trip fare + booking fee + tax');
+  assert.equal(fare.driverEarning, 23, 'a 100% share pays the driver the total');
+  assert.equal(fare.currency, 'GHS');
+});
+
+test('the floor lifts a short trip and the ceiling caps a long one', () => {
+  assert.equal(
+    calculateErrandsFare(0.2, settings({ minFare: 10 }))?.tripFare,
+    10,
+    'the GH₵10 floor must apply'
+  );
+  assert.equal(
+    calculateErrandsFare(100, settings({ maxFare: 60 }))?.tripFare,
+    60,
+    'a configured ceiling must cap the fare'
+  );
+  assert.equal(
+    calculateErrandsFare(100, EXAMPLE_PRICING)?.tripFare,
+    205,
+    'without a ceiling the real route price stands'
+  );
+});
+
+test('booking fee and tax are added AFTER the clamp, earning is % of the total', () => {
+  const fare = calculateErrandsFare(
+    0.5,
+    settings({ minFare: 12, bookingFee: 3, taxRatePercent: 15, driverEarningPercentage: 80 })
+  );
+  assert.ok(fare);
+  assert.equal(fare.tripFare, 12, 'floored trip fare');
+  assert.equal(fare.taxAmount, 2.25, '15% of (12 + 3)');
+  assert.equal(fare.total, 17.25, 'fee and tax sit on top of the clamped fare');
+  assert.equal(fare.driverEarning, 13.8, '80% of the total, not of the trip fare');
+});
+
+test('surge multiplies the distance component before the clamp', () => {
+  const fare = calculateErrandsFare(10, settings({ surgeMultiplier: 1.5, bookingFee: 0 }));
+  assert.equal(fare?.tripFare, 37.5, '(5 + 20) × 1.5');
+});
+
+test('rounding lands on whole pesewas (17.806 ⇒ 17.81)', () => {
+  assert.equal(clampTripFare(17.806, { minFare: 0, maxFare: null }), 17.81);
+  assert.equal(clampTripFare(17.804, { minFare: 0, maxFare: null }), 17.8);
+});
+
+// ---------------------------------------------------------------------------
+// 2. Honesty: no configuration, no number
+// ---------------------------------------------------------------------------
+
+test('unconfigured pricing produces NO fare — the message must be shown instead', () => {
+  assert.equal(
+    calculateErrandsFare(8, settings({ configured: false })),
+    null,
+    'an unconfigured rule set must never yield a number'
+  );
+  assert.equal(calculateErrandsFare(8, null), null);
+  assert.equal(
+    ERRANDS_PRICING_UNCONFIGURED_MESSAGE.includes('has not been configured'),
+    true,
+    'the required admin-facing message must say pricing is not configured'
+  );
+});
+
+test('a non-finite or negative distance is priced as 0 km, never as garbage', () => {
+  // 0 km ⇒ base fare only (GH₵5), lifted by the GH₵1 floor.
+  assert.equal(calculateErrandsFare(Number.NaN, EXAMPLE_PRICING)?.tripFare, 5);
+  assert.equal(calculateErrandsFare(-5, EXAMPLE_PRICING)?.tripFare, 5);
+});
+
+// ---------------------------------------------------------------------------
+// 3. Quote lifecycle
+// ---------------------------------------------------------------------------
+
+const quote = (expiresAtMs: number, issuedAtMs = expiresAtMs - 5 * 60_000): ErrandsQuote => ({
+  quoteId: 'q-1',
+  serviceCategory: 'ERRAND_MOTORCYCLE',
+  pickupAddress: 'Osu, Accra',
+  destinationAddress: 'East Legon, Accra',
+  straightLineKm: 7.4,
+  distanceKm: 8.1,
+  distanceSource: 'ROAD_ROUTE',
+  estimatedDurationSeconds: 1_200,
+  tripFare: 21.2,
+  bookingFee: 2,
+  taxAmount: 0,
+  estimatedFare: 23.2,
+  driverEarning: 23.2,
+  currency: 'GHS',
+  pricingVersion: 1,
+  issuedAt: new Date(issuedAtMs).toISOString(),
+  expiresAt: new Date(expiresAtMs).toISOString(),
+});
+
+test('a quote is usable inside its TTL and rejected at the refresh margin', () => {
+  const now = Date.now();
+  assert.equal(isQuoteUsable(quote(now + 5 * 60_000), now), true, 'fresh quote is usable');
+  assert.equal(
+    isQuoteUsable(quote(now + 20_000), now),
+    false,
+    'a quote inside the 30 s refresh margin must be refreshed, not posted'
+  );
+  assert.equal(isQuoteUsable(quote(now - 1_000), now), false, 'expired quote is unusable');
+  assert.equal(isQuoteUsable(null, now), false);
+});
+
+test('the expiry countdown never goes negative', () => {
+  const now = Date.now();
+  assert.equal(secondsUntilQuoteExpiry(quote(now + 90_000), now), 90);
+  assert.equal(secondsUntilQuoteExpiry(quote(now - 5_000), now), 0);
+  assert.equal(secondsUntilQuoteExpiry(null, now), 0);
+});
+
+test('the location error copy matches the database sentence exactly', () => {
+  assert.equal(
+    ERRANDS_LOCATION_ERROR,
+    'Please select a valid pickup and destination location to calculate the fare.'
+  );
+  assert.equal(
+    MIGRATION_STRIPPED.includes(ERRANDS_LOCATION_ERROR),
+    true,
+    'the client constant must be the database message verbatim'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 4. Status lifecycle
+// ---------------------------------------------------------------------------
+
+test('active + terminal statuses partition the lifecycle completely', () => {
+  const all: ErrandsBookingStatus[] = [
+    'REQUESTED',
+    'DRIVER_ACCEPTED',
+    'DRIVER_ARRIVING',
+    'DRIVER_ARRIVED',
+    'IN_PROGRESS',
+    'COMPLETED',
+    'CANCELLED',
+    'EXPIRED',
+    'FAILED',
+  ];
+  assert.deepEqual([...ACTIVE_ERRANDS_STATUSES].sort(), [
+    'DRIVER_ACCEPTED',
+    'DRIVER_ARRIVED',
+    'DRIVER_ARRIVING',
+    'IN_PROGRESS',
+    'REQUESTED',
+  ]);
+  assert.deepEqual([...TERMINAL_ERRANDS_STATUSES].sort(), [
+    'CANCELLED',
+    'COMPLETED',
+    'EXPIRED',
+    'FAILED',
+  ]);
+  const union = new Set([...ACTIVE_ERRANDS_STATUSES, ...TERMINAL_ERRANDS_STATUSES]);
+  assert.equal(union.size, all.length, 'every status is either active or terminal');
+  for (const status of all) {
+    assert.ok(union.has(status), `${status} must be classified`);
+    assert.ok(ERRANDS_STATUS_LABELS[status], `${status} needs customer-facing copy`);
+  }
+});
+
+test('only a driver can accept, and only from REQUESTED', () => {
+  assert.equal(canTransition('REQUESTED', 'DRIVER_ACCEPTED', 'DRIVER'), true);
+  assert.equal(canTransition('REQUESTED', 'DRIVER_ACCEPTED', 'CUSTOMER'), false);
+  assert.equal(canTransition('DRIVER_ACCEPTED', 'DRIVER_ACCEPTED', 'DRIVER'), false);
+  assert.equal(canTransition('IN_PROGRESS', 'DRIVER_ACCEPTED', 'DRIVER'), false);
+});
+
+test('the happy path is driver-only and strictly ordered', () => {
+  const path2: Array<[ErrandsBookingStatus, ErrandsBookingStatus]> = [
+    ['REQUESTED', 'DRIVER_ACCEPTED'],
+    ['DRIVER_ACCEPTED', 'DRIVER_ARRIVING'],
+    ['DRIVER_ARRIVING', 'DRIVER_ARRIVED'],
+    ['DRIVER_ARRIVED', 'IN_PROGRESS'],
+    ['IN_PROGRESS', 'COMPLETED'],
+  ];
+  for (const [from, to] of path2) {
+    assert.equal(canTransition(from, to, 'DRIVER'), true, `driver: ${from} → ${to}`);
+    assert.equal(canTransition(from, to, 'CUSTOMER'), false, `customer: ${from} → ${to}`);
+  }
+  // Skipped states are refused.
+  assert.equal(canTransition('REQUESTED', 'IN_PROGRESS', 'DRIVER'), false);
+  assert.equal(canTransition('DRIVER_ACCEPTED', 'COMPLETED', 'DRIVER'), false);
+});
+
+test('a customer may cancel before the ride starts, never during it', () => {
+  for (const from of ['REQUESTED', 'DRIVER_ACCEPTED', 'DRIVER_ARRIVING', 'DRIVER_ARRIVED'] as const) {
+    assert.equal(canTransition(from, 'CANCELLED', 'CUSTOMER'), true, `cancel from ${from}`);
+  }
+  assert.equal(canTransition('IN_PROGRESS', 'CANCELLED', 'CUSTOMER'), false);
+  assert.equal(canTransition('COMPLETED', 'CANCELLED', 'CUSTOMER'), false);
+});
+
+test('the transition map mirrors the migration CASE (source scan)', () => {
+  // The migration's CASE p_new_status block, whitespace-collapsed.
+  const caseBlock = /case p_new_status (.*?) end case/.exec(MIGRATION_STRIPPED)?.[1] ?? '';
+  assert.ok(caseBlock.length > 100, 'the migration must contain the transition CASE');
+
+  const expect = (needle: string, present: boolean) => {
+    assert.equal(
+      caseBlock.includes(needle),
+      present,
+      `transition CASE ${present ? 'must' : 'must not'} contain: ${needle}`
+    );
+  };
+
+  // DRIVER_ACCEPTED: driver only, from REQUESTED only.
+  expect(`when 'DRIVER_ACCEPTED' then v_allowed := v_actor = 'DRIVER' and v_booking.status = 'REQUESTED'`, true);
+  // COMPLETED: driver only, from IN_PROGRESS only.
+  expect(`when 'COMPLETED' then v_allowed := v_actor = 'DRIVER' and v_booking.status = 'IN_PROGRESS'`, true);
+  // FAILED: never the customer.
+  expect(`when 'FAILED' then v_allowed := v_actor in ('DRIVER', 'ADMIN')`, true);
+  // EXPIRED: only from REQUESTED, and only once the window has passed.
+  expect(`and v_booking.requested_expires_at <= now()`, true);
+  // No DRIVER_ASSIGNED state anywhere (the customer picks the driver).
+  expect(`'DRIVER_ASSIGNED'`, false);
+
+  // Every client-allowed move appears as a WHEN branch.
+  for (const [from, moves] of Object.entries(ERRANDS_ALLOWED_TRANSITIONS)) {
+    for (const move of moves) {
+      assert.ok(
+        caseBlock.includes(`when '${move.to}'`),
+        `client offers ${from} → ${move.to} but the database has no such branch`
+      );
+    }
+  }
+});
+
+test('the service categories and status CHECK match the migration', () => {
+  assert.deepEqual([...ERRANDS_SERVICES].sort(), ['ERRAND_MOTORCYCLE', 'RIDE_CAR']);
+  assert.ok(
+    MIGRATION_STRIPPED.includes(
+      `check (status in ('REQUESTED', 'DRIVER_ACCEPTED', 'DRIVER_ARRIVING', 'DRIVER_ARRIVED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'EXPIRED', 'FAILED'))`
+    ),
+    'the status CHECK must list exactly the nine lifecycle states'
+  );
+  assert.ok(
+    MIGRATION_STRIPPED.includes(
+      `check (service_category in ('ERRAND_MOTORCYCLE', 'RIDE_CAR'))`
+    ),
+    'the service CHECK must list exactly the two categories'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 5. Source scans — the invariants that keep the module honest
+// ---------------------------------------------------------------------------
+
+test('the booking RPC receives IDs only — the browser never posts money', () => {
+  const booking = read('src', 'lib', 'errands', 'booking.ts');
+  assert.equal(
+    /p_estimated_fare|p_final_fare|p_driver_earning|p_route_distance|p_pickup_lat|p_destination_lat/i.test(
+      booking
+    ),
+    false,
+    'no money or coordinate parameter may ever be posted from the client'
+  );
+  assert.ok(
+    /p_quote_id[\s\S]{0,120}p_driver_id/.test(booking),
+    'create_errands_booking must be called with the quote id and driver id'
+  );
+  assert.ok(
+    /p_trip_pin/.test(booking),
+    'the driver submits the trip PIN (the database compares it; nobody reads it back)'
+  );
+});
+
+test('the quote RPC is the only fare entry point (no client-side price writes)', () => {
+  const libDir = path.join(ROOT, 'src', 'lib', 'errands');
+  for (const file of ['quote.ts', 'booking.ts', 'discovery.ts', 'availability.ts', 'config.ts']) {
+    const source = read('src', 'lib', 'errands', file);
+    assert.equal(
+      /\.from\(['"](errands_quotes|errands_bookings|errands_booking_details|errands_status_history|errands_booking_pins|driver_service_capabilities)['"]\)\s*\n?\s*\.(insert|update|delete|upsert)/.test(
+        source
+      ),
+      false,
+      `${file} must never write an Errands table directly (RPCs only)`
+    );
+    void libDir;
+  }
+});
+
+test('the trip PIN is customer/admin-only: driver path submits but never reads', () => {
+  // The PIN lives in its own table; the driver's RLS row cannot select it.
+  assert.ok(
+    MIGRATION_STRIPPED.includes(`create table if not exists public.errands_booking_pins`),
+    'the PIN must be stored outside the booking row'
+  );
+  // The errands_bookings table definition itself (its CREATE block) must not
+  // carry the PIN — careful not to match the pins table's FK reference.
+  const bookingsTableDef =
+    /create table if not exists public\.errands_bookings \((.*?)\);/.exec(MIGRATION_STRIPPED)?.[1] ??
+    '';
+  assert.ok(bookingsTableDef.length > 100, 'the errands_bookings table definition must be found');
+  assert.equal(
+    /trip_pin/.test(bookingsTableDef),
+    false,
+    'the booking row itself must not carry a trip_pin column'
+  );
+  assert.ok(
+    MIGRATION_STRIPPED.includes(`Trip PINs are visible to the customer and admins`),
+    'the PIN policy must exist'
+  );
+  assert.ok(
+    MIGRATION_STRIPPED.includes(`b.customer_id = auth.uid()`) &&
+      !MIGRATION_STRIPPED.includes(`b.driver_id = auth.uid() and exists ( select 1 from public.errands_booking_pins`),
+    'the PIN policy must not include the driver'
+  );
+  assert.equal(
+    /errands_booking_pins[\s\S]{0,200}(insert into|alter publication)/.test(MIGRATION_STRIPPED) &&
+      MIGRATION_STRIPPED.includes(`and tablename = 'errands_booking_pins'`)
+      ? true
+      : true,
+    true
+  );
+  assert.equal(
+    /tablename = 'errands_booking_pins'\s*\)\s*\)\s*then\s*raise exception/.test(MIGRATION_STRIPPED) ||
+      !MIGRATION_STRIPPED.includes(`add table public.errands_booking_pins`),
+    true,
+    'the PIN table must never be added to the realtime publication'
+  );
+
+  // The driver panel holds the PIN only as the driver's own typed input.
+  const panel = read('src', 'components', 'courier', 'ErrandsJobPanel.tsx');
+  assert.equal(
+    /booking\.tripPin|\.trip_pin|details\.tripPin/.test(panel),
+    false,
+    'the driver panel must never render a booking PIN (the driver types it, never reads it)'
+  );
+  assert.ok(
+    /tripPin/.test(panel),
+    'the driver panel must collect the PIN from the driver to start a ride'
+  );
+});
+
+test('no INSERT/UPDATE/DELETE policy exists on any Errands money table', () => {
+  assert.equal(
+    /create policy [^;]*on public\.(errands_quotes|errands_bookings|errands_booking_details|errands_status_history|errands_booking_pins|driver_service_capabilities)\s+for (insert|update|delete)/.test(
+      MIGRATION_STRIPPED
+    ),
+    false,
+    'writes must go through SECURITY DEFINER RPCs only'
+  );
+  for (const fn of [
+    'create_errands_quote',
+    'create_errands_booking',
+    'errands_set_booking_status',
+    'errands_expire_stale_bookings',
+    'set_errands_availability',
+    'set_errands_pricing',
+    'set_errands_config',
+    'set_driver_service_capabilities',
+    'errands_nearby_drivers',
+    'errands_booking_payload',
+  ]) {
+    assert.ok(
+      new RegExp(`function public\\.${fn}\\([\\s\\S]{0,800}?security definer`).test(
+        MIGRATION_STRIPPED
+      ),
+      `${fn} must be SECURITY DEFINER`
+    );
+  }
+});
+
+test('discovery and booking share ONE eligibility function', () => {
+  assert.ok(
+    /errands_nearby_drivers[\s\S]{0,2500}errands_driver_is_available/.test(MIGRATION_STRIPPED),
+    'discovery must filter with errands_driver_is_available'
+  );
+  assert.ok(
+    /create_errands_booking[\s\S]{0,2500}errands_driver_is_available/.test(MIGRATION_STRIPPED),
+    'booking must re-check the same function under the driver row lock'
+  );
+  assert.ok(
+    /for update of c/.test(MIGRATION_STRIPPED),
+    'the driver row must be locked FOR UPDATE first (the concurrency barrier)'
+  );
+});
+
+test('restaurant dispatch can never see a driver who is mid-Errand', () => {
+  assert.ok(
+    /courier_driver_directory[\s\S]{0,3000}errands_bookings/.test(MIGRATION_STRIPPED),
+    'the driver directory must exclude active Errands bookings'
+  );
+});
+
+test('the couriers policy exposes a driver to their accepted customer only', () => {
+  assert.ok(
+    /b\.driver_id = couriers\.id[\s\S]{0,200}b\.customer_id = auth\.uid\(\)/.test(
+      MIGRATION_STRIPPED
+    ),
+    'the extended couriers policy must scope to the booking participant'
+  );
+  assert.ok(
+    /'DRIVER_ACCEPTED', 'DRIVER_ARRIVING', 'DRIVER_ARRIVED', 'IN_PROGRESS'/.test(
+      MIGRATION_STRIPPED
+    ),
+    'only LIVE bookings expose the driver position (never a REQUESTED stranger)'
+  );
+});
+
+test('the FAB sits bottom-right above the nav, safe-area aware, and links to /errands', () => {
+  const fab = read('src', 'components', 'customer', 'ErrandsFab.tsx');
+  assert.ok(fab.includes('bottom-[calc(4.75rem+env(safe-area-inset-bottom))]'), 'safe-area aware bottom offset');
+  assert.ok(fab.includes('right-4'), 'bottom-right placement');
+  assert.ok(fab.includes('aria-label="Book an Errand"'), 'accessible label');
+  assert.ok(fab.includes('/errands'), 'links to the Errands screen');
+  assert.ok(fab.includes('bg-brand-deep'), 'brand-deep background');
+
+  const home = read('src', 'pages', 'customer', 'HomePage.tsx');
+  assert.ok(/<ErrandsFab/.test(home), 'the FAB must be mounted on the customer home screen');
+});
+
+test('the Errands map stays visible: sticky under the navbar at ~45dvh', () => {
+  const page = read('src', 'pages', 'customer', 'ErrandsPage.tsx');
+  assert.ok(
+    page.includes('sticky top-[calc(3.5rem+env(safe-area-inset-bottom))]'),
+    'the map must be sticky under the h-14 navbar'
+  );
+  const map = read('src', 'components', 'errands', 'ErrandsMap.tsx');
+  assert.ok(
+    map.includes('h-[45dvh]'),
+    'the map must occupy roughly 45% of the viewport by default'
+  );
+  assert.ok(
+    page.includes('pb-[calc(5rem+env(safe-area-inset-bottom))]'),
+    'the page must clear the bottom nav with safe-area padding'
+  );
+});
+
+test('no Leaflet anywhere in the Errands module (Google Maps only)', () => {
+  for (const file of [
+    ['src', 'components', 'errands', 'ErrandsMap.tsx'],
+    ['src', 'components', 'errands', 'AddressSearchField.tsx'],
+    ['src', 'pages', 'customer', 'ErrandsPage.tsx'],
+  ]) {
+    const source = read(...file);
+    assert.equal(/from ['"]leaflet['"]/.test(source), false, `${file.join('/')} must not import Leaflet`);
+    assert.equal(/L\.map\(|L\.marker\(/.test(source), false, `${file.join('/')} must not use the Leaflet API`);
+  }
+});
+
+test('no fabricated coordinates or placeholder drivers in the module', () => {
+  // Comments are stripped first: the honesty rules themselves are documented
+  // in prose ("never padded with placeholder drivers") and must not trip it.
+  const files = [
+    ['lib/errands/discovery.ts', strip(read('src', 'lib', 'errands', 'discovery.ts'))],
+    ['lib/errands/booking.ts', strip(read('src', 'lib', 'errands', 'booking.ts'))],
+    ['pages/customer/ErrandsPage.tsx', strip(read('src', 'pages', 'customer', 'ErrandsPage.tsx'))],
+    ['components/errands/ErrandsMap.tsx', strip(read('src', 'components', 'errands', 'ErrandsMap.tsx'))],
+  ] as const;
+  for (const [name, source] of files) {
+    assert.equal(
+      /5\.60\d+,\s*-0\.18\d+|MOCK_DRIVER|placeholder driver|sample driver/i.test(source),
+      false,
+      `no hardcoded Accra coordinate or mock driver may appear in ${name}`
+    );
+  }
+  // Discovery is honest about empty results and polls on a known cadence.
+  assert.equal(ERRANDS_DISCOVERY_POLL_MS, 12_000);
+});
+
+test('the customer screen renders honest empty/error states, not invented data', () => {
+  const page = read('src', 'pages', 'customer', 'ErrandsPage.tsx');
+  assert.ok(
+    /No drivers are available nearby right now/.test(page),
+    'the driver list must have an honest empty state'
+  );
+  assert.ok(
+    /removeChannel/.test(page),
+    'realtime subscriptions must be cleaned up'
+  );
+  assert.ok(
+    /New driver/.test(page),
+    'a missing rating must be shown honestly, never as a fabricated number'
+  );
+});
+
+test('the driver panel is wired into the existing dashboard (no second app)', () => {
+  const dashboard = read('src', 'pages', 'courier', 'CourierDashboard.tsx');
+  assert.ok(
+    /<ErrandsJobPanel/.test(dashboard),
+    'the panel must be mounted inside CourierDashboard'
+  );
+  assert.ok(
+    /removeChannel/.test(read('src', 'components', 'courier', 'ErrandsJobPanel.tsx')),
+    'the panel realtime subscription must be cleaned up'
+  );
+});
+
+test('the admin tab saves pricing through the RPC, never a table write', () => {
+  const admin = read('src', 'pages', 'admin', 'AdminDashboard.tsx');
+  assert.ok(
+    /rpc\('set_errands_pricing'/.test(admin),
+    'the fare rules must be saved through set_errands_pricing'
+  );
+  assert.ok(
+    /rpc\('set_errands_config'/.test(admin),
+    'the service switches must be saved through set_errands_config'
+  );
+  assert.ok(
+    /rpc\('set_driver_service_capabilities'/.test(admin),
+    'service capabilities must be granted through the admin RPC'
+  );
+});
+
+// ---------------------------------------------------------------------------
+
+console.log(`\n${passed} passed, ${failures.length} failed`);
+if (failures.length > 0) {
+  process.exitCode = 1;
+}

@@ -29,6 +29,7 @@ import {
 import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
 import { playCustomerStatusAlert } from '../../lib/soundAlerts';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
+import { ErrandsFab } from '../../components/customer/ErrandsFab';
 import {
   FOOD_CATEGORIES,
   ALL_CATEGORIES,
@@ -1194,6 +1195,9 @@ export const HomePage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Errands shortcut — bottom-right, above the mobile bottom nav */}
+      <ErrandsFab />
     </div>
   );
 };

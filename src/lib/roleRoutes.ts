@@ -26,6 +26,7 @@ const WORKSPACE_ACCESS: Array<{ path: string; roles: UserRole[] }> = [
   { path: '/restaurant/menu', roles: ['RESTAURANT_OWNER', 'SUPER_ADMIN'] },
   { path: '/restaurant/settings', roles: ['RESTAURANT_OWNER', 'SUPER_ADMIN'] },
   { path: '/admin/dashboard', roles: ['SUPER_ADMIN'] },
+  { path: '/errands', roles: ['CUSTOMER', 'SUPER_ADMIN'] },
 ];
 
 /** Strips query/hash and any trailing slash so `/restaurant/dashboard/` matches. */

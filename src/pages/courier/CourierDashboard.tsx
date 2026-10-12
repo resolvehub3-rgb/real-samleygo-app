@@ -47,6 +47,7 @@ import {
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { NavigationScreen } from '../../components/navigation/NavigationScreen';
 import { playCourierAssignedAlert, initAudioUnlock } from '../../lib/soundAlerts';
+import { ErrandsJobPanel } from '../../components/courier/ErrandsJobPanel';
 
 /**
  * How often the courier's `couriers` row is refreshed — this is what every
@@ -133,6 +134,29 @@ export const CourierDashboard: React.FC = () => {
   const gpsFilterRef = useRef<GpsFilter | null>(null);
   /** Latest ACCEPTED GPS telemetry — accuracy/heading/speed for the map HUD. */
   const [courierFix, setCourierFix] = useState<CourierFixTelemetry>(null);
+
+  /**
+   * True while an Errands booking is live (any status in
+   * `ACTIVE_ERRANDS_STATUSES`) — reported by `<ErrandsJobPanel />` through
+   * `onActiveChange`. ONE flag drives both commitments a travelling driver
+   * must have: the GPS publish cadence below (so the customer's live
+   * tracking follows the errand too) and the pause on incoming food
+   * requests/alerts (the driver is already on a job). The ref is what the
+   * long-lived GPS watcher and the realtime closure read; the state is what
+   * the render gates on.
+   */
+  const activeErrandRef = useRef(false);
+  const [hasActiveErrand, setHasActiveErrand] = useState(false);
+
+  const handleErrandsActiveChange = (active: boolean) => {
+    if (activeErrandRef.current === active) return;
+    activeErrandRef.current = active;
+    setHasActiveErrand(active);
+    // A new trip must appear on the customer's map immediately: drop the
+    // write throttle so the next fix publishes instead of waiting out the
+    // idle gap (the same trick a food status change uses).
+    if (active) lastWriteTimeRef.current = 0;
+  };
 
   // Surface any non-fatal warning raised while creating the courier account
   useEffect(() => {
@@ -328,10 +352,15 @@ export const CourierDashboard: React.FC = () => {
           const oldOrder = payload.old as Partial<Order> | undefined;
 
           // 1. Restaurant assigned this courier to the order!
+          // Suppressed while an errand is live: the driver is committed to
+          // that job, so no chime and no banner — the order itself still
+          // loads through fetchCourierData() below and shows up in "Active
+          // delivery" the moment the errand ends.
           if (
             newOrder &&
             newOrder.courier_id === user.id &&
-            (oldOrder?.courier_id !== user.id || newOrder.status === 'COURIER_ASSIGNED')
+            (oldOrder?.courier_id !== user.id || newOrder.status === 'COURIER_ASSIGNED') &&
+            !activeErrandRef.current
           ) {
             playCourierAssignedAlert();
             setIncomingAssignedAlert({
@@ -345,7 +374,8 @@ export const CourierDashboard: React.FC = () => {
           if (
             payload.eventType === 'INSERT' &&
             newOrder?.status === 'READY_FOR_PICKUP' &&
-            !newOrder.courier_id
+            !newOrder.courier_id &&
+            !activeErrandRef.current
           ) {
             playCourierAssignedAlert();
           }
@@ -600,16 +630,19 @@ export const CourierDashboard: React.FC = () => {
 
         const delivery = activeDeliveryRef.current;
 
-        // Throttle database writes: a delivery in progress publishes every ~10 s
-        // (that is what moves the customer's map), an idle courier every ~25 s.
-        const publishGap = delivery ? LOC_PUBLISH_ACTIVE_MS : LOC_PUBLISH_IDLE_MS;
+        // Throttle database writes: a trip in progress — a food delivery or a
+        // live errand, both reported through the same flag — publishes every
+        // ~10 s (that is what moves the customer's map), an idle courier every
+        // ~25 s.
+        const onLiveTrip = Boolean(delivery) || activeErrandRef.current;
+        const publishGap = onLiveTrip ? LOC_PUBLISH_ACTIVE_MS : LOC_PUBLISH_IDLE_MS;
         if (now - lastWriteTimeRef.current > publishGap && user) {
           lastWriteTimeRef.current = now;
           navLog('NAVIGATION_GPS_UPDATE', {
             lat,
             lng,
             accuracyMeters: fix.accuracy ?? undefined,
-            active: Boolean(delivery),
+            active: onLiveTrip,
           });
 
           try {
@@ -637,6 +670,8 @@ export const CourierDashboard: React.FC = () => {
         // History breadcrumb, on its own slower cadence (the live map does not
         // read it — writing one per fix would multiply DB writes for nothing).
         // (ref keeps this current — the watcher closure would be stale)
+        // Food deliveries only: the trail hangs off `order_id`, which an
+        // errand does not have — errand tracking is the `couriers` row above.
         if (delivery && user && now - lastBreadcrumbTimeRef.current > BREADCRUMB_MS) {
           lastBreadcrumbTimeRef.current = now;
           try {
@@ -1371,6 +1406,15 @@ export const CourierDashboard: React.FC = () => {
           </section>
         ) : null}
 
+        {/* ── Errands & on-demand rides — same section styling, same flag ──
+            The panel reports a live errand through `onActiveChange`, which is
+            what speeds the GPS publish cadence up and pauses the food request
+            flow below while the driver is committed to a trip. */}
+        <ErrandsJobPanel
+          onActiveChange={handleErrandsActiveChange}
+          onRequestAccepted={playCourierAssignedAlert}
+        />
+
         {/* ── Available delivery requests ─────────────────────────────────── */}
         <section className="bg-white px-4 py-4 md:px-6" aria-label="Available delivery requests">
           <div className="flex items-center justify-between gap-3">
@@ -1381,7 +1425,7 @@ export const CourierDashboard: React.FC = () => {
               </p>
             </div>
             <span className="shrink-0 rounded-[8px] bg-emerald-50 px-2 py-1 text-[11px] font-bold text-emerald-700">
-              {availableRequests.length} available
+              {hasActiveErrand ? 'Paused' : `${availableRequests.length} available`}
             </span>
           </div>
 
@@ -1398,6 +1442,17 @@ export const CourierDashboard: React.FC = () => {
               <p className="mt-1">
                 Toggle your status to ONLINE above to receive and accept ready delivery jobs.
               </p>
+            </div>
+          ) : hasActiveErrand ? (
+            /* Committed to an errand: the food queue stays loaded but is not
+               offered — the list and its chime resume the moment the errand
+               ends (the rows are still refreshed by the 45 s poll above). */
+            <div className="mt-3 rounded-[14px] border border-slate-200 bg-slate-50 p-4 text-center text-xs text-slate-500">
+              <Package className="mx-auto mb-2 h-7 w-7 text-slate-300" />
+              <p className="font-bold text-slate-600">
+                Food requests are paused while your errand is active
+              </p>
+              <p className="mt-1">They reappear here as soon as the errand ends.</p>
             </div>
           ) : availableRequests.length === 0 ? (
             <div className="mt-3 max-w-md rounded-[14px] border border-slate-200 bg-white p-6 text-center">
