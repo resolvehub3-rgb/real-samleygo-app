@@ -15,12 +15,6 @@ const asNumber = (value: unknown, fallback: number): number => {
   return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const asNullableNumber = (value: unknown): number | null => {
-  if (value === null || value === undefined || value === '') return null;
-  const parsed = typeof value === 'string' ? Number(value) : value;
-  return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : null;
-};
-
 const asBoolean = (value: unknown, fallback: boolean): boolean => {
   if (typeof value === 'boolean') return value;
   if (value === 'true') return true;
@@ -36,11 +30,7 @@ export function parsePricingSettings(raw: unknown): ErrandsPricingSettings | nul
     configured: asBoolean(row.configured, false),
     currency: typeof row.currency === 'string' && row.currency ? row.currency : 'GHS',
     pricingVersion: Math.round(asNumber(row.pricing_version, 1)),
-    baseFare: asNumber(row.base_fare, 0),
     perKmRate: asNumber(row.per_km_rate, 0),
-    minFare: asNumber(row.min_fare, 0),
-    maxFare: asNullableNumber(row.max_fare),
-    bookingFee: asNumber(row.booking_fee, 0),
     taxRatePercent: asNumber(row.tax_rate_percent, 0),
     surgeMultiplier: asNumber(row.surge_multiplier, 1),
     driverEarningPercentage: asNumber(row.driver_earning_percentage, 100),

@@ -42,10 +42,13 @@ export interface ErrandsQuote {
   distanceKm: number;
   distanceSource: ErrandsDistanceSource;
   estimatedDurationSeconds: number | null;
+  /** The per-km rate this quote was priced with (shown in the breakdown). */
+  perKmRate: number;
+  /** Demand multiplier baked into the trip fare (1 = none). */
+  surgeMultiplier: number;
   tripFare: number;
-  bookingFee: number;
   taxAmount: number;
-  /** What the customer pays (trip fare + booking fee + tax). */
+  /** What the customer pays (trip fare + tax). */
   estimatedFare: number;
   driverEarning: number;
   currency: string;
@@ -67,8 +70,9 @@ interface QuoteRow {
   distance_km?: number;
   distance_source?: string;
   estimated_duration_seconds?: number | null;
+  per_km_rate?: number;
+  surge_multiplier?: number;
   trip_fare?: number;
-  booking_fee?: number;
   tax_amount?: number;
   estimated_fare?: number;
   driver_earning?: number;
@@ -127,8 +131,9 @@ const parseQuote = (row: QuoteRow): ErrandsQuote => ({
   distanceKm: asNumber(row.distance_km),
   distanceSource: row.distance_source === 'ROAD_ROUTE' ? 'ROAD_ROUTE' : 'STRAIGHT_LINE',
   estimatedDurationSeconds: asNullableNumber(row.estimated_duration_seconds),
+  perKmRate: asNumber(row.per_km_rate),
+  surgeMultiplier: asNumber(row.surge_multiplier, 1),
   tripFare: asNumber(row.trip_fare),
-  bookingFee: asNumber(row.booking_fee),
   taxAmount: asNumber(row.tax_amount),
   estimatedFare: asNumber(row.estimated_fare),
   driverEarning: asNumber(row.driver_earning),

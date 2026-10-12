@@ -596,25 +596,16 @@ const Switch: React.FC<SwitchProps> = ({ id, checked, onChange, disabled, label,
   </div>
 );
 
-/** Fare-rules form draft — kept as strings so an optional field can be empty. */
+/** Fare-rules form draft — kept as strings so the fields can be edited freely. */
 interface ErrandsPricingDraft {
-  baseFare: string;
   perKmRate: string;
-  minFare: string;
-  maxFare: string;
-  bookingFee: string;
   taxRatePercent: string;
   driverEarningPercentage: string;
   surgeMultiplier: string;
 }
 
 interface ErrandsPricingDraftValues {
-  baseFare: number;
   perKmRate: number;
-  minFare: number;
-  /** `null` = no ceiling. */
-  maxFare: number | null;
-  bookingFee: number;
   taxRatePercent: number;
   driverEarningPercentage: number;
   surgeMultiplier: number;
@@ -635,34 +626,13 @@ const parseErrandsPricingDraft = (
     return Number.isFinite(parsed) ? parsed : null;
   };
 
-  const base = read(draft.baseFare);
-  if (base === null || base < 0 || base > 9999.99) {
-    return { ok: false, error: 'Base fare must be a number between 0 and 9999.99.' };
-  }
   const perKm = read(draft.perKmRate);
-  if (perKm === null || perKm < 0 || perKm > 9999.99) {
-    return { ok: false, error: 'Price per kilometre must be a number between 0 and 9999.99.' };
-  }
-  const min = read(draft.minFare);
-  if (min === null || min < 0 || min > 999999.99) {
-    return { ok: false, error: 'Minimum fare must be a number between 0 and 999999.99.' };
-  }
-  let max: number | null = null;
-  if (draft.maxFare.trim() !== '') {
-    max = read(draft.maxFare);
-    if (max === null || max < 0 || max > 999999.99) {
-      return {
-        ok: false,
-        error: 'Maximum fare must be empty (no cap) or a number between 0 and 999999.99.',
-      };
-    }
-    if (max < min) {
-      return { ok: false, error: 'The maximum fare cannot be lower than the minimum fare.' };
-    }
-  }
-  const fee = read(draft.bookingFee);
-  if (fee === null || fee < 0 || fee > 9999.99) {
-    return { ok: false, error: 'Booking fee must be a number between 0 and 9999.99.' };
+  if (perKm === null || perKm <= 0 || perKm > 9999.99) {
+    return {
+      ok: false,
+      error:
+        'Price per kilometre must be a number greater than 0 (up to 9999.99) — the fare is calculated from the distance travelled.',
+    };
   }
   const tax = read(draft.taxRatePercent);
   if (tax === null || tax < 0 || tax > 100) {
@@ -683,11 +653,7 @@ const parseErrandsPricingDraft = (
   return {
     ok: true,
     values: {
-      baseFare: base,
       perKmRate: perKm,
-      minFare: min,
-      maxFare: max,
-      bookingFee: fee,
       taxRatePercent: tax,
       driverEarningPercentage: earning,
       surgeMultiplier: surge,
@@ -799,11 +765,7 @@ export const AdminDashboard: React.FC = () => {
 
   // Fare rules draft, saved via set_errands_pricing (the ONLY write path).
   const [errandsPricingDraft, setErrandsPricingDraft] = useState<ErrandsPricingDraft>({
-    baseFare: '',
     perKmRate: '',
-    minFare: '',
-    maxFare: '',
-    bookingFee: '',
     taxRatePercent: '',
     driverEarningPercentage: '',
     surgeMultiplier: '',
@@ -1382,11 +1344,7 @@ export const AdminDashboard: React.FC = () => {
   useEffect(() => {
     if (!errandsPricing) return;
     setErrandsPricingDraft({
-      baseFare: String(errandsPricing.baseFare),
       perKmRate: String(errandsPricing.perKmRate),
-      minFare: String(errandsPricing.minFare),
-      maxFare: errandsPricing.maxFare === null ? '' : String(errandsPricing.maxFare),
-      bookingFee: String(errandsPricing.bookingFee),
       taxRatePercent: String(errandsPricing.taxRatePercent),
       driverEarningPercentage: String(errandsPricing.driverEarningPercentage),
       surgeMultiplier: String(errandsPricing.surgeMultiplier),
@@ -1434,11 +1392,7 @@ export const AdminDashboard: React.FC = () => {
     setIsSavingErrandsPricing(true);
     try {
       const { data, error } = await supabase.rpc('set_errands_pricing', {
-        p_base_fare: check.values.baseFare,
         p_per_km_rate: check.values.perKmRate,
-        p_min_fare: check.values.minFare,
-        p_max_fare: check.values.maxFare,
-        p_booking_fee: check.values.bookingFee,
         p_tax_rate_percent: check.values.taxRatePercent,
         p_driver_earning_percentage: check.values.driverEarningPercentage,
         p_surge_multiplier: check.values.surgeMultiplier,
@@ -1893,19 +1847,11 @@ export const AdminDashboard: React.FC = () => {
       const parsed = Number(raw.trim());
       return raw.trim() !== '' && Number.isFinite(parsed) ? parsed : fallback;
     };
-    const maxFare =
-      errandsPricingDraft.maxFare.trim() === ''
-        ? null
-        : previewNumber(errandsPricingDraft.maxFare, 0);
     return {
       configured: true,
       currency: errandsPricing?.currency ?? 'GHS',
       pricingVersion: errandsPricing?.pricingVersion ?? 1,
-      baseFare: previewNumber(errandsPricingDraft.baseFare, errandsPricing?.baseFare ?? 0),
       perKmRate: previewNumber(errandsPricingDraft.perKmRate, errandsPricing?.perKmRate ?? 0),
-      minFare: previewNumber(errandsPricingDraft.minFare, errandsPricing?.minFare ?? 0),
-      maxFare,
-      bookingFee: previewNumber(errandsPricingDraft.bookingFee, errandsPricing?.bookingFee ?? 0),
       taxRatePercent: previewNumber(
         errandsPricingDraft.taxRatePercent,
         errandsPricing?.taxRatePercent ?? 0
@@ -4132,7 +4078,7 @@ export const AdminDashboard: React.FC = () => {
                   <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
                     <SectionCard
                       title="Fare rules"
-                      subtitle="Base + (distance × per-km), clamped by the floor and an optional ceiling, then booking fee, tax and the driver's share"
+                      subtitle="Route distance × per-km rate × surge, then tax and the driver's share — no base fare, no booking fee, no floor or cap"
                     >
                       {errandsPricing && !errandsPricing.configured && (
                         <div className="mb-4 flex items-start gap-2.5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
@@ -4154,23 +4100,6 @@ export const AdminDashboard: React.FC = () => {
                       <form onSubmit={handleSaveErrandsPricing} className="space-y-4">
                         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                           <div>
-                            <label htmlFor="errands_base_fare" className="mb-1.5 block text-xs font-bold text-slate-600">
-                              Base fare (GH₵)
-                            </label>
-                            <input
-                              id="errands_base_fare"
-                              type="number"
-                              step="0.50"
-                              min={0}
-                              max={9999.99}
-                              value={errandsPricingDraft.baseFare}
-                              onChange={(e) =>
-                                setErrandsPricingDraft((d) => ({ ...d, baseFare: e.target.value }))
-                              }
-                              className={INPUT_CLASS}
-                            />
-                          </div>
-                          <div>
                             <label htmlFor="errands_per_km" className="mb-1.5 block text-xs font-bold text-slate-600">
                               Price per kilometre (GH₵ / km)
                             </label>
@@ -4186,69 +4115,6 @@ export const AdminDashboard: React.FC = () => {
                               }
                               className={INPUT_CLASS}
                             />
-                          </div>
-                          <div>
-                            <label htmlFor="errands_min_fare" className="mb-1.5 block text-xs font-bold text-slate-600">
-                              Minimum fare floor (GH₵)
-                            </label>
-                            <input
-                              id="errands_min_fare"
-                              type="number"
-                              step="0.50"
-                              min={0}
-                              value={errandsPricingDraft.minFare}
-                              onChange={(e) =>
-                                setErrandsPricingDraft((d) => ({ ...d, minFare: e.target.value }))
-                              }
-                              className={INPUT_CLASS}
-                            />
-                            <p className="mt-1 text-[10px] text-slate-400">
-                              0 means no floor.
-                            </p>
-                          </div>
-                          <div>
-                            <label htmlFor="errands_max_fare" className="mb-1.5 block text-xs font-bold text-slate-600">
-                              Maximum fare cap (GH₵){' '}
-                              <span className="font-normal text-slate-400">— optional</span>
-                            </label>
-                            <input
-                              id="errands_max_fare"
-                              type="number"
-                              step="1.00"
-                              min={0}
-                              placeholder="No maximum"
-                              value={errandsPricingDraft.maxFare}
-                              onChange={(e) =>
-                                setErrandsPricingDraft((d) => ({ ...d, maxFare: e.target.value }))
-                              }
-                              className={INPUT_CLASS}
-                            />
-                            <p className="mt-1 text-[10px] text-slate-400">
-                              Leave empty to charge the calculated fare with no ceiling.
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-1 gap-4 border-t border-slate-100 pt-4 sm:grid-cols-2">
-                          <div>
-                            <label htmlFor="errands_booking_fee" className="mb-1.5 block text-xs font-bold text-slate-600">
-                              Booking fee (GH₵)
-                            </label>
-                            <input
-                              id="errands_booking_fee"
-                              type="number"
-                              step="0.50"
-                              min={0}
-                              max={9999.99}
-                              value={errandsPricingDraft.bookingFee}
-                              onChange={(e) =>
-                                setErrandsPricingDraft((d) => ({ ...d, bookingFee: e.target.value }))
-                              }
-                              className={INPUT_CLASS}
-                            />
-                            <p className="mt-1 text-[10px] text-slate-400">
-                              Added after the clamp, then taxed with the trip fare.
-                            </p>
                           </div>
                           <div>
                             <label htmlFor="errands_tax_rate" className="mb-1.5 block text-xs font-bold text-slate-600">
@@ -4374,15 +4240,18 @@ export const AdminDashboard: React.FC = () => {
                         {errandsPreview ? (
                           <div className="mt-4 space-y-2.5 text-xs">
                             <div className="flex items-center justify-between gap-3">
-                              <span className="text-slate-500">Trip fare (after floor/cap)</span>
+                              <span className="text-slate-500">
+                                {`Trip fare · ${
+                                  Number.isFinite(errandsPreviewKm) && errandsPreviewKm > 0
+                                    ? errandsPreviewKm
+                                    : 0
+                                } km × ${formatGHS(errandsPreviewSettings.perKmRate)}/km`}
+                                {errandsPreviewSettings.surgeMultiplier !== 1
+                                  ? ` × ${errandsPreviewSettings.surgeMultiplier} surge`
+                                  : ''}
+                              </span>
                               <span className="font-black tabular-nums text-slate-900">
                                 {formatGHS(errandsPreview.tripFare)}
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between gap-3">
-                              <span className="text-slate-500">Booking fee</span>
-                              <span className="font-black tabular-nums text-slate-900">
-                                {formatGHS(errandsPreview.bookingFee)}
                               </span>
                             </div>
                             <div className="flex items-center justify-between gap-3">
@@ -4410,7 +4279,7 @@ export const AdminDashboard: React.FC = () => {
                           </div>
                         ) : (
                           <p className="mt-4 text-[11px] font-bold text-amber-600">
-                            Enter a distance above 0 km to preview these rules.
+                            Set a price per kilometre greater than 0 to preview these rules.
                           </p>
                         )}
                         <p className="mt-4 border-t border-slate-100 pt-3 text-[11px] leading-relaxed text-slate-400">
@@ -4420,11 +4289,11 @@ export const AdminDashboard: React.FC = () => {
                           for their real route.
                         </p>
                         <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
-                          Floor {formatGHS(errandsPreviewSettings.minFare)} ·{' '}
-                          {errandsPreviewSettings.maxFare !== null
-                            ? `cap ${formatGHS(errandsPreviewSettings.maxFare)}`
-                            : 'no maximum cap'}{' '}
-                          · ×{errandsPreviewSettings.surgeMultiplier} surge
+                          No base fare, no booking fee, no floor and no cap — the price follows
+                          the route: distance × {formatGHS(errandsPreviewSettings.perKmRate)}/km
+                          {errandsPreviewSettings.surgeMultiplier !== 1
+                            ? ` × ${errandsPreviewSettings.surgeMultiplier} surge`
+                            : ''}.
                         </p>
                       </div>
 
@@ -4435,17 +4304,12 @@ export const AdminDashboard: React.FC = () => {
                         <ul className="mt-3 space-y-2.5 text-[11px] leading-relaxed text-slate-500">
                           <li className="flex gap-2">
                             <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
-                            Trip fare = (base + km × per-km rate) × surge, clamped by the floor
-                            and the optional cap
+                            Trip fare = route distance × per-km rate × surge — there is no fixed
+                            component, so a longer trip always costs more
                           </li>
                           <li className="flex gap-2">
                             <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
-                            Booking fee is added after the clamp, so the minimum fare never
-                            swallows it
-                          </li>
-                          <li className="flex gap-2">
-                            <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
-                            Tax applies to trip fare + booking fee; the driver's share is a
+                            Tax is a percentage of the trip fare; the driver's share is a
                             percentage of the customer's total
                           </li>
                           <li className="flex gap-2">

@@ -4,9 +4,10 @@
  *   pnpm test:errands   (tsx scripts/errands_pricing.test.ts)
  *
  * What is covered:
- *   1. The fare preview formula — base + (km × rate), surge, floor, OPTIONAL
- *      ceiling, booking fee and tax added AFTER the clamp, driver earning as
- *      a percentage of the total, 2-decimal rounding.
+ *   1. The fare preview formula — strictly per-distance (route distance ×
+ *      per-km rate × surge), tax as a percentage of the trip fare, driver
+ *      earning as a percentage of the total, 2-decimal rounding, plus a
+ *      source scan proving no fixed component survives anywhere.
  *   2. Honesty rules — unconfigured pricing yields NO number (the caller must
  *      show the admin-required message, never an invented fare).
  *   3. Quote lifecycle — TTL usability window and the expiry countdown.
@@ -36,7 +37,6 @@ import { fileURLToPath } from 'node:url';
 
 import {
   calculateErrandsFare,
-  clampTripFare,
   ERRANDS_PRICING_UNCONFIGURED_MESSAGE,
 } from '../src/lib/errands/pricing';
 import type { ErrandsPricingSettings } from '../src/lib/errands/types';
@@ -91,18 +91,14 @@ const MIGRATION = read('supabase', 'migrations', '20261012_errands_module.sql');
 const MIGRATION_STRIPPED = strip(MIGRATION);
 
 // ---------------------------------------------------------------------------
-// Pricing fixture — acceptance example rules (base GH₵5, GH₵2/km)
+// Pricing fixture — GH₵2/km, 0% tax, driver earns 100%
 // ---------------------------------------------------------------------------
 
 const EXAMPLE_PRICING: ErrandsPricingSettings = {
   configured: true,
   currency: 'GHS',
   pricingVersion: 1,
-  baseFare: 5,
   perKmRate: 2,
-  minFare: 1,
-  maxFare: null, // no ceiling: the fare is whatever the route costs
-  bookingFee: 2,
   taxRatePercent: 0,
   surgeMultiplier: 1,
   driverEarningPercentage: 100,
@@ -119,55 +115,51 @@ const settings = (overrides: Partial<ErrandsPricingSettings>): ErrandsPricingSet
 // 1. The fare formula
 // ---------------------------------------------------------------------------
 
-test('8 km at base 5 + 2/km with a GH₵2 booking fee totals GH₵23', () => {
+test('8 km at GH₵2/km totals GH₵16 — the fare IS the distance', () => {
   const fare = calculateErrandsFare(8, EXAMPLE_PRICING);
   assert.ok(fare, 'a configured rule set must produce a fare');
-  assert.equal(fare.tripFare, 21, 'trip fare = 5 + (8 × 2)');
-  assert.equal(fare.bookingFee, 2);
+  assert.equal(fare.tripFare, 16, 'trip fare = 8 × 2');
   assert.equal(fare.taxAmount, 0);
-  assert.equal(fare.total, 23, 'total = trip fare + booking fee + tax');
-  assert.equal(fare.driverEarning, 23, 'a 100% share pays the driver the total');
+  assert.equal(fare.total, 16, 'total = trip fare + tax (no fixed component)');
+  assert.equal(fare.driverEarning, 16, 'a 100% share pays the driver the total');
   assert.equal(fare.currency, 'GHS');
 });
 
-test('the floor lifts a short trip and the ceiling caps a long one', () => {
-  assert.equal(
-    calculateErrandsFare(0.2, settings({ minFare: 10 }))?.tripFare,
-    10,
-    'the GH₵10 floor must apply'
-  );
-  assert.equal(
-    calculateErrandsFare(100, settings({ maxFare: 60 }))?.tripFare,
-    60,
-    'a configured ceiling must cap the fare'
-  );
+test('the price tracks the distance — twice the route, twice the fare', () => {
+  assert.equal(calculateErrandsFare(3, EXAMPLE_PRICING)?.tripFare, 6, '3 km');
+  assert.equal(calculateErrandsFare(6, EXAMPLE_PRICING)?.tripFare, 12, '6 km');
   assert.equal(
     calculateErrandsFare(100, EXAMPLE_PRICING)?.tripFare,
-    205,
-    'without a ceiling the real route price stands'
+    200,
+    'no floor and no cap: the real route price stands'
+  );
+  assert.equal(
+    calculateErrandsFare(0.2, EXAMPLE_PRICING)?.tripFare,
+    0.4,
+    'a short trip costs little because it travels little'
   );
 });
 
-test('booking fee and tax are added AFTER the clamp, earning is % of the total', () => {
+test('tax is a percentage of the trip fare and earning is % of the total', () => {
   const fare = calculateErrandsFare(
-    0.5,
-    settings({ minFare: 12, bookingFee: 3, taxRatePercent: 15, driverEarningPercentage: 80 })
+    10,
+    settings({ taxRatePercent: 15, driverEarningPercentage: 80 })
   );
   assert.ok(fare);
-  assert.equal(fare.tripFare, 12, 'floored trip fare');
-  assert.equal(fare.taxAmount, 2.25, '15% of (12 + 3)');
-  assert.equal(fare.total, 17.25, 'fee and tax sit on top of the clamped fare');
-  assert.equal(fare.driverEarning, 13.8, '80% of the total, not of the trip fare');
+  assert.equal(fare.tripFare, 20, '10 km × 2');
+  assert.equal(fare.taxAmount, 3, '15% of the trip fare');
+  assert.equal(fare.total, 23, 'trip fare + tax');
+  assert.equal(fare.driverEarning, 18.4, '80% of the total, not of the trip fare');
 });
 
-test('surge multiplies the distance component before the clamp', () => {
-  const fare = calculateErrandsFare(10, settings({ surgeMultiplier: 1.5, bookingFee: 0 }));
-  assert.equal(fare?.tripFare, 37.5, '(5 + 20) × 1.5');
+test('surge scales the distance price proportionally', () => {
+  const fare = calculateErrandsFare(10, settings({ surgeMultiplier: 1.5 }));
+  assert.equal(fare?.tripFare, 30, '(10 × 2) × 1.5');
 });
 
 test('rounding lands on whole pesewas (17.806 ⇒ 17.81)', () => {
-  assert.equal(clampTripFare(17.806, { minFare: 0, maxFare: null }), 17.81);
-  assert.equal(clampTripFare(17.804, { minFare: 0, maxFare: null }), 17.8);
+  assert.equal(calculateErrandsFare(8.903, EXAMPLE_PRICING)?.tripFare, 17.81);
+  assert.equal(calculateErrandsFare(8.902, EXAMPLE_PRICING)?.tripFare, 17.8);
 });
 
 // ---------------------------------------------------------------------------
@@ -189,9 +181,19 @@ test('unconfigured pricing produces NO fare — the message must be shown instea
 });
 
 test('a non-finite or negative distance is priced as 0 km, never as garbage', () => {
-  // 0 km ⇒ base fare only (GH₵5), lifted by the GH₵1 floor.
-  assert.equal(calculateErrandsFare(Number.NaN, EXAMPLE_PRICING)?.tripFare, 5);
-  assert.equal(calculateErrandsFare(-5, EXAMPLE_PRICING)?.tripFare, 5);
+  // 0 km × rate = GH₵0 — a real empty route, not an invented base fare.
+  assert.equal(calculateErrandsFare(Number.NaN, EXAMPLE_PRICING)?.tripFare, 0);
+  assert.equal(calculateErrandsFare(-5, EXAMPLE_PRICING)?.tripFare, 0);
+  assert.equal(calculateErrandsFare(Number.NaN, EXAMPLE_PRICING)?.total, 0);
+});
+
+test('a rule set without a per-km rate prices NOTHING — never a free trip', () => {
+  assert.equal(
+    calculateErrandsFare(8, settings({ perKmRate: 0 })),
+    null,
+    'zero rate ⇒ the admin-required message, not GH₵0'
+  );
+  assert.equal(calculateErrandsFare(8, settings({ perKmRate: -2 })), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -207,11 +209,12 @@ const quote = (expiresAtMs: number, issuedAtMs = expiresAtMs - 5 * 60_000): Erra
   distanceKm: 8.1,
   distanceSource: 'ROAD_ROUTE',
   estimatedDurationSeconds: 1_200,
-  tripFare: 21.2,
-  bookingFee: 2,
+  perKmRate: 2,
+  surgeMultiplier: 1,
+  tripFare: 16.2,
   taxAmount: 0,
-  estimatedFare: 23.2,
-  driverEarning: 23.2,
+  estimatedFare: 16.2,
+  driverEarning: 16.2,
   currency: 'GHS',
   pricingVersion: 1,
   issuedAt: new Date(issuedAtMs).toISOString(),
@@ -372,6 +375,71 @@ test('the service categories and status CHECK match the migration', () => {
 // ---------------------------------------------------------------------------
 // 5. Source scans — the invariants that keep the module honest
 // ---------------------------------------------------------------------------
+
+test('the fare is strictly per-distance — no fixed component survives anywhere', () => {
+  const pricingMigration = strip(
+    read('supabase', 'migrations', '20261012_errands_per_distance_pricing.sql')
+  );
+  const admin = read('src', 'pages', 'admin', 'AdminDashboard.tsx');
+  const page = read('src', 'pages', 'customer', 'ErrandsPage.tsx');
+  const pricing = read('src', 'lib', 'errands', 'pricing.ts');
+  const config = read('src', 'lib', 'errands', 'config.ts');
+  const quoteLib = read('src', 'lib', 'errands', 'quote.ts');
+
+  // The database prices the measured route distance only.
+  assert.ok(
+    pricingMigration.includes('round(v_dist * v_rate * v_surge, 2)'),
+    'trip fare = distance × per-km rate × surge'
+  );
+  assert.ok(
+    pricingMigration.includes('if v_rate <= 0 then'),
+    'a missing per-km rate must refuse to price, never price for free'
+  );
+  // The fixed components are dropped from the quote snapshot and the setter.
+  assert.ok(
+    pricingMigration.includes('drop column if exists base_fare') &&
+      pricingMigration.includes('drop column if exists booking_fee'),
+    'the quote snapshot no longer stores fixed-fee columns'
+  );
+  assert.ok(
+    /drop function if exists public\.set_errands_pricing\(\s*numeric,\s*numeric,\s*numeric,\s*numeric,\s*numeric,\s*numeric,\s*numeric,\s*numeric,\s*jsonb\)/.test(
+      pricingMigration
+    ),
+    'the old 9-argument setter is dropped — only the per-km signature remains'
+  );
+
+  // Client: no fixed component in the preview helper, reader or quote type.
+  for (const [name, source] of [
+    ['pricing.ts', pricing],
+    ['config.ts', config],
+    ['quote.ts', quoteLib],
+  ] as const) {
+    assert.equal(
+      /baseFare|bookingFee|minFare|maxFare|base_fare|booking_fee|min_fare|max_fare/.test(source),
+      false,
+      `${name} must not carry a fixed-fee field`
+    );
+  }
+  assert.ok(
+    quoteLib.includes('perKmRate: asNumber(row.per_km_rate)'),
+    'the quote carries the per-km rate it was priced with'
+  );
+
+  // The admin form offers only distance-shaped rules.
+  assert.equal(
+    /errands_base_fare|errands_booking_fee|errands_min_fare|errands_max_fare/.test(admin),
+    false,
+    'the fare form has no fixed-fee input anymore'
+  );
+
+  // The customer sees the multiplication, never a flat line.
+  assert.ok(page.includes('quote.perKmRate'), 'the breakdown shows the per-km rate');
+  assert.ok(
+    page.includes('quote.distanceKm.toFixed(2)'),
+    'the breakdown starts from the measured route distance'
+  );
+  assert.equal(page.includes('Booking fee'), false, 'no booking-fee line remains on the quote');
+});
 
 test('the booking RPC receives IDs only — the browser never posts money', () => {
   const booking = read('src', 'lib', 'errands', 'booking.ts');

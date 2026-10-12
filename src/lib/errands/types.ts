@@ -221,12 +221,8 @@ export interface ErrandsPricingSettings {
   configured: boolean;
   currency: string;
   pricingVersion: number;
-  baseFare: number;
+  /** The fare IS this rate × the route distance — there is no fixed part. */
   perKmRate: number;
-  minFare: number;
-  /** `null` means "no ceiling". */
-  maxFare: number | null;
-  bookingFee: number;
   taxRatePercent: number;
   surgeMultiplier: number;
   driverEarningPercentage: number;

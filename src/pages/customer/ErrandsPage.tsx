@@ -20,7 +20,6 @@ import { useAuth } from '../../context/AuthContext';
 import { formatDistanceKm, formatGHS, isValidDeliveryPoint } from '../../lib/pricing';
 import {
   LatLng,
-  formatRouteDistance,
   formatRouteDuration,
   geocodeAddress,
   reverseGeocodeAddress,
@@ -1058,13 +1057,14 @@ export const ErrandsPage: React.FC = () => {
                   </div>
 
                   <dl className="mt-3 space-y-1.5 border-t border-slate-100 pt-3 text-xs">
-                    <div className="flex items-center justify-between">
-                      <dt className="text-slate-500">Trip fare</dt>
-                      <dd className="font-semibold text-slate-900">{formatGHS(quote.tripFare)}</dd>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <dt className="text-slate-500">Booking fee</dt>
-                      <dd className="font-semibold text-slate-900">{formatGHS(quote.bookingFee)}</dd>
+                    <div className="flex items-center justify-between gap-3">
+                      <dt className="text-slate-500">
+                        {`${quote.distanceKm.toFixed(2)} km × ${formatGHS(quote.perKmRate)}/km`}
+                        {quote.surgeMultiplier !== 1 ? ` × ${quote.surgeMultiplier} surge` : ''}
+                      </dt>
+                      <dd className="shrink-0 font-semibold text-slate-900">
+                        {formatGHS(quote.tripFare)}
+                      </dd>
                     </div>
                     <div className="flex items-center justify-between">
                       <dt className="text-slate-500">Tax</dt>
@@ -1076,12 +1076,11 @@ export const ErrandsPage: React.FC = () => {
                     </div>
                   </dl>
 
-                  <p className="mt-2 text-[11px] text-slate-500">
-                    {formatRouteDistance(quote.distanceKm * 1000)}
-                    {quote.estimatedDurationSeconds
-                      ? ` · about ${formatRouteDuration(quote.estimatedDurationSeconds)}`
-                      : ''}
-                  </p>
+                  {quote.estimatedDurationSeconds ? (
+                    <p className="mt-2 text-[11px] text-slate-500">
+                      about {formatRouteDuration(quote.estimatedDurationSeconds)}
+                    </p>
+                  ) : null}
 
                   <p className="mt-1 text-[10px] text-slate-400">
                     {quoteSecondsLeft > 30

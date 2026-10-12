@@ -7,7 +7,8 @@
 --
 -- A check reports PASS through a NOTICE. The only way this file can fail is
 -- by raising an exception that starts with "FAIL -", which means a rule from
--- supabase/migrations/20261012_errands_module.sql is broken.
+-- supabase/migrations/20261012_errands_module.sql or from its per-distance
+-- pricing replacement 20261012_errands_per_distance_pricing.sql is broken.
 --
 -- These checks NEVER touch the stored Errands pricing rules or config: the
 -- fare formula is exercised with EXPLICIT settings passed to
@@ -22,23 +23,19 @@
 begin;
 
 -- ---------------------------------------------------------------------
--- 1. The acceptance example: 8 km, base GHc5, GHc2/km, GHc2 booking fee,
---    0% tax, driver earns 100%.
---    trip = 5 + (8 x 2) = 21; total = 21 + 2 + 0 = GHc23.
+-- 1. The acceptance example: 8 km at GHc2/km, 0% tax, driver earns 100%.
+--    trip = 8 x 2 = 16; total = GHc16. There is no base fare, floor,
+--    ceiling or booking fee anywhere in the formula.
 -- ---------------------------------------------------------------------
 do $$
 declare
     v_settings jsonb := jsonb_build_object(
         'configured', true,
-        'base_fare', 5.00,
         'per_km_rate', 2.00,
-        'min_fare', 1.00,
-        'booking_fee', 2.00,
         'tax_rate_percent', 0.00,
         'surge_multiplier', 1.00,
         'driver_earning_percentage', 100.00,
         'currency', 'GHS'
-        -- no max_fare key on purpose: an absent cap means "no ceiling"
     );
     v_result jsonb;
     v_trip numeric;
@@ -50,17 +47,17 @@ begin
     v_total    := (v_result ->> 'estimated_fare')::numeric;
     v_earning  := (v_result ->> 'driver_earning')::numeric;
 
-    if v_trip is distinct from 21.00 then
-        raise exception 'FAIL - 8 km at base 5 + 2/km must be a GHc21 trip fare (got %)', v_trip;
+    if v_trip is distinct from 16.00 then
+        raise exception 'FAIL - 8 km at GHc2/km must be a GHc16 trip fare (got %)', v_trip;
     end if;
-    if v_total is distinct from 23.00 then
-        raise exception 'FAIL - 21 + GHc2 booking fee must total GHc23 (got %)', v_total;
+    if v_total is distinct from 16.00 then
+        raise exception 'FAIL - with 0%% tax the total must equal the GHc16 trip fare (got %)', v_total;
     end if;
-    if v_earning is distinct from 23.00 then
-        raise exception 'FAIL - a 100%% earning share must pay the driver GHc23 (got %)', v_earning;
+    if v_earning is distinct from 16.00 then
+        raise exception 'FAIL - a 100%% earning share must pay the driver GHc16 (got %)', v_earning;
     end if;
 
-    raise notice 'PASS 1 - 8 km = GHc21 fare + GHc2 fee = GHc23 total, driver earns GHc23';
+    raise notice 'PASS 1 - 8 km x GHc2/km = GHc16 fare, GHc16 total, driver earns GHc16';
 end $$;
 
 -- ---------------------------------------------------------------------
@@ -83,101 +80,113 @@ exception
 end $$;
 
 -- ---------------------------------------------------------------------
--- 3. Floor, OPTIONAL ceiling and 2-decimal (pesewa) rounding.
+-- 2b. A configured rule set WITHOUT a positive per-km rate refuses to
+--     quote — a missing rate must never price a trip for free.
+-- ---------------------------------------------------------------------
+do $$
+begin
+    perform public.errands_pricing_amounts(
+        8, 'ERRAND_MOTORCYCLE',
+        jsonb_build_object('configured', true, 'per_km_rate', 0)
+    );
+    raise exception 'FAIL - a zero per-km rate produced a fare instead of refusing';
+exception
+    when raise_exception then
+        if sqlerrm like 'FAIL%' then raise; end if;
+        if sqlerrm not like 'Errands pricing has not been configured yet.%' then
+            raise exception 'FAIL - wrong message for a missing per-km rate: %', sqlerrm;
+        end if;
+        raise notice 'PASS 2b - a rule set without a per-km rate refuses (never a free trip)';
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 3. The price tracks the distance exactly: no floor, no ceiling, and
+--    2-decimal (pesewa) rounding of the distance product.
 -- ---------------------------------------------------------------------
 do $$
 declare
     v_base jsonb := jsonb_build_object(
         'configured', true,
-        'base_fare', 5.00, 'per_km_rate', 2.00, 'min_fare', 1.00,
-        'booking_fee', 0.00, 'tax_rate_percent', 0.00,
+        'per_km_rate', 2.00, 'tax_rate_percent', 0.00,
         'surge_multiplier', 1.00, 'driver_earning_percentage', 100.00
     );
-    v_floored numeric;
-    v_capped numeric;
-    v_uncapped numeric;
+    v_short numeric;
+    v_long numeric;
     v_rounded numeric;
+    v_half numeric;
 begin
-    -- 5.006 + (6.4 x 2) = 17.806 -> 17.81 (half up, whole pesewas)
+    -- A short trip costs little because it travels little (no floor).
+    v_short := (public.errands_pricing_amounts(
+        0.2, 'ERRAND_MOTORCYCLE', v_base) ->> 'trip_fare')::numeric;
+    if v_short is distinct from 0.40 then
+        raise exception 'FAIL - 0.2 km x GHc2 must be GHc0.40, not floored (got %)', v_short;
+    end if;
+
+    -- A long trip is never capped.
+    v_long := (public.errands_pricing_amounts(
+        100, 'ERRAND_MOTORCYCLE', v_base) ->> 'trip_fare')::numeric;
+    if v_long is distinct from 200.00 then
+        raise exception 'FAIL - 100 km x GHc2 must be GHc200, not capped (got %)', v_long;
+    end if;
+
+    -- 8.903 x 2 = 17.806 -> 17.81 (half up, whole pesewas)...
     v_rounded := (public.errands_pricing_amounts(
-        6.4, 'ERRAND_MOTORCYCLE',
-        jsonb_set(v_base, '{base_fare}', '5.006')
-    ) ->> 'trip_fare')::numeric;
+        8.903, 'ERRAND_MOTORCYCLE', v_base) ->> 'trip_fare')::numeric;
     if v_rounded is distinct from 17.81 then
         raise exception 'FAIL - 17.806 must round to 17.81 (got %)', v_rounded;
     end if;
 
-    -- Floor lifts a very short trip.
-    v_floored := (public.errands_pricing_amounts(
-        0.2, 'ERRAND_MOTORCYCLE',
-        jsonb_set(v_base, '{min_fare}', '10.00')
-    ) ->> 'trip_fare')::numeric;
-    if v_floored is distinct from 10.00 then
-        raise exception 'FAIL - the GHc10 floor was not applied (got %)', v_floored;
+    -- ...and 8.902 x 2 = 17.804 rounds down.
+    v_half := (public.errands_pricing_amounts(
+        8.902, 'ERRAND_MOTORCYCLE', v_base) ->> 'trip_fare')::numeric;
+    if v_half is distinct from 17.80 then
+        raise exception 'FAIL - 17.804 must round to 17.80 (got %)', v_half;
     end if;
 
-    -- Ceiling applies only when configured...
-    v_capped := (public.errands_pricing_amounts(
-        100, 'ERRAND_MOTORCYCLE',
-        jsonb_set(v_base, '{max_fare}', '60.00')
-    ) ->> 'trip_fare')::numeric;
-    if v_capped is distinct from 60.00 then
-        raise exception 'FAIL - a 100 km trip must be capped at GHc60 (got %)', v_capped;
-    end if;
-
-    -- ...and an absent cap means the real route price.
-    v_uncapped := (public.errands_pricing_amounts(100, 'ERRAND_MOTORCYCLE', v_base)
-                   ->> 'trip_fare')::numeric;
-    if v_uncapped is distinct from 205.00 then
-        raise exception 'FAIL - without a cap a 100 km trip must cost GHc205 (got %)', v_uncapped;
-    end if;
-
-    raise notice 'PASS 3 - formula, floor, optional ceiling and 2-decimal rounding';
+    raise notice 'PASS 3 - the price tracks the distance (no floor, no cap) with pesewa rounding';
 end $$;
 
 -- ---------------------------------------------------------------------
--- 4. Booking fee and tax are ADDED after the clamp (never swallowed by the
---    minimum), and the driver earning share is a percentage of the total.
---    Trip 10 (floored to min 12), fee 3, tax 15%%, driver 80%%:
---    tax = (12 + 3) x 0.15 = 2.25; total = 17.25; driver = 13.80.
+-- 4. Tax is a percentage of the trip fare and the driver earning share
+--    is a percentage of the customer's total.
+--    Trip: 10 km x GHc2 = 20, tax 15% = 3, total 23, driver 80% = 18.40.
 -- ---------------------------------------------------------------------
 do $$
 declare
     v_result jsonb;
 begin
     v_result := public.errands_pricing_amounts(
-        0.5, 'ERRAND_MOTORCYCLE',
+        10, 'ERRAND_MOTORCYCLE',
         jsonb_build_object(
             'configured', true,
-            'base_fare', 5.00, 'per_km_rate', 2.00, 'min_fare', 12.00,
-            'booking_fee', 3.00, 'tax_rate_percent', 15.00,
+            'per_km_rate', 2.00, 'tax_rate_percent', 15.00,
             'surge_multiplier', 1.00, 'driver_earning_percentage', 80.00
         )
     );
 
-    if (v_result ->> 'trip_fare')::numeric is distinct from 12.00 then
-        raise exception 'FAIL - the floored trip fare must be GHc12 (got %)',
+    if (v_result ->> 'trip_fare')::numeric is distinct from 20.00 then
+        raise exception 'FAIL - the trip fare must be GHc20.00 (got %)',
             v_result ->> 'trip_fare';
     end if;
-    if (v_result ->> 'tax_amount')::numeric is distinct from 2.25 then
-        raise exception 'FAIL - 15%% of (12 + 3) must be GHc2.25 (got %)',
+    if (v_result ->> 'tax_amount')::numeric is distinct from 3.00 then
+        raise exception 'FAIL - 15%% of GHc20 must be GHc3.00 (got %)',
             v_result ->> 'tax_amount';
     end if;
-    if (v_result ->> 'estimated_fare')::numeric is distinct from 17.25 then
-        raise exception 'FAIL - total must be GHc17.25 (got %)',
+    if (v_result ->> 'estimated_fare')::numeric is distinct from 23.00 then
+        raise exception 'FAIL - total must be GHc23.00 (got %)',
             v_result ->> 'estimated_fare';
     end if;
-    if (v_result ->> 'driver_earning')::numeric is distinct from 13.80 then
-        raise exception 'FAIL - 80%% of GHc17.25 must be GHc13.80 (got %)',
+    if (v_result ->> 'driver_earning')::numeric is distinct from 18.40 then
+        raise exception 'FAIL - 80%% of GHc23 must be GHc18.40 (got %)',
             v_result ->> 'driver_earning';
     end if;
 
-    raise notice 'PASS 4 - booking fee and tax are added after the clamp; earning % of total';
+    raise notice 'PASS 4 - tax is a %% of the trip fare; earning is a %% of the total';
 end $$;
 
 -- ---------------------------------------------------------------------
--- 5. Surge multiplies the distance component before the clamp.
---    (5 + (10 x 2)) x 1.5 = GHc37.50.
+-- 5. Surge scales the distance price proportionally.
+--    (10 x 2) x 1.5 = GHc30.00.
 -- ---------------------------------------------------------------------
 do $$
 declare
@@ -187,22 +196,22 @@ begin
         10, 'ERRAND_MOTORCYCLE',
         jsonb_build_object(
             'configured', true,
-            'base_fare', 5.00, 'per_km_rate', 2.00, 'min_fare', 1.00,
-            'booking_fee', 0.00, 'tax_rate_percent', 0.00,
+            'per_km_rate', 2.00, 'tax_rate_percent', 0.00,
             'surge_multiplier', 1.50, 'driver_earning_percentage', 100.00
         )
     ) ->> 'trip_fare')::numeric;
 
-    if v_trip is distinct from 37.50 then
-        raise exception 'FAIL - surge 1.5 on a 10 km trip must be GHc37.50 (got %)', v_trip;
+    if v_trip is distinct from 30.00 then
+        raise exception 'FAIL - surge 1.5 on a 10 km trip must be GHc30.00 (got %)', v_trip;
     end if;
 
-    raise notice 'PASS 5 - surge multiplies the distance component';
+    raise notice 'PASS 5 - surge scales the per-distance price';
 end $$;
 
 -- ---------------------------------------------------------------------
--- 6. Per-service overrides replace the shared rules key by key.
---    A car ride with a different base keeps the shared per-km rate.
+-- 6. Per-service overrides replace the shared rules key by key. The only
+--    overrideable key is the per-km rate: a car ride priced at GHc3/km
+--    keeps the shared tax rate.
 -- ---------------------------------------------------------------------
 do $$
 declare
@@ -212,23 +221,26 @@ begin
         10, 'RIDE_CAR',
         jsonb_build_object(
             'configured', true,
-            'base_fare', 5.00, 'per_km_rate', 2.00, 'min_fare', 1.00,
-            'booking_fee', 0.00, 'tax_rate_percent', 0.00,
+            'per_km_rate', 2.00, 'tax_rate_percent', 15.00,
             'surge_multiplier', 1.00, 'driver_earning_percentage', 100.00,
             'services', jsonb_build_object(
-                'RIDE_CAR', jsonb_build_object('base_fare', 8.00)
+                'RIDE_CAR', jsonb_build_object('per_km_rate', 3.00)
             )
         )
     );
 
-    -- (8 + 10 x 2) = 28, not (5 + 20) = 25.
-    if (v_result ->> 'trip_fare')::numeric is distinct from 28.00 then
-        raise exception 'FAIL - the RIDE_CAR override must replace only the base fare (got %)',
+    -- 10 x 3 = 30, not (10 x 2 =) 20.
+    if (v_result ->> 'trip_fare')::numeric is distinct from 30.00 then
+        raise exception 'FAIL - the RIDE_CAR override must replace the per-km rate (got %)',
             v_result ->> 'trip_fare';
     end if;
-    if (v_result ->> 'per_km_rate')::numeric is distinct from 2.00 then
-        raise exception 'FAIL - the shared per-km rate must survive the override (got %)',
+    if (v_result ->> 'per_km_rate')::numeric is distinct from 3.00 then
+        raise exception 'FAIL - the overridden per-km rate must be reported (got %)',
             v_result ->> 'per_km_rate';
+    end if;
+    if (v_result ->> 'tax_rate_percent')::numeric is distinct from 15.00 then
+        raise exception 'FAIL - the shared tax rate must survive the override (got %)',
+            v_result ->> 'tax_rate_percent';
     end if;
 
     raise notice 'PASS 6 - per-service overrides replace keys, not the whole rule set';
@@ -241,7 +253,7 @@ do $$
 begin
     perform public.errands_pricing_amounts(
         5, 'HELICOPTER',
-        jsonb_build_object('configured', true, 'base_fare', 5.00)
+        jsonb_build_object('configured', true, 'per_km_rate', 2.00)
     );
     raise exception 'FAIL - an unknown service category was priced';
 exception
@@ -341,6 +353,23 @@ begin
         raise exception 'FAIL - % write policy found on an Errands table; writes must go through SECURITY DEFINER RPCs only', v_writes;
     end if;
 
+    -- The quote snapshot carries no fixed-fee columns: the fare is a pure
+    -- function of distance, so there is nothing fixed left to store.
+    if exists (
+        select 1 from information_schema.columns
+         where table_schema = 'public' and table_name = 'errands_quotes'
+           and column_name in ('base_fare', 'min_fare', 'max_fare', 'booking_fee')
+    ) then
+        raise exception 'FAIL - errands_quotes still stores fixed-fee columns (base/min/max/booking)';
+    end if;
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = 'public' and table_name = 'errands_quotes'
+           and column_name = 'per_km_rate'
+    ) then
+        raise exception 'FAIL - errands_quotes must snapshot the per-km rate it was priced with';
+    end if;
+
     -- The trip PIN table exists, has RLS on, and the driver-facing grant is
     -- SELECT-free for anyone but the booking's customer and super admins.
     if to_regclass('public.errands_booking_pins') is null then
@@ -401,8 +430,11 @@ begin
     if to_regprocedure('public.set_errands_availability(boolean)') is null then
         raise exception 'FAIL - set_errands_availability(boolean) is missing';
     end if;
-    if to_regprocedure('public.set_errands_pricing(numeric, numeric, numeric, numeric, numeric, numeric, numeric, numeric, jsonb)') is null then
-        raise exception 'FAIL - set_errands_pricing(...) is missing';
+    if to_regprocedure('public.set_errands_pricing(numeric, numeric, numeric, numeric, jsonb)') is null then
+        raise exception 'FAIL - set_errands_pricing(per-km, tax, earning, surge, services) is missing';
+    end if;
+    if to_regprocedure('public.set_errands_pricing(numeric, numeric, numeric, numeric, numeric, numeric, numeric, numeric, jsonb)') is not null then
+        raise exception 'FAIL - the old 9-argument set_errands_pricing still exists (fixed-fee pricing)';
     end if;
     if to_regprocedure('public.set_driver_service_capabilities(uuid, boolean, boolean)') is null then
         raise exception 'FAIL - set_driver_service_capabilities(...) is missing';
