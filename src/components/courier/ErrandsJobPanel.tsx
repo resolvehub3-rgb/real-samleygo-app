@@ -14,6 +14,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { formatDistanceKm, formatGHS } from '../../lib/pricing';
+import type { LatLng } from '../../lib/routing';
 import {
   expireStaleErrandsBookings,
   fetchDriverErrandsBookings,
@@ -54,6 +55,22 @@ const JOB_STATUSES: readonly ErrandsBookingStatus[] = ACTIVE_ERRANDS_STATUSES.fi
   (status) => status !== 'REQUESTED'
 );
 
+/**
+ * The live trip as the dashboard's maps need it. Every field is a server
+ * value: the booking row's status and the exact endpoints that
+ * `errands_booking_details` reveals ONLY after this driver accepted. The
+ * panel never synthesises a coordinate — while the endpoints are invisible
+ * (or there is no accepted job) it reports `null` and the map draws nothing.
+ */
+export interface ErrandsTripInfo {
+  bookingId: string;
+  status: ErrandsBookingStatus;
+  pickup: LatLng | null;
+  destination: LatLng | null;
+  pickupAddress?: string;
+  destinationAddress?: string;
+}
+
 export interface ErrandsJobPanelProps {
   /**
    * Reports whether a booking is live (any status in
@@ -67,6 +84,14 @@ export interface ErrandsJobPanelProps {
    * same chime.
    */
   onRequestAccepted?: () => void;
+  /**
+   * Reports the accepted trip's real pickup/drop-off so the dashboard's live
+   * map and full-screen navigation can draw the actual road route — the same
+   * route engine the food flow uses. `null` whenever there is no accepted job
+   * with visible endpoints (unmount included), so a finished trip clears the
+   * line instead of leaving a stale one behind.
+   */
+  onTripInfoChange?: (trip: ErrandsTripInfo | null) => void;
 }
 
 type StatusActionInput = {
@@ -102,6 +127,7 @@ const dangerButtonClass =
 export const ErrandsJobPanel: React.FC<ErrandsJobPanelProps> = ({
   onActiveChange,
   onRequestAccepted,
+  onTripInfoChange,
 }) => {
   const { user } = useAuth();
 
@@ -139,6 +165,7 @@ export const ErrandsJobPanel: React.FC<ErrandsJobPanelProps> = ({
 
   const onActiveChangeRef = useRef(onActiveChange);
   const onRequestAcceptedRef = useRef(onRequestAccepted);
+  const onTripInfoChangeRef = useRef(onTripInfoChange);
   /** Booking ids already seen — a request only counts as NEW if absent here. */
   const knownBookingIdsRef = useRef<Set<string> | null>(null);
   const bookingsSeqRef = useRef(0);
@@ -150,6 +177,9 @@ export const ErrandsJobPanel: React.FC<ErrandsJobPanelProps> = ({
   });
   useEffect(() => {
     onRequestAcceptedRef.current = onRequestAccepted;
+  });
+  useEffect(() => {
+    onTripInfoChangeRef.current = onTripInfoChange;
   });
 
   // ── Capability: what this account is allowed to run ─────────────────
@@ -304,6 +334,50 @@ export const ErrandsJobPanel: React.FC<ErrandsJobPanelProps> = ({
 
   const exactDetails: ErrandsBookingDetails | null =
     jobDetails && liveJob && jobDetails.id === liveJob.id ? jobDetails.details : null;
+
+  // ── Routing endpoints for the dashboard's map ────────────────────────────
+  /**
+   * The accepted trip's real pickup/drop-off, keyed on primitives (job id,
+   * status, the details row) rather than the booking object: the 8 s poll
+   * hands back fresh rows with identical content, and a new object identity
+   * must not redraw the route every eight seconds. Stays `null` until the
+   * server has revealed the endpoints post-acceptance — a still-loading or
+   * refused details read means NO line, never a guessed one.
+   */
+  const tripInfo = useMemo<ErrandsTripInfo | null>(() => {
+    const job = liveJob;
+    if (!job || !ACTIVE_ERRANDS_STATUSES.includes(job.status)) return null;
+    if (!jobDetails || jobDetails.id !== job.id || !jobDetails.details) return null;
+    const details = jobDetails.details;
+    return {
+      bookingId: job.id,
+      status: job.status,
+      pickup:
+        details.pickupLatitude != null && details.pickupLongitude != null
+          ? { lat: details.pickupLatitude, lng: details.pickupLongitude }
+          : null,
+      destination:
+        details.destinationLatitude != null && details.destinationLongitude != null
+          ? { lat: details.destinationLatitude, lng: details.destinationLongitude }
+          : null,
+      pickupAddress: details.pickupAddress ?? undefined,
+      destinationAddress: details.destinationAddress ?? undefined,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deps are the primitives that fully identify the job content
+  }, [liveJob?.id, liveJob?.status, jobDetails]);
+
+  // Hand the trip to the dashboard whenever it changes (including → null when
+  // the job ends or is dismissed, which clears the drawn route).
+  useEffect(() => {
+    onTripInfoChangeRef.current?.(tripInfo);
+  }, [tripInfo]);
+
+  // …and forget it on unmount so no dashboard keeps a dead trip on its map.
+  useEffect(() => {
+    return () => {
+      onTripInfoChangeRef.current?.(null);
+    };
+  }, []);
 
   // ── Countdown to `requested_expires_at` ─────────────────────────────
   useEffect(() => {

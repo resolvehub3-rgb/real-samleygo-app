@@ -169,6 +169,13 @@ interface CourierLiveMapProps {
   /** Order this trip belongs to — attached to incident reports only. */
   orderId?: string | null;
   /**
+   * Which trip the pins and copy belong to. Food wording ("Restaurant pickup",
+   * "your order screen") is wrong on an Errands & rides job, where the SAME
+   * route engine is drawing the booked pickup/drop-off instead. Defaults to
+   * `'delivery'`, so every existing food surface keeps its exact wording.
+   */
+  tripKind?: 'delivery' | 'errand';
+  /**
    * Called when the rider leaves navigation (✕ on the ETA panel or the
    * arrival card). The parent decides what that means — typically it unmounts
    * the full-screen host. Never called by the standard variant.
@@ -466,6 +473,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
   flat = false,
   variant = 'standard',
   orderId = null,
+  tripKind = 'delivery',
   onExitNavigation,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1497,22 +1505,26 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       destinationMarkerRef.current = null;
     }
 
-    // Restaurant pickup pin
+    // Pickup pin — a kitchen on food trips, the booked pickup point on an
+    // errand/ride (same engine, honest label).
     if (pickupPt) {
+      const pickupTitle = tripKind === 'errand' ? 'Pickup point' : 'Restaurant pickup';
       const position: google.maps.LatLngLiteral = { lat: pickupPt.lat, lng: pickupPt.lng };
       if (pickupMarkerRef.current) {
         pickupMarkerRef.current.position = position;
+        pickupMarkerRef.current.title = pickupTitle;
+        setPopupText(pickupMarkerRef.current, pickupTitle);
       } else {
         const marker = new google.maps.marker.AdvancedMarkerElement({
           map,
           position,
           content: makePinContent('🍳', '#f59e0b'),
-          title: 'Restaurant pickup',
+          title: pickupTitle,
           zIndex: 600,
           gmpClickable: true,
           ...pinAnchor(34),
         });
-        setPopupText(marker, 'Restaurant pickup');
+        setPopupText(marker, pickupTitle);
         marker.addEventListener('gmp-click', () => actionRefs.current.openPopup(marker));
         pickupMarkerRef.current = marker;
       }
@@ -1882,7 +1894,7 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
       fitPoints(map, points, { padding });
       fitSigRef.current = fitSig;
     }
-  }, [mapReady, courierPosition, destinationPt, pickupPt, courierName, roadRoute, restaurantKey]);
+  }, [mapReady, courierPosition, destinationPt, pickupPt, courierName, roadRoute, restaurantKey, tripKind]);
 
   // ── HUD copy (courier screen only — customers never see turn-by-turn) ──
   const maneuver = navProgress?.maneuver ?? null;
@@ -1898,8 +1910,8 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
           : null;
   const destinationLabel =
     leg?.kind === 'TO_PICKUP'
-      ? pickupAddress || 'Restaurant pickup'
-      : destinationAddress || 'Customer drop-off';
+      ? pickupAddress || (tripKind === 'errand' ? 'Pickup point' : 'Restaurant pickup')
+      : destinationAddress || (tripKind === 'errand' ? 'Drop-off' : 'Customer drop-off');
   const etaAt =
     navProgress && navProgress.remainingSeconds > 0
       ? new Date(Date.now() + navProgress.remainingSeconds * 1000).toLocaleTimeString([], {
@@ -2135,8 +2147,12 @@ export const CourierLiveMap: React.FC<CourierLiveMapProps> = ({
               <p className="text-[12px] font-bold text-emerald-900">You have arrived</p>
               <p className="text-[11px] leading-snug text-emerald-700">
                 {leg?.phase === 'TO_RESTAURANT'
-                  ? 'At the restaurant — confirm the pickup in your order screen.'
-                  : 'At the drop-off — complete the delivery in your order screen.'}
+                  ? tripKind === 'errand'
+                    ? 'At the pickup — confirm the trip in your errand job card.'
+                    : 'At the restaurant — confirm the pickup in your order screen.'
+                  : tripKind === 'errand'
+                    ? 'At the drop-off — complete the trip in your errand job card.'
+                    : 'At the drop-off — complete the delivery in your order screen.'}
               </p>
             </div>
           )}

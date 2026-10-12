@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import {
   Bike,
   Navigation,
@@ -47,7 +47,7 @@ import {
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { NavigationScreen } from '../../components/navigation/NavigationScreen';
 import { playCourierAssignedAlert, initAudioUnlock } from '../../lib/soundAlerts';
-import { ErrandsJobPanel } from '../../components/courier/ErrandsJobPanel';
+import { ErrandsJobPanel, type ErrandsTripInfo } from '../../components/courier/ErrandsJobPanel';
 
 /**
  * How often the courier's `couriers` row is refreshed — this is what every
@@ -157,6 +157,67 @@ export const CourierDashboard: React.FC = () => {
     // idle gap (the same trick a food status change uses).
     if (active) lastWriteTimeRef.current = 0;
   };
+
+  /**
+   * The accepted errand's real endpoints, reported by `<ErrandsJobPanel />`
+   * through `onTripInfoChange` — `null` until the server has revealed them
+   * (post-acceptance) and again the moment the trip ends.
+   */
+  const [errandTrip, setErrandTrip] = useState<ErrandsTripInfo | null>(null);
+  const handleErrandTripChange = (trip: ErrandsTripInfo | null) => {
+    setErrandTrip(trip);
+  };
+
+  /** The trip the maps and navigation session below actually follow. */
+  type ActiveTrip = {
+    kind: 'delivery' | 'errand';
+    id: string;
+    status: string;
+    pickup: { lat: number; lng: number } | null;
+    destination: { lat: number; lng: number } | null;
+    pickupAddress?: string;
+    destinationAddress?: string;
+  };
+
+  /**
+   * ONE trip for every navigation surface. An accepted food delivery keeps
+   * the map it has always had (it wins outright if both are somehow live);
+   * otherwise the accepted errand's real endpoints drive the SAME route
+   * engine — same pins, same road route, same phase machine. No trip means
+   * no pins and no line: nothing here is ever guessed.
+   */
+  const activeTrip = useMemo<ActiveTrip | null>(() => {
+    if (activeDelivery) {
+      const restaurant = activeDelivery.restaurant;
+      return {
+        kind: 'delivery',
+        id: activeDelivery.id,
+        status: activeDelivery.status,
+        pickup:
+          restaurant?.latitude != null && restaurant?.longitude != null
+            ? { lat: restaurant.latitude, lng: restaurant.longitude }
+            : null,
+        destination:
+          activeDelivery.delivery_latitude != null && activeDelivery.delivery_longitude != null
+            ? { lat: activeDelivery.delivery_latitude, lng: activeDelivery.delivery_longitude }
+            : null,
+        pickupAddress: restaurant ? `${restaurant.address}, ${restaurant.city}` : undefined,
+        destinationAddress: activeDelivery.delivery_address,
+      };
+    }
+    if (errandTrip) {
+      return {
+        kind: 'errand',
+        id: errandTrip.bookingId,
+        status: errandTrip.status,
+        pickup: errandTrip.pickup,
+        destination: errandTrip.destination,
+        pickupAddress: errandTrip.pickupAddress,
+        destinationAddress: errandTrip.destinationAddress,
+      };
+    }
+    return null;
+  }, [activeDelivery, errandTrip]);
 
   // Surface any non-fatal warning raised while creating the courier account
   useEffect(() => {
@@ -447,28 +508,20 @@ export const CourierDashboard: React.FC = () => {
   }, [activeDelivery]);
 
   // ── Navigation session: ONE authoritative record of what this courier is
-  // navigating to right now. It follows the order's status, so the phase can
-  // never disagree with the map — and a finished/cancelled order ends it.
+  // navigating to right now. It follows the trip's status (food delivery OR
+  // accepted errand), so the phase can never disagree with the map — and a
+  // finished/cancelled trip ends it.
   useEffect(() => {
     if (!user?.id || !isSupabaseConfigured) return;
 
-    if (!activeDelivery) {
+    if (!activeTrip) {
       endNavigationSession('NO_ACTIVE_DELIVERY');
       return;
     }
 
-    const pickup =
-      activeDelivery.restaurant?.latitude != null && activeDelivery.restaurant?.longitude != null
-        ? { lat: activeDelivery.restaurant.latitude, lng: activeDelivery.restaurant.longitude }
-        : null;
-    const dropoff =
-      activeDelivery.delivery_latitude != null && activeDelivery.delivery_longitude != null
-        ? { lat: activeDelivery.delivery_latitude, lng: activeDelivery.delivery_longitude }
-        : null;
-
-    const phase = resolveNavigationPhase(activeDelivery.status, {
-      hasPickup: pickup !== null,
-      hasDestination: dropoff !== null,
+    const phase = resolveNavigationPhase(activeTrip.status, {
+      hasPickup: activeTrip.pickup !== null,
+      hasDestination: activeTrip.destination !== null,
     });
     if (phase === 'IDLE') {
       // Ended/cancelled (or no coordinates at all) — never navigate anywhere.
@@ -477,16 +530,16 @@ export const CourierDashboard: React.FC = () => {
     }
 
     syncNavigationSession({
-      orderId: activeDelivery.id,
+      orderId: activeTrip.id,
       courierId: user.id,
       phase,
       origin: currentCoords,
-      destination: destinationForPhase(phase, pickup, dropoff),
+      destination: destinationForPhase(phase, activeTrip.pickup, activeTrip.destination),
     });
     // `currentCoords` is the courier's latest GPS — the session's origin is
     // always where they are, never where the trip started.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, activeDelivery, currentCoords]);
+  }, [user?.id, activeTrip, currentCoords]);
 
   // Realtime: approval status & document review updates pushed from the admin console
   useEffect(() => {
@@ -1057,7 +1110,7 @@ export const CourierDashboard: React.FC = () => {
         </section>
 
         {/* ── Live navigation map — the screen's primary surface (§6) ─────── */}
-        {(gpsActive || activeDelivery) && (
+        {(gpsActive || activeTrip) && (
           <section
             className="border-b border-slate-100 bg-white pb-3"
             aria-label="Live navigation map"
@@ -1133,33 +1186,25 @@ export const CourierDashboard: React.FC = () => {
               <div className="mt-3">
                 <CourierLiveMap
                   courierPosition={currentCoords}
-                  status={activeDelivery?.status}
-                  destination={
-                    activeDelivery?.delivery_latitude && activeDelivery?.delivery_longitude
-                      ? { lat: activeDelivery.delivery_latitude, lng: activeDelivery.delivery_longitude }
-                      : null
-                  }
-                  destinationAddress={activeDelivery?.delivery_address}
-                  pickup={
-                    activeDelivery?.restaurant?.latitude && activeDelivery?.restaurant?.longitude
-                      ? { lat: activeDelivery.restaurant.latitude, lng: activeDelivery.restaurant.longitude }
-                      : null
-                  }
-                  pickupAddress={
-                    activeDelivery?.restaurant
-                      ? `${activeDelivery.restaurant.address}, ${activeDelivery.restaurant.city}`
-                      : undefined
-                  }
-                  restaurants={otherRestaurants}
+                  status={activeTrip?.status}
+                  destination={activeTrip?.destination ?? null}
+                  destinationAddress={activeTrip?.destinationAddress}
+                  pickup={activeTrip?.pickup ?? null}
+                  pickupAddress={activeTrip?.pickupAddress}
+                  /* The kitchen network is food context — an errand keeps its
+                     frame on the two real endpoints (it also stops the fit
+                     from zooming out to pins across the city). */
+                  restaurants={activeTrip?.kind === 'errand' ? [] : otherRestaurants}
+                  tripKind={activeTrip?.kind === 'errand' ? 'errand' : 'delivery'}
                   courierFix={courierFix}
                   showNavigationHud
                   flat
                   className="h-[clamp(300px,48dvh,560px)]"
                 />
 
-                {!activeDelivery && (
+                {!activeTrip && !hasActiveErrand && (
                   <p className="px-4 pt-2 text-[11px] text-slate-400 md:px-6">
-                    Accept a delivery to see the pickup and customer pins on your map.
+                    Accept a delivery or an errand job to see the trip's real route here.
                   </p>
                 )}
               </div>
@@ -1413,6 +1458,7 @@ export const CourierDashboard: React.FC = () => {
         <ErrandsJobPanel
           onActiveChange={handleErrandsActiveChange}
           onRequestAccepted={playCourierAssignedAlert}
+          onTripInfoChange={handleErrandTripChange}
         />
 
         {/* ── Available delivery requests ─────────────────────────────────── */}
@@ -1561,26 +1607,15 @@ export const CourierDashboard: React.FC = () => {
         {isNavigating && (
           <NavigationScreen
             courierPosition={currentCoords}
-            status={activeDelivery?.status}
-            destination={
-              activeDelivery?.delivery_latitude && activeDelivery?.delivery_longitude
-                ? { lat: activeDelivery.delivery_latitude, lng: activeDelivery.delivery_longitude }
-                : null
-            }
-            destinationAddress={activeDelivery?.delivery_address}
-            pickup={
-              activeDelivery?.restaurant?.latitude && activeDelivery?.restaurant?.longitude
-                ? { lat: activeDelivery.restaurant.latitude, lng: activeDelivery.restaurant.longitude }
-                : null
-            }
-            pickupAddress={
-              activeDelivery?.restaurant
-                ? `${activeDelivery.restaurant.address}, ${activeDelivery.restaurant.city}`
-                : undefined
-            }
-            restaurants={otherRestaurants}
+            status={activeTrip?.status}
+            destination={activeTrip?.destination ?? null}
+            destinationAddress={activeTrip?.destinationAddress}
+            pickup={activeTrip?.pickup ?? null}
+            pickupAddress={activeTrip?.pickupAddress}
+            restaurants={activeTrip?.kind === 'errand' ? [] : otherRestaurants}
             courierName={courier?.profile?.full_name || 'You (Courier)'}
-            orderId={activeDelivery?.id ?? null}
+            orderId={activeTrip?.id ?? null}
+            tripKind={activeTrip?.kind === 'errand' ? 'errand' : 'delivery'}
             courierFix={courierFix}
             onExit={() => setIsNavigating(false)}
           />

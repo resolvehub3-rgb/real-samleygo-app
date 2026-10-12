@@ -17,6 +17,11 @@ export interface NavigationScreenProps {
   courierName?: string;
   /** Order this trip belongs to — recorded on incident reports. */
   orderId?: string | null;
+  /**
+   * Food or Errands trip — forwarded so the map's pins and copy stay honest
+   * on an errand/ride (see `CourierLiveMapProps.tripKind`).
+   */
+  tripKind?: 'delivery' | 'errand';
   /** Latest GPS telemetry (accuracy / heading / speed / timestamp). */
   courierFix?: {
     accuracy?: number | null;
@@ -53,6 +58,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
   restaurants,
   courierName,
   orderId = null,
+  tripKind = 'delivery',
   courierFix,
   onExit,
 }) => {
@@ -100,6 +106,7 @@ export const NavigationScreen: React.FC<NavigationScreenProps> = ({
         courierName={courierName}
         courierFix={courierFix}
         orderId={orderId}
+        tripKind={tripKind}
         onExitNavigation={onExit}
         showNavigationHud
         flat

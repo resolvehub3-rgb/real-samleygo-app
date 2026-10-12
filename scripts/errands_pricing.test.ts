@@ -52,6 +52,7 @@ import {
   type ErrandsQuote,
 } from '../src/lib/errands/quote';
 import { ERRANDS_DISCOVERY_POLL_MS } from '../src/lib/errands/discovery';
+import { resolveNavigationPhase } from '../src/lib/navigation';
 
 // ---------------------------------------------------------------------------
 // Tiny test runner (no extra dependencies)
@@ -569,6 +570,71 @@ test('the map has a real, functional fullscreen toggle', () => {
   assert.ok(
     page.includes('onFullscreenChange={setMapFullscreen}'),
     'the page must be told when fullscreen starts so its sticky wrapper can clear the navbar'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Driver-side routing — the accepted trip's REAL endpoints must reach the map
+// ---------------------------------------------------------------------------
+
+test("the shared phase machine navigates an errand like any other trip", () => {
+  const pins = { hasPickup: true, hasDestination: true };
+  // Until the trip starts the route aims at the BOOKED PICKUP — the old
+  // "unknown status" default pointed at the drop-off instead.
+  for (const status of ['REQUESTED', 'DRIVER_ACCEPTED', 'DRIVER_ARRIVING', 'DRIVER_ARRIVED']) {
+    assert.equal(resolveNavigationPhase(status, pins), 'TO_RESTAURANT', status);
+    // No pickup coordinates → show nothing, never a confident wrong line.
+    assert.equal(
+      resolveNavigationPhase(status, { hasPickup: false, hasDestination: true }),
+      'IDLE',
+      status
+    );
+  }
+  // Trip started → courier → destination.
+  assert.equal(resolveNavigationPhase('IN_PROGRESS', pins), 'TO_CUSTOMER');
+  // Ended errands never navigate.
+  for (const status of ['EXPIRED', 'CANCELLED', 'COMPLETED', 'FAILED']) {
+    assert.equal(resolveNavigationPhase(status, pins), 'IDLE', `${status} must not navigate`);
+  }
+});
+
+test("the accepted errand's real endpoints are wired into the driver's map", () => {
+  // The panel hands the dashboard the server-revealed endpoints…
+  const panel = read('src', 'components', 'courier', 'ErrandsJobPanel.tsx');
+  assert.ok(panel.includes('onTripInfoChange'), 'the panel must report the live trip');
+  assert.ok(
+    panel.includes('jobDetails.id !== job.id') && panel.includes('jobDetails.details'),
+    'endpoints come from the post-acceptance details row only'
+  );
+  assert.ok(!/latitude:\s*\d+\.\d{3,}/.test(panel), 'the panel never invents a coordinate');
+
+  // …the dashboard feeds them to the SAME route engine the food flow uses…
+  const dashboard = read('src', 'pages', 'courier', 'CourierDashboard.tsx');
+  assert.ok(
+    dashboard.includes('onTripInfoChange={handleErrandTripChange}'),
+    'the dashboard subscribes to the trip'
+  );
+  assert.ok(
+    dashboard.includes('resolveNavigationPhase(activeTrip.status'),
+    'the navigation session follows the errand (it must not be killed as NO_ACTIVE_DELIVERY)'
+  );
+  assert.ok(dashboard.includes('orderId: activeTrip.id'), 'the session carries this trip');
+  for (const prop of [
+    'status={activeTrip?.status}',
+    'pickup={activeTrip?.pickup ?? null}',
+    'destination={activeTrip?.destination ?? null}',
+    "tripKind={activeTrip?.kind === 'errand' ? 'errand' : 'delivery'}",
+  ]) {
+    assert.ok(dashboard.includes(prop), `every navigation surface passes ${prop}`);
+  }
+
+  // …and the map can tell a food trip from an errand, so its copy stays honest.
+  const liveMap = read('src', 'components', 'courier', 'CourierLiveMap.tsx');
+  assert.ok(liveMap.includes("tripKind === 'errand'"), 'the map labels an errand honestly');
+  const screen = read('src', 'components', 'navigation', 'NavigationScreen.tsx');
+  assert.ok(
+    screen.includes('tripKind={tripKind}'),
+    'full-screen navigation forwards the trip kind'
   );
 });
 

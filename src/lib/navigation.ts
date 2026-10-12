@@ -173,19 +173,36 @@ export function compassLabel(bearing: number | null | undefined): string {
 /** How the courier's trip is progressing for the ACTIVE delivery. */
 export type NavigationPhase = 'IDLE' | 'TO_RESTAURANT' | 'TO_CUSTOMER' | 'ARRIVED';
 
-/** Statuses where the rider is still driving toward the kitchen. */
+/**
+ * Statuses where the rider is still driving toward the PICKUP — food's
+ * kitchen and an errand's pickup point are the same leg of the same machine.
+ *
+ * The Errands lifecycle lives here too (`REQUESTED` … `DRIVER_ARRIVED`): the
+ * driver's map must aim at the booked pickup until the trip actually starts,
+ * never at the drop-off. `DRIVER_ARRIVED` keeps the target on the pickup —
+ * the customer/rider has not been collected yet, so pointing at the
+ * destination would draw a confident line to a place the trip hasn't earned.
+ */
 export const TO_RESTAURANT_STATUSES: ReadonlySet<string> = new Set([
   'COURIER_ASSIGNED',
   'COURIER_ACCEPTED',
   'RESTAURANT_ACCEPTED',
   'PREPARING',
   'READY_FOR_PICKUP',
+  'REQUESTED',
+  'DRIVER_ACCEPTED',
+  'DRIVER_ARRIVING',
+  'DRIVER_ARRIVED',
 ]);
 
-/** Statuses where the rider has the food and is driving to the customer. */
+/**
+ * Statuses where the rider has the goods and is driving to the customer:
+ * food on board, or an errand/ride IN_PROGRESS.
+ */
 export const TO_CUSTOMER_STATUSES: ReadonlySet<string> = new Set([
   'PICKED_UP',
   'ON_THE_WAY',
+  'IN_PROGRESS',
 ]);
 
 /** Statuses where navigation for this order must not exist at all. */
@@ -196,6 +213,7 @@ export const ENDED_ORDER_STATUSES: ReadonlySet<string> = new Set([
   'REJECTED',
   'FAILED',
   'REFUNDED',
+  'EXPIRED',
 ]);
 
 export interface PhaseInput {

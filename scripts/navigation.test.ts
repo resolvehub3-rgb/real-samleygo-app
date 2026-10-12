@@ -237,6 +237,28 @@ test('the real order status drives the phase', () => {
   }
 });
 
+test('an errand/ride drives the SAME phase machine', () => {
+  const pins = { hasPickup: true, hasDestination: true };
+
+  // Until the trip starts, the route aims at the booked PICKUP — never at
+  // the drop-off (the old "unknown status" default would have pointed there).
+  for (const status of ['REQUESTED', 'DRIVER_ACCEPTED', 'DRIVER_ARRIVING', 'DRIVER_ARRIVED']) {
+    assert.equal(resolveNavigationPhase(status, pins), 'TO_RESTAURANT', status);
+  }
+  // Trip started → courier → destination, exactly like a picked-up food order.
+  assert.equal(resolveNavigationPhase('IN_PROGRESS', pins), 'TO_CUSTOMER');
+  // Ended errands never navigate.
+  for (const status of ['EXPIRED', 'CANCELLED', 'COMPLETED', 'FAILED']) {
+    assert.equal(resolveNavigationPhase(status, pins), 'IDLE', `${status} must not navigate`);
+  }
+  // Same no-wrong-pin rule as food: pickup leg without pickup coordinates
+  // shows nothing rather than a confident line to the drop-off.
+  assert.equal(
+    resolveNavigationPhase('DRIVER_ACCEPTED', { hasPickup: false, hasDestination: true }),
+    'IDLE'
+  );
+});
+
 test('a phase never falls back to the wrong pin', () => {
   const destinationOnly = { hasPickup: false, hasDestination: true };
   const pickupOnly = { hasPickup: true, hasDestination: false };
