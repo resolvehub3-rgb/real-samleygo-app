@@ -4,10 +4,10 @@
  *   pnpm test:errands   (tsx scripts/errands_pricing.test.ts)
  *
  * What is covered:
- *   1. The fare preview formula — strictly per-distance (route distance ×
- *      per-km rate × surge), tax as a percentage of the trip fare, driver
- *      earning as a percentage of the total, 2-decimal rounding, plus a
- *      source scan proving no fixed component survives anywhere.
+ *   1. The fare engine's client mirror — base + (km × price per kilometre) +
+ *      optional fees, clamped between a minimum and a maximum, then tax and
+ *      the earnings split, computed in whole pesewas, plus a source scan
+ *      proving the server owns the formula and the browser never posts money.
  *   2. Honesty rules — unconfigured pricing yields NO number (the caller must
  *      show the admin-required message, never an invented fare).
  *   3. Quote lifecycle — TTL usability window and the expiry countdown.
@@ -38,8 +38,8 @@ import { fileURLToPath } from 'node:url';
 import {
   calculateErrandsFare,
   ERRANDS_PRICING_UNCONFIGURED_MESSAGE,
+  type ErrandsFareRule,
 } from '../src/lib/errands/pricing';
-import type { ErrandsPricingSettings } from '../src/lib/errands/types';
 import {
   ACTIVE_ERRANDS_STATUSES,
   TERMINAL_ERRANDS_STATUSES,
@@ -89,25 +89,38 @@ const strip = (source: string): string =>
 
 const MIGRATION = read('supabase', 'migrations', '20261012_errands_module.sql');
 const MIGRATION_STRIPPED = strip(MIGRATION);
+// The fare engine migration: pricing rules, the quote RPC and the revalidation
+// that happens when a booking is created.
+const FARE_MIGRATION = read('supabase', 'migrations', '20261013_errands_fare_engine.sql');
+const FARE_MIGRATION_STRIPPED = strip(FARE_MIGRATION);
+// The Edge Function that routes pickup → destination before asking the
+// database for a price (the browser never sends a distance).
+const QUOTE_FUNCTION = read('supabase', 'functions', 'errand-quote', 'index.ts');
 
 // ---------------------------------------------------------------------------
-// Pricing fixture — GH₵2/km, 0% tax, driver earns 100%
+// Pricing fixture — a rule set with a rate and nothing else switched on
 // ---------------------------------------------------------------------------
 
-const EXAMPLE_PRICING: ErrandsPricingSettings = {
-  configured: true,
-  currency: 'GHS',
-  pricingVersion: 1,
-  perKmRate: 2,
-  taxRatePercent: 0,
+const EXAMPLE_RULE: ErrandsFareRule = {
+  baseFare: 0,
+  pricePerKm: 2,
+  minFare: 0,
+  maxFare: null,
+  bookingFee: 0,
+  waitingCharge: 0,
+  waitingChargeEnabled: false,
+  timeChargePerMinute: 0,
+  timeChargeEnabled: false,
+  surgeEnabled: false,
   surgeMultiplier: 1,
-  driverEarningPercentage: 100,
-  quoteTtlMinutes: 5,
-  requestTtlSeconds: 90,
+  taxRatePercent: 0,
+  discountAmount: 0,
+  driverEarningPercent: 100,
+  currency: 'GHS',
 };
 
-const settings = (overrides: Partial<ErrandsPricingSettings>): ErrandsPricingSettings => ({
-  ...EXAMPLE_PRICING,
+const rule = (overrides: Partial<ErrandsFareRule>): ErrandsFareRule => ({
+  ...EXAMPLE_RULE,
   ...overrides,
 });
 
@@ -116,9 +129,10 @@ const settings = (overrides: Partial<ErrandsPricingSettings>): ErrandsPricingSet
 // ---------------------------------------------------------------------------
 
 test('8 km at GH₵2/km totals GH₵16 — the fare IS the distance', () => {
-  const fare = calculateErrandsFare(8, EXAMPLE_PRICING);
+  const fare = calculateErrandsFare(8, null, EXAMPLE_RULE);
   assert.ok(fare, 'a configured rule set must produce a fare');
-  assert.equal(fare.tripFare, 16, 'trip fare = 8 × 2');
+  assert.equal(fare.distanceCharge, 16, 'distance charge = 8 × 2');
+  assert.equal(fare.tripFare, 16, 'trip fare = distance charge when nothing else is on');
   assert.equal(fare.taxAmount, 0);
   assert.equal(fare.total, 16, 'total = trip fare + tax (no fixed component)');
   assert.equal(fare.driverEarning, 16, 'a 100% share pays the driver the total');
@@ -126,40 +140,48 @@ test('8 km at GH₵2/km totals GH₵16 — the fare IS the distance', () => {
 });
 
 test('the price tracks the distance — twice the route, twice the fare', () => {
-  assert.equal(calculateErrandsFare(3, EXAMPLE_PRICING)?.tripFare, 6, '3 km');
-  assert.equal(calculateErrandsFare(6, EXAMPLE_PRICING)?.tripFare, 12, '6 km');
+  assert.equal(calculateErrandsFare(3, null, EXAMPLE_RULE)?.tripFare, 6, '3 km');
+  assert.equal(calculateErrandsFare(6, null, EXAMPLE_RULE)?.tripFare, 12, '6 km');
   assert.equal(
-    calculateErrandsFare(100, EXAMPLE_PRICING)?.tripFare,
+    calculateErrandsFare(100, null, EXAMPLE_RULE)?.tripFare,
     200,
     'no floor and no cap: the real route price stands'
   );
   assert.equal(
-    calculateErrandsFare(0.2, EXAMPLE_PRICING)?.tripFare,
+    calculateErrandsFare(0.2, null, EXAMPLE_RULE)?.tripFare,
     0.4,
     'a short trip costs little because it travels little'
   );
 });
 
-test('tax is a percentage of the trip fare and earning is % of the total', () => {
+test('tax is a percentage of the fare and earning is % of the total', () => {
   const fare = calculateErrandsFare(
     10,
-    settings({ taxRatePercent: 15, driverEarningPercentage: 80 })
+    null,
+    rule({ taxRatePercent: 15, driverEarningPercent: 80 })
   );
   assert.ok(fare);
   assert.equal(fare.tripFare, 20, '10 km × 2');
   assert.equal(fare.taxAmount, 3, '15% of the trip fare');
   assert.equal(fare.total, 23, 'trip fare + tax');
   assert.equal(fare.driverEarning, 18.4, '80% of the total, not of the trip fare');
+  assert.equal(fare.platformRevenue, 1.6, 'the platform keeps the rest of the total');
 });
 
-test('surge scales the distance price proportionally', () => {
-  const fare = calculateErrandsFare(10, settings({ surgeMultiplier: 1.5 }));
-  assert.equal(fare?.tripFare, 30, '(10 × 2) × 1.5');
+test('surge scales the distance price proportionally — but only when switched on', () => {
+  const on = calculateErrandsFare(10, null, rule({ surgeEnabled: true, surgeMultiplier: 1.5 }));
+  assert.equal(on?.tripFare, 30, '(10 × 2) × 1.5');
+  assert.equal(on?.surgeAmount, 10, 'the surge line is shown as its own charge');
+  // The same multiplier with the switch off must change nothing — a number
+  // typed into a disabled field is not a price.
+  const off = calculateErrandsFare(10, null, rule({ surgeEnabled: false, surgeMultiplier: 1.5 }));
+  assert.equal(off?.tripFare, 20, 'disabled surge never applies');
+  assert.equal(off?.surgeAmount, 0, 'and never appears on the breakdown');
 });
 
 test('rounding lands on whole pesewas (17.806 ⇒ 17.81)', () => {
-  assert.equal(calculateErrandsFare(8.903, EXAMPLE_PRICING)?.tripFare, 17.81);
-  assert.equal(calculateErrandsFare(8.902, EXAMPLE_PRICING)?.tripFare, 17.8);
+  assert.equal(calculateErrandsFare(8.903, null, EXAMPLE_RULE)?.tripFare, 17.81);
+  assert.equal(calculateErrandsFare(8.902, null, EXAMPLE_RULE)?.tripFare, 17.8);
 });
 
 // ---------------------------------------------------------------------------
@@ -168,11 +190,12 @@ test('rounding lands on whole pesewas (17.806 ⇒ 17.81)', () => {
 
 test('unconfigured pricing produces NO fare — the message must be shown instead', () => {
   assert.equal(
-    calculateErrandsFare(8, settings({ configured: false })),
+    calculateErrandsFare(8, null, rule({ pricePerKm: 0 })),
     null,
     'an unconfigured rule set must never yield a number'
   );
-  assert.equal(calculateErrandsFare(8, null), null);
+  assert.equal(calculateErrandsFare(8, null, null), null);
+  assert.equal(calculateErrandsFare(8, null, undefined), null);
   assert.equal(
     ERRANDS_PRICING_UNCONFIGURED_MESSAGE.includes('has not been configured'),
     true,
@@ -182,18 +205,29 @@ test('unconfigured pricing produces NO fare — the message must be shown instea
 
 test('a non-finite or negative distance is priced as 0 km, never as garbage', () => {
   // 0 km × rate = GH₵0 — a real empty route, not an invented base fare.
-  assert.equal(calculateErrandsFare(Number.NaN, EXAMPLE_PRICING)?.tripFare, 0);
-  assert.equal(calculateErrandsFare(-5, EXAMPLE_PRICING)?.tripFare, 0);
-  assert.equal(calculateErrandsFare(Number.NaN, EXAMPLE_PRICING)?.total, 0);
+  assert.equal(calculateErrandsFare(Number.NaN, null, EXAMPLE_RULE)?.tripFare, 0);
+  assert.equal(calculateErrandsFare(-5, null, EXAMPLE_RULE)?.tripFare, 0);
+  assert.equal(calculateErrandsFare(Number.NaN, null, EXAMPLE_RULE)?.total, 0);
 });
 
-test('a rule set without a per-km rate prices NOTHING — never a free trip', () => {
+test('a rule set with no money in it prices NOTHING — never a free trip', () => {
   assert.equal(
-    calculateErrandsFare(8, settings({ perKmRate: 0 })),
+    calculateErrandsFare(8, null, rule({ baseFare: 0, pricePerKm: 0, minFare: 0 })),
     null,
-    'zero rate ⇒ the admin-required message, not GH₵0'
+    'no base, no rate, no minimum ⇒ the admin-required message, not GH₵0'
   );
-  assert.equal(calculateErrandsFare(8, settings({ perKmRate: -2 })), null);
+  assert.equal(
+    calculateErrandsFare(8, null, rule({ baseFare: -2, pricePerKm: -1, minFare: -5 })),
+    null,
+    'negative rates are refused — a rule set whose money is all invalid prices nothing'
+  );
+  assert.equal(
+    calculateErrandsFare(8, null, rule({ baseFare: -2 }))?.tripFare,
+    16,
+    'a negative base is clamped to 0 — it never discounts the distance charge'
+  );
+  // A base fare on its own is a perfectly valid, fully configured rule set.
+  assert.equal(calculateErrandsFare(8, null, rule({ pricePerKm: 0, baseFare: 5 }))?.total, 5);
 });
 
 // ---------------------------------------------------------------------------
@@ -208,15 +242,30 @@ const quote = (expiresAtMs: number, issuedAtMs = expiresAtMs - 5 * 60_000): Erra
   straightLineKm: 7.4,
   distanceKm: 8.1,
   distanceSource: 'ROAD_ROUTE',
+  routeProvider: 'OSRM',
+  routeDistanceMetres: 8_100,
   estimatedDurationSeconds: 1_200,
   perKmRate: 2,
   surgeMultiplier: 1,
+  baseFare: 0,
+  distanceCharge: 16.2,
+  timeCharge: 0,
+  waitingCharge: 0,
+  bookingFee: 0,
+  surgeAmount: 0,
+  discountAmount: 0,
   tripFare: 16.2,
   taxAmount: 0,
+  minFare: 0,
+  maxFare: null,
   estimatedFare: 16.2,
   driverEarning: 16.2,
+  surgeRuleActive: false,
+  variableChargeNote: null,
+  routeNote: null,
   currency: 'GHS',
   pricingVersion: 1,
+  status: 'ACTIVE',
   issuedAt: new Date(issuedAtMs).toISOString(),
   expiresAt: new Date(expiresAtMs).toISOString(),
 });
@@ -357,7 +406,7 @@ test('the transition map mirrors the migration CASE (source scan)', () => {
 });
 
 test('the service categories and status CHECK match the migration', () => {
-  assert.deepEqual([...ERRANDS_SERVICES].sort(), ['ERRAND_MOTORCYCLE', 'RIDE_CAR']);
+  assert.deepEqual([...ERRANDS_SERVICES].sort(), ['CAR_ERRAND', 'ERRAND_MOTORCYCLE', 'RIDE_CAR']);
   assert.ok(
     MIGRATION_STRIPPED.includes(
       `check (status in ('REQUESTED', 'DRIVER_ACCEPTED', 'DRIVER_ARRIVING', 'DRIVER_ARRIVED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'EXPIRED', 'FAILED'))`
@@ -365,10 +414,16 @@ test('the service categories and status CHECK match the migration', () => {
     'the status CHECK must list exactly the nine lifecycle states'
   );
   assert.ok(
-    MIGRATION_STRIPPED.includes(
-      `check (service_category in ('ERRAND_MOTORCYCLE', 'RIDE_CAR'))`
+    FARE_MIGRATION_STRIPPED.includes(
+      `check (service_category in ('ERRAND_MOTORCYCLE', 'CAR_ERRAND', 'RIDE_CAR'))`
     ),
-    'the service CHECK must list exactly the two categories'
+    'the service CHECK must list exactly the three categories'
+  );
+  // Car errands are new and OFF by default, so live behaviour is unchanged
+  // until an operator turns them on.
+  assert.ok(
+    /get_errands_config[\s\S]{0,900}?CAR_ERRAND[\s\S]{0,120}false/.test(FARE_MIGRATION_STRIPPED),
+    'car errands must default to OFF in the operator configuration'
   );
 });
 
@@ -376,69 +431,129 @@ test('the service categories and status CHECK match the migration', () => {
 // 5. Source scans — the invariants that keep the module honest
 // ---------------------------------------------------------------------------
 
-test('the fare is strictly per-distance — no fixed component survives anywhere', () => {
-  const pricingMigration = strip(
-    read('supabase', 'migrations', '20261012_errands_per_distance_pricing.sql')
-  );
+test('the fare is priced server-side from a versioned rule set — never in the browser', () => {
   const admin = read('src', 'pages', 'admin', 'AdminDashboard.tsx');
   const page = read('src', 'pages', 'customer', 'ErrandsPage.tsx');
-  const pricing = read('src', 'lib', 'errands', 'pricing.ts');
-  const config = read('src', 'lib', 'errands', 'config.ts');
   const quoteLib = read('src', 'lib', 'errands', 'quote.ts');
+  const bookingLib = read('src', 'lib', 'errands', 'booking.ts');
 
-  // The database prices the measured route distance only.
+  // 1. The database owns the formula, in integer pesewas, and refuses to
+  //    price a category that has no money configured at all.
   assert.ok(
-    pricingMigration.includes('round(v_dist * v_rate * v_surge, 2)'),
-    'trip fare = distance × per-km rate × surge'
+    FARE_MIGRATION_STRIPPED.includes('v_distance_pw := round(v_distance_km * v_rate_pw)'),
+    'distance charge = km × price per kilometre'
   );
   assert.ok(
-    pricingMigration.includes('if v_rate <= 0 then'),
-    'a missing per-km rate must refuse to price, never price for free'
-  );
-  // The fixed components are dropped from the quote snapshot and the setter.
-  assert.ok(
-    pricingMigration.includes('drop column if exists base_fare') &&
-      pricingMigration.includes('drop column if exists booking_fee'),
-    'the quote snapshot no longer stores fixed-fee columns'
-  );
-  assert.ok(
-    /drop function if exists public\.set_errands_pricing\(\s*numeric,\s*numeric,\s*numeric,\s*numeric,\s*numeric,\s*numeric,\s*numeric,\s*numeric,\s*jsonb\)/.test(
-      pricingMigration
+    FARE_MIGRATION_STRIPPED.includes(
+      'if v_base_pw <= 0 and v_rate_pw <= 0 and v_min_pw <= 0 then'
     ),
-    'the old 9-argument setter is dropped — only the per-km signature remains'
+    'a rule set with no rates must refuse to price, never price for free'
+  );
+  assert.ok(
+    FARE_MIGRATION_STRIPPED.includes(
+      "'Errands pricing has not been configured yet. A super admin must save the fare rules in Settings -> Errands before customers can be shown a price.'"
+    ),
+    'the exact unconfigured message the client also shows'
+  );
+  assert.ok(
+    FARE_MIGRATION_STRIPPED.includes('create table if not exists public.errands_pricing_rules'),
+    'pricing lives in its own versioned table'
+  );
+  assert.ok(
+    FARE_MIGRATION_STRIPPED.includes(
+      'create unique index if not exists errands_pricing_rules_active_uniq'
+    ),
+    'exactly one active rule set per service category'
+  );
+  assert.ok(
+    FARE_MIGRATION_STRIPPED.includes("'ERRANDS_PRICING_RULES_UPDATED'"),
+    'every pricing change is written to the audit log'
   );
 
-  // Client: no fixed component in the preview helper, reader or quote type.
-  for (const [name, source] of [
-    ['pricing.ts', pricing],
-    ['config.ts', config],
-    ['quote.ts', quoteLib],
-  ] as const) {
-    assert.equal(
-      /baseFare|bookingFee|minFare|maxFare|base_fare|booking_fee|min_fare|max_fare/.test(source),
-      false,
-      `${name} must not carry a fixed-fee field`
-    );
-  }
+  // 2. The browser cannot reach the quote RPC — it goes through the Edge
+  //    Function, which supplies the distance IT measured.
+  assert.ok(
+    FARE_MIGRATION_STRIPPED.includes(
+      'revoke all on function public.create_errands_quote(uuid, double precision, double precision, text, double precision, double precision, text, text, numeric, integer, text) from public, anon, authenticated'
+    ),
+    'the quote RPC must be revoked from anon and authenticated'
+  );
+  assert.ok(
+    /drop function if exists public\.create_errands_quote\(\s*double precision,\s*double precision,\s*text,\s*double precision,\s*double precision,\s*text,\s*text,\s*numeric,\s*integer/.test(
+      FARE_MIGRATION
+    ),
+    'the old 9-argument client-callable signature is dropped'
+  );
+  assert.ok(
+    FARE_MIGRATION_STRIPPED.includes(
+      "'We could not find a road route between those addresses. Please try again in a moment.'"
+    ),
+    'no road route means no price — never a straight-line fallback'
+  );
+  assert.ok(
+    QUOTE_FUNCTION.includes('GOOGLE_MAPS_SERVER_API_KEY') &&
+      QUOTE_FUNCTION.includes('SUPABASE_SERVICE_ROLE_KEY'),
+    'routing and the service role key live only on the server'
+  );
+  assert.ok(
+    QUOTE_FUNCTION.includes("admin.rpc('create_errands_quote'"),
+    'the function calls the quote RPC with the service role'
+  );
+  assert.ok(
+    QUOTE_FUNCTION.includes('auth.auth.getUser()'),
+    'the caller must be an authenticated customer'
+  );
+
+  // 3. The client asks for a quote — it never posts a distance or a fare.
+  assert.ok(
+    quoteLib.includes("supabase.functions.invoke('errand-quote'"),
+    'quotes are requested from the errand-quote function'
+  );
+  assert.equal(
+    /p_road_distance|p_route_distance|distance_km\s*:/.test(quoteLib),
+    false,
+    'the browser must never submit a distance'
+  );
+  assert.equal(
+    /from\(['"]errands_quotes['"]\)/.test(quoteLib),
+    false,
+    'quotes are created by the server, never written by the client'
+  );
   assert.ok(
     quoteLib.includes('perKmRate: asNumber(row.per_km_rate)'),
     'the quote carries the per-km rate it was priced with'
   );
 
-  // The admin form offers only distance-shaped rules.
+  // 4. Booking posts IDs only, and the server re-prices before money moves.
   assert.equal(
-    /errands_base_fare|errands_booking_fee|errands_min_fare|errands_max_fare/.test(admin),
+    /p_estimated_fare|p_final_fare|p_driver_earning|p_route_distance/i.test(bookingLib),
     false,
-    'the fare form has no fixed-fee input anymore'
+    'no money parameter may ever be posted from the client'
+  );
+  assert.ok(
+    FARE_MIGRATION_STRIPPED.includes(
+      "'The fare changed while you were reviewing it. Refresh the price to see the new amount before confirming.'"
+    ),
+    'a price that moved under the customer is reported, never silently replaced'
   );
 
-  // The customer sees the multiplication, never a flat line.
+  // 5. The admin form exposes every configurable component, and the customer
+  //    card only ever lists the ones that applied to their trip.
+  assert.ok(
+    /errands_base_fare|errands_booking_fee|errands_min_fare|errands_max_fare/.test(admin),
+    'the fare form offers base, booking fee, floor and ceiling'
+  );
   assert.ok(page.includes('quote.perKmRate'), 'the breakdown shows the per-km rate');
   assert.ok(
     page.includes('quote.distanceKm.toFixed(2)'),
     'the breakdown starts from the measured route distance'
   );
-  assert.equal(page.includes('Booking fee'), false, 'no booking-fee line remains on the quote');
+  assert.ok(page.includes('quote.baseFare'), 'the breakdown shows the base fare');
+  assert.ok(page.includes('Booking fee'), 'the booking fee line exists (shown only when charged)');
+  assert.ok(
+    page.includes('fareRows'),
+    'optional charges are filtered so a zero fee is never displayed as one'
+  );
 });
 
 test('the booking RPC receives IDs only — the browser never posts money', () => {
@@ -542,7 +657,6 @@ test('no INSERT/UPDATE/DELETE policy exists on any Errands money table', () => {
     'errands_set_booking_status',
     'errands_expire_stale_bookings',
     'set_errands_availability',
-    'set_errands_pricing',
     'set_errands_config',
     'set_driver_service_capabilities',
     'errands_nearby_drivers',
@@ -555,6 +669,33 @@ test('no INSERT/UPDATE/DELETE policy exists on any Errands money table', () => {
       `${fn} must be SECURITY DEFINER`
     );
   }
+
+  // The fare engine migration adds the pricing setter and re-creates the
+  // config/capability setters — each one is the ONLY write path to its table.
+  for (const fn of [
+    'set_errands_pricing_rules',
+    'get_errands_pricing_rules',
+    'get_active_errands_pricing_rule',
+    'errands_fare_amounts',
+    'create_errands_quote',
+    'create_errands_booking',
+  ]) {
+    assert.ok(
+      new RegExp(`function public\\.${fn}\\([\\s\\S]{0,900}?security definer`).test(
+        FARE_MIGRATION_STRIPPED
+      ),
+      `${fn} must be SECURITY DEFINER in the fare engine migration`
+    );
+  }
+
+  // …and none of them may be reachable by a regular client session: the
+  // pricing setter in particular writes money rules.
+  assert.ok(
+    FARE_MIGRATION_STRIPPED.includes(
+      'revoke all on function public.set_errands_pricing_rules'
+    ),
+    'the pricing setter must be revoked from public/anon/authenticated'
+  );
 });
 
 test('discovery and booking share ONE eligibility function', () => {
@@ -773,8 +914,18 @@ test('the driver panel is wired into the existing dashboard (no second app)', ()
 test('the admin tab saves pricing through the RPC, never a table write', () => {
   const admin = read('src', 'pages', 'admin', 'AdminDashboard.tsx');
   assert.ok(
-    /rpc\('set_errands_pricing'/.test(admin),
-    'the fare rules must be saved through set_errands_pricing'
+    /saveErrandsPricingRule\(/.test(admin) &&
+      /rpc\('set_errands_pricing_rules'/.test(
+        read('src', 'lib', 'errands', 'config.ts')
+      ),
+    'the fare rules must be saved through set_errands_pricing_rules'
+  );
+  assert.equal(
+    /rpc\('errands_pricing_rules'\)|\.from\('errands_pricing_rules'\)\s*\n?\s*\.(insert|update|delete)/.test(
+      admin
+    ),
+    false,
+    'the admin must never write the pricing table directly'
   );
   assert.ok(
     /rpc\('set_errands_config'/.test(admin),

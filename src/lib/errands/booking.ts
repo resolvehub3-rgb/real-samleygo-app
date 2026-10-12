@@ -120,7 +120,12 @@ export function parseBooking(row: BookingRow | null | undefined): ErrandsBooking
     bookingNumber: String(row.booking_number ?? ''),
     customerId: String(row.customer_id ?? ''),
     driverId: String(row.driver_id ?? ''),
-    serviceCategory: row.service_category === 'RIDE_CAR' ? 'RIDE_CAR' : 'ERRAND_MOTORCYCLE',
+    serviceCategory:
+      row.service_category === 'CAR_ERRAND'
+        ? 'CAR_ERRAND'
+        : row.service_category === 'RIDE_CAR'
+          ? 'RIDE_CAR'
+          : 'ERRAND_MOTORCYCLE',
     status: parseStatus(row.status),
     pickupArea: asString(row.pickup_area),
     destinationArea: asString(row.destination_area),

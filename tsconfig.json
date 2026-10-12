@@ -23,5 +23,8 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  // Supabase Edge Functions run on Deno (`Deno.*` globals, `npm:` specifiers)
+  // and are checked/deployed by the Supabase CLI — not by this project's tsc.
+  "exclude": ["node_modules", "dist", "supabase/functions"]
 }

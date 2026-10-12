@@ -1,77 +1,162 @@
 /**
- * Errands fare preview — the customer's COPY of the server formula in
- * `errands_pricing_amounts()` (see
- * `supabase/migrations/20261012_errands_per_distance_pricing.sql`).
+ * Errands fare preview — the admin screen's COPY of the server formula in
+ * `errands_fare_amounts()` (see
+ * `supabase/migrations/20261013_errands_fare_engine.sql`).
  *
- * The database is the authority: it recomputes the fare when a quote is
- * issued AND again when the booking is created, so this function only exists
- * to render a settings preview in the admin screen. It is never used to show
- * a customer a price — customers only ever see what `create_errands_quote()`
- * answered — and a test asserts it stays in sync with the SQL.
+ * The database is the authority: it prices the route when a quote is issued
+ * AND re-prices it when the booking is created, so this function only exists
+ * to render a settings preview. It is never used to show a customer a price —
+ * customers only ever see what `create_errands_quote()` answered — and a test
+ * asserts it stays in sync with the SQL.
  *
- * Fare structure — strictly per-distance, no fixed component anywhere:
- *   trip_fare   = round(km x per_km_rate x surge, 2)
- *   tax         = round(trip_fare x tax%, 2)
- *   total       = trip_fare + tax
- *   driver pay  = round(total x earning% / 100, 2)
- * A rule set without a positive per-km rate prices NOTHING: `null` is
- * returned so the caller shows the "not configured" message instead.
+ * Fare structure (deterministic, computed in INTEGER pesewas):
+ *   distance charge = km x price_per_km
+ *   trip            = base + distance + (time) + (waiting)
+ *   after surge     = trip x multiplier            [only when enabled]
+ *   raw             = after surge + booking fee    [only if configured]
+ *   estimated fare  = clamp(raw, min, max) - discount + tax
+ *   driver pay      = fare x driver_earning_percent / 100
+ *   platform share  = fare - driver pay - tax      (tax is a pass-through)
+ *
+ * A rule with no money in it (no base, no per-km rate, no minimum) prices
+ * NOTHING: `null` is returned so the caller shows the "not configured"
+ * message instead of GH₵0.00.
  */
-
-import type { ErrandsPricingSettings } from './types';
-
-const round2 = (value: number): number => Math.round(value * 100) / 100;
 
 const num = (value: number | null | undefined, fallback: number): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 
+/**
+ * Convert a GH₵ amount to integer pesewas. The `toFixed` round-trip repairs
+ * the binary-float artefact (`2.675 * 100 === 267.49999999999997`) so the
+ * result matches Postgres' exact-decimal `round()` on the same literal.
+ */
+const toPesewas = (ghs: number): number => Math.round(Number((ghs * 100).toFixed(4)));
+
+/** Round a pesewa figure to a whole pesewa, half away from zero. */
+const roundPw = (value: number): number => Math.round(Number(value.toFixed(4)));
+
+/** The editable rule fields the admin form and the SQL setter share. */
+export interface ErrandsFareRule {
+  baseFare: number;
+  pricePerKm: number;
+  minFare: number;
+  maxFare: number | null;
+  bookingFee: number;
+  waitingCharge: number;
+  waitingChargeEnabled: boolean;
+  timeChargePerMinute: number;
+  timeChargeEnabled: boolean;
+  surgeEnabled: boolean;
+  surgeMultiplier: number;
+  taxRatePercent: number;
+  discountAmount: number;
+  driverEarningPercent: number;
+  currency?: string;
+}
+
 export interface ErrandsFareBreakdown {
+  /** Fixed part of the fare, before anything else. */
+  baseFare: number;
+  /** km x price_per_km. */
+  distanceCharge: number;
+  /** Optional, only when the time charge is switched on. */
+  timeCharge: number;
+  /** Optional, only when the waiting charge is switched on. */
+  waitingCharge: number;
+  /** Flat service charge — never multiplied by surge. */
+  bookingFee: number;
+  /** Signed: positive when surge > 1, negative when it is a discount. */
+  surgeAmount: number;
+  /** Trip components + booking fee, after the capped discount, before tax. */
   tripFare: number;
+  discountAmount: number;
   taxAmount: number;
-  /** What the customer pays (trip fare + tax). */
+  /** What the customer pays (the number shown on the quote card). */
   total: number;
   /** What the driver earns from that total. */
   driverEarning: number;
+  /** Platform share after tax is handed over. */
+  platformRevenue: number;
   currency: string;
 }
 
 /**
- * Price a route with the given rules. Returns `null` when the rules are not
- * configured (or carry no positive per-km rate) — the caller must then show
- * the admin-required message and NEVER invent a price.
+ * Price a route with one category's rules. Returns `null` when the rules are
+ * missing or carry no money at all — the caller must then show the
+ * admin-required message and NEVER invent a price.
+ *
+ * `durationSeconds` only matters when the rule enables a time charge;
+ * pass `null` when the route has no duration and the charge stays at 0.
  */
 export function calculateErrandsFare(
   distanceKm: number,
-  settings: ErrandsPricingSettings | null | undefined
+  durationSeconds: number | null | undefined,
+  rule: ErrandsFareRule | null | undefined
 ): ErrandsFareBreakdown | null {
-  if (!settings || !settings.configured) return null;
+  if (!rule) return null;
 
-  const rate = num(settings.perKmRate, 0);
-  // No per-km rate means nothing to charge for distance: refuse, like the
-  // database does, rather than quoting a free trip.
-  if (rate <= 0) return null;
+  const basePw = toPesewas(Math.max(0, num(rule.baseFare, 0)));
+  const ratePw = Math.max(0, num(rule.pricePerKm, 0)) * 100;
+  const minPw = toPesewas(Math.max(0, num(rule.minFare, 0)));
+  const rawMax = num(rule.maxFare, 0);
+  const maxPw = rawMax > 0 ? toPesewas(rawMax) : null;
+  const bookingPw = toPesewas(Math.max(0, num(rule.bookingFee, 0)));
+  const discountPw = toPesewas(Math.max(0, num(rule.discountAmount, 0)));
+
+  // No base, no per-km rate and no minimum means nothing to charge: refuse,
+  // like the database does, rather than quoting a free trip.
+  if (basePw <= 0 && ratePw <= 0 && minPw <= 0) return null;
+
+  const waitingPw = rule.waitingChargeEnabled
+    ? toPesewas(Math.max(0, num(rule.waitingCharge, 0)))
+    : 0;
+
+  const minutes = Math.max(0, num(durationSeconds, 0)) / 60;
+  const timePw = rule.timeChargeEnabled
+    ? roundPw(minutes * Math.max(0, num(rule.timeChargePerMinute, 0)) * 100)
+    : 0;
 
   const safeDistance = Number.isFinite(distanceKm) && distanceKm > 0 ? distanceKm : 0;
-  const surgeRaw = num(settings.surgeMultiplier, 1);
+  const distancePw = roundPw(safeDistance * ratePw);
+
+  const tripPw = basePw + distancePw + timePw + waitingPw;
+
+  const surgeRaw = num(rule.surgeMultiplier, 1);
   const surge = surgeRaw > 0 ? surgeRaw : 1;
+  const surgedPw = rule.surgeEnabled && surge !== 1 ? roundPw(tripPw * surge) : tripPw;
+  const surgeAmountPw = surgedPw - tripPw;
 
-  const tripFare = round2(safeDistance * rate * surge);
+  const rawPw = surgedPw + bookingPw;
 
-  const taxRaw = num(settings.taxRatePercent, 0);
-  const taxPercent = Math.min(100, Math.max(0, taxRaw));
-  const taxAmount = round2((tripFare * taxPercent) / 100);
-  const total = round2(Math.max(0, tripFare + taxAmount));
+  // Floor then ceiling, in that order.
+  let clampedPw = rawPw;
+  if (minPw > 0 && clampedPw < minPw) clampedPw = minPw;
+  if (maxPw !== null && clampedPw > maxPw) clampedPw = maxPw;
 
-  const earningRaw = num(settings.driverEarningPercentage, 100);
-  const earningPercent = Math.min(100, Math.max(0, earningRaw));
-  const driverEarning = round2((total * earningPercent) / 100);
+  const afterDiscountPw = Math.max(0, clampedPw - Math.min(discountPw, clampedPw));
+  const taxPct = Math.min(100, Math.max(0, num(rule.taxRatePercent, 0)));
+  const taxPw = roundPw((afterDiscountPw * taxPct) / 100);
+  const totalPw = afterDiscountPw + taxPw;
+
+  const earnPct = Math.min(100, Math.max(0, num(rule.driverEarningPercent, 100)));
+  const driverPw = roundPw((totalPw * earnPct) / 100);
+  const platformPw = Math.max(0, totalPw - driverPw - taxPw);
 
   return {
-    tripFare,
-    taxAmount,
-    total,
-    driverEarning,
-    currency: settings.currency || 'GHS',
+    baseFare: basePw / 100,
+    distanceCharge: distancePw / 100,
+    timeCharge: timePw / 100,
+    waitingCharge: waitingPw / 100,
+    bookingFee: bookingPw / 100,
+    surgeAmount: surgeAmountPw / 100,
+    tripFare: (surgedPw + bookingPw - Math.min(discountPw, clampedPw)) / 100,
+    discountAmount: Math.min(discountPw, clampedPw) / 100,
+    taxAmount: taxPw / 100,
+    total: totalPw / 100,
+    driverEarning: driverPw / 100,
+    platformRevenue: platformPw / 100,
+    currency: rule.currency || 'GHS',
   };
 }
 

@@ -90,6 +90,26 @@ const PIN_VISIBLE_STATUSES = [
 const samePoint = (a: LatLng | null, b: LatLng | null): boolean =>
   (!a && !b) || (!!a && !!b && a.lat === b.lat && a.lng === b.lng);
 
+/** Two quote requests describe the same trip when their endpoints match. */
+const sameQuoteInput = (a: ErrandsQuoteInput, b: ErrandsQuoteInput): boolean =>
+  a.serviceCategory === b.serviceCategory &&
+  a.pickup.address === b.pickup.address &&
+  a.destination.address === b.destination.address &&
+  samePoint(a.pickup.point, b.pickup.point) &&
+  samePoint(a.destination.point, b.destination.point);
+
+/**
+ * What makes a quote request "the same trip" for the purpose of deciding
+ * whether a fresh price is needed. The address text is deliberately left
+ * out: editing it clears the coordinates, which changes this key anyway.
+ */
+const quoteKey = (input: ErrandsQuoteInput): string =>
+  `${input.serviceCategory}|${input.pickup.point.lat.toFixed(6)},${input.pickup.point.lng.toFixed(6)}` +
+  `|${input.destination.point.lat.toFixed(6)},${input.destination.point.lng.toFixed(6)}`;
+
+/** How long the form settles before a price is requested (one routing burst). */
+const AUTO_QUOTE_DEBOUNCE_MS = 700;
+
 const asPoint = (lat: number | null | undefined, lng: number | null | undefined): LatLng | null =>
   lat != null && lng != null && isValidDeliveryPoint(lat, lng) ? { lat, lng } : null;
 
@@ -194,6 +214,19 @@ export const ErrandsPage: React.FC = () => {
 
   const driverPositionAtRef = useRef(0);
 
+  // ── Automatic pricing ─────────────────────────────────────────────────────
+  /**
+   * One ticket per pricing pass: a slow reply for an earlier destination must
+   * never overwrite the quote for the customer's latest selection.
+   */
+  const quoteSeqRef = useRef(0);
+  /** The trip we already priced (or deliberately gave up on) — stops loops. */
+  const pricedKeyRef = useRef<string | null>(null);
+  /** Estimates for the non-selected services, tagged with their request. */
+  const [estimates, setEstimates] = useState<
+    Partial<Record<ErrandsServiceCategory, { input: ErrandsQuoteInput; quote: ErrandsQuote }>>
+  >({});
+
   // ── Config ────────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -262,6 +295,10 @@ export const ErrandsPage: React.FC = () => {
     setPriceNotice(null);
     setDrivers([]);
     setDriversError(null);
+    // Forget the trip entirely: re-picking the same addresses must price
+    // again rather than find a "priced" marker left behind.
+    pricedKeyRef.current = null;
+    setEstimates({});
     setSelectedDriverId(null);
     setBookingError(null);
   }, []);
@@ -294,11 +331,211 @@ export const ErrandsPage: React.FC = () => {
   );
   const quoteExpired = quote ? !isQuoteUsable(quote, quoteNow) : true;
 
+  /**
+   * The lines the customer is actually charged for. Optional components
+   * (booking fee, time, waiting, peak pricing, discount) only appear when
+   * they are enabled AND non-zero — nothing is ever shown as a fee that
+   * did not apply to this trip.
+   */
+  const fareRows: { label: string; amount: number }[] = [];
+  if (quote) {
+    if (quote.baseFare > 0) fareRows.push({ label: 'Base fare', amount: quote.baseFare });
+    if (quote.distanceCharge > 0) {
+      fareRows.push({
+        label: `Distance · ${quote.distanceKm.toFixed(2)} km × ${formatGHS(quote.perKmRate)}`,
+        amount: quote.distanceCharge,
+      });
+    }
+    if (quote.timeCharge > 0) fareRows.push({ label: 'Time charge', amount: quote.timeCharge });
+    if (quote.waitingCharge > 0)
+      fareRows.push({ label: 'Waiting charge', amount: quote.waitingCharge });
+    if (quote.bookingFee > 0) fareRows.push({ label: 'Booking fee', amount: quote.bookingFee });
+    if (quote.surgeAmount !== 0) {
+      fareRows.push({
+        label: `Peak pricing ×${quote.surgeMultiplier}`,
+        amount: quote.surgeAmount,
+      });
+    }
+    if (quote.discountAmount > 0)
+      fareRows.push({ label: 'Discount', amount: -quote.discountAmount });
+    if (quote.taxAmount > 0) fareRows.push({ label: 'Tax', amount: quote.taxAmount });
+  }
+
+  /**
+   * Price every enabled service for one trip in a single pass.
+   *
+   * The selected category lands in `quote` (the number the customer can act
+   * on); the rest become estimates so the service options can show real
+   * prices side by side. Nothing is written to the screen by a reply that a
+   * newer request has already superseded, and a failure never retries itself
+   * — the customer decides that with "Update fare".
+   */
+  const priceServices = useCallback(
+    async (
+      selected: ErrandsQuoteInput,
+      categories: ErrandsServiceCategory[]
+    ) => {
+      if (categories.length === 0) return;
+
+      const seq = ++quoteSeqRef.current;
+      setQuoteLoading(true);
+      setQuoteError(null);
+
+      const results = await Promise.all(
+        categories.map(async (category) => {
+          const input: ErrandsQuoteInput = { ...selected, serviceCategory: category };
+          return { category, input, result: await requestErrandsQuote(input) };
+        })
+      );
+
+      if (seq !== quoteSeqRef.current) return; // superseded — drop it
+      setQuoteLoading(false);
+
+      const previousInput = quoteInput;
+      const inputChanged = !previousInput || !sameQuoteInput(previousInput, selected);
+
+      // Estimates for the services the customer is NOT looking at.
+      setEstimates((current) => {
+        const next = { ...current };
+        for (const entry of results) {
+          if (entry.category === selected.serviceCategory) continue;
+          if (entry.result.ok) {
+            next[entry.category] = { input: entry.input, quote: entry.result.quote };
+          } else {
+            delete next[entry.category];
+          }
+        }
+        return next;
+      });
+
+      const chosen = results.find((entry) => entry.category === selected.serviceCategory);
+      if (!chosen) return;
+
+      if (!chosen.result.ok) {
+        setQuoteError(chosen.result.error);
+        return;
+      }
+
+      const nextQuote = chosen.result.quote;
+
+      if (!inputChanged && quote && nextQuote.quoteId !== quote.quoteId) {
+        setPriceNotice(
+          `Your price was updated to ${formatGHS(nextQuote.estimatedFare)} — the previous estimate had expired.`
+        );
+      } else if (inputChanged) {
+        setPriceNotice(null);
+      }
+
+      setQuote(nextQuote);
+      setQuoteInput(selected);
+      if (inputChanged) {
+        setSelectedDriverId(null);
+        setDrivers([]);
+        setDriversError(null);
+      }
+      setBookingError(null);
+    },
+    [quote, quoteInput]
+  );
+
+  /** The trip currently described by the form, or `null` when incomplete. */
+  const formTrip = useMemo(() => {
+    if (!service || !pickupPoint || !destPoint) return null;
+    if (!isValidDeliveryPoint(pickupPoint.lat, pickupPoint.lng)) return null;
+    if (!isValidDeliveryPoint(destPoint.lat, destPoint.lng)) return null;
+    return {
+      pickup: { point: pickupPoint, address: pickupText.trim() },
+      destination: { point: destPoint, address: destText.trim() },
+    };
+  }, [service, pickupPoint, destPoint, pickupText, destText]);
+
+  /**
+   * Switching service tab must not cost a routing call: every enabled
+   * category was priced in the same pass, so adopt the cached number.
+   * Runs before the pricing effect below and marks the trip as priced.
+   */
+  useEffect(() => {
+    if (!service || !formTrip) return;
+    const desired: ErrandsQuoteInput = { ...formTrip, serviceCategory: service };
+    if (quoteInput && quote && sameQuoteInput(quoteInput, desired)) {
+      pricedKeyRef.current = quoteKey(desired);
+      return;
+    }
+    const cached = estimates[service];
+    if (cached && sameQuoteInput(cached.input, desired)) {
+      pricedKeyRef.current = quoteKey(desired);
+      setQuote(cached.quote);
+      setQuoteInput(cached.input);
+      setPriceNotice(null);
+      setSelectedDriverId(null);
+      setDrivers([]);
+      setDriversError(null);
+      setQuoteError(null);
+      return;
+    }
+    // No price known for THIS service on this trip: never show another
+    // service's fare — clear it and let the pricing effect fetch this one.
+    if (quoteInput && quoteInput.serviceCategory !== service) {
+      setQuote(null);
+      setQuoteInput(null);
+      setQuoteError(null);
+      setPriceNotice(null);
+      setSelectedDriverId(null);
+      setDrivers([]);
+      setDriversError(null);
+    }
+  }, [service, formTrip, quote, quoteInput, estimates]);
+
+  /** The price shown for one service tab (or `null` when not priced). */
+  const estimateFor = (option: ErrandsServiceCategory): ErrandsQuote | null => {
+    if (!formTrip) return null;
+    const wanted: ErrandsQuoteInput = { ...formTrip, serviceCategory: option };
+    if (option === service) {
+      return quote && quoteInput && sameQuoteInput(quoteInput, wanted) ? quote : null;
+    }
+    const cached = estimates[option];
+    return cached && sameQuoteInput(cached.input, wanted) ? cached.quote : null;
+  };
+
+  /**
+   * The fare appears as soon as BOTH endpoints are real coordinates: the
+   * customer never has to press a button to find out what a trip costs.
+   *
+   * The pass is debounced so a burst of GPS/typing settles into one routing
+   * burst, and `pricedKeyRef` makes sure the same trip is not priced twice.
+   */
+  useEffect(() => {
+    if (!formTrip || moduleDisabled || activeBooking || !config) return;
+    if (!isServiceEnabled(config, service as ErrandsServiceCategory)) return;
+
+    const selectedInput: ErrandsQuoteInput = { ...formTrip, serviceCategory: service! };
+    const key = quoteKey(selectedInput);
+    if (pricedKeyRef.current === key) return; // already priced this trip
+
+    const timer = window.setTimeout(() => {
+      if (pricedKeyRef.current === key) return;
+      pricedKeyRef.current = key;
+      void priceServices(selectedInput, enabledServices);
+    }, AUTO_QUOTE_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    formTrip,
+    moduleDisabled,
+    activeBooking,
+    config,
+    service,
+    enabledServices,
+    priceServices,
+  ]);
+
+  /**
+   * Manual price (also the path for a typed address that has not been picked
+   * from the drop-down yet): resolve both addresses, then price them.
+   */
   const handleGetFare = useCallback(async () => {
     if (!service) return;
-    setQuoteLoading(true);
-    setQuoteError(null);
-    setPriceNotice(null);
 
     const [pickup, destination] = await Promise.all([
       resolveEndpoint(pickupText, pickupPoint),
@@ -306,53 +543,22 @@ export const ErrandsPage: React.FC = () => {
     ]);
 
     if (!pickup || !destination) {
-      setQuoteLoading(false);
       setQuoteError('We could not find that address — pick a suggestion from the list.');
       return;
     }
 
-    const input: ErrandsQuoteInput = { serviceCategory: service, pickup, destination };
-
-    // Form untouched since the last quote → go through ensureFresh, which
-    // reuses the quote on screen or quietly re-prices one about to expire.
-    const unchanged = Boolean(
-      quoteInput &&
-        quote &&
-        quoteInput.serviceCategory === input.serviceCategory &&
-        quoteInput.pickup.address === input.pickup.address &&
-        quoteInput.destination.address === input.destination.address &&
-        samePoint(quoteInput.pickup.point, input.pickup.point) &&
-        samePoint(quoteInput.destination.point, input.destination.point)
-    );
-
-    const result =
-      unchanged && quote ? await ensureFreshErrandsQuote(quote, input) : await requestErrandsQuote(input);
-
-    setQuoteLoading(false);
-    if (!result.ok) {
-      setQuoteError(result.error);
-      return;
-    }
-    if (unchanged && quote && result.quote.quoteId !== quote.quoteId) {
-      setPriceNotice(
-        `Your price was updated to ${formatGHS(result.quote.estimatedFare)} — the previous estimate had expired.`
-      );
-    }
-    setQuote(result.quote);
-    setQuoteInput(input);
-    setSelectedDriverId(null);
-    setDrivers([]);
-    setDriversError(null);
-    setBookingError(null);
+    const selected: ErrandsQuoteInput = { serviceCategory: service, pickup, destination };
+    pricedKeyRef.current = quoteKey(selected);
+    await priceServices(selected, enabledServices);
   }, [
     service,
     pickupText,
     pickupPoint,
     destText,
     destPoint,
-    quote,
-    quoteInput,
     resolveEndpoint,
+    priceServices,
+    enabledServices,
   ]);
 
   // ── Driver discovery (polled: the couriers table is not subscribable) ─────
@@ -636,7 +842,7 @@ export const ErrandsPage: React.FC = () => {
         fullName: activeBooking.details?.driverName ?? null,
         avatarUrl: activeBooking.details?.driverAvatarUrl ?? null,
         vehicleType: activeBooking.details?.driverVehicleType ?? null,
-        vehicleCategory: activeBooking.serviceCategory === 'RIDE_CAR' ? 'CAR' : 'MOTORCYCLE',
+        vehicleCategory: activeBooking.serviceCategory === 'ERRAND_MOTORCYCLE' ? 'MOTORCYCLE' : 'CAR',
         rating: null,
         totalDeliveries: null,
         latitude: activeDriverPosition.lat,
@@ -910,18 +1116,20 @@ export const ErrandsPage: React.FC = () => {
              ================================================================== */
           <>
             <div className="space-y-3">
-              {/* Service tabs — only services the operator actually enabled */}
+              {/* Service tabs — only services the operator actually enabled.
+                  Each one carries ITS OWN server-computed estimate, so the
+                  customer compares real prices instead of guessing. */}
               {config?.enabled && enabledServices.length > 0 && (
                 <div className="flex gap-2">
-                  {enabledServices.map((option) => (
+                  {enabledServices.map((option) => {
+                    const estimate = estimateFor(option);
+                    const isPricing = formTrip && !estimate && quoteLoading;
+                    return (
                     <button
                       key={option}
                       type="button"
                       aria-pressed={service === option}
-                      onClick={() => {
-                        setService(option);
-                        clearQuote();
-                      }}
+                      onClick={() => setService(option)}
                       className={`flex-1 rounded-2xl border p-3 text-left transition active:scale-[0.99] ${
                         service === option
                           ? 'border-brand bg-emerald-50 ring-1 ring-brand'
@@ -929,18 +1137,37 @@ export const ErrandsPage: React.FC = () => {
                       }`}
                     >
                       <span className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
-                        {option === 'RIDE_CAR' ? (
-                          <Car className="h-4 w-4 text-brand-deep" aria-hidden="true" />
-                        ) : (
+                        {option === 'ERRAND_MOTORCYCLE' ? (
                           <Bike className="h-4 w-4 text-brand-deep" aria-hidden="true" />
+                        ) : (
+                          <Car className="h-4 w-4 text-brand-deep" aria-hidden="true" />
                         )}
                         {ERRANDS_SERVICE_LABELS[option]}
                       </span>
                       <span className="mt-0.5 block text-[10px] leading-snug text-slate-500">
                         {ERRANDS_SERVICE_BLURBS[option]}
                       </span>
+                      {estimate ? (
+                        <span className="mt-1.5 block">
+                          <span className="text-sm font-black tracking-tight text-brand-dark">
+                            {formatGHS(estimate.estimatedFare)}
+                          </span>
+                          <span className="mt-0.5 block text-[10px] font-semibold leading-snug text-slate-400">
+                            {estimate.estimatedDurationSeconds
+                              ? `${formatRouteDuration(estimate.estimatedDurationSeconds)} · `
+                              : ''}
+                            {formatDistanceKm(estimate.distanceKm)}
+                          </span>
+                        </span>
+                      ) : isPricing ? (
+                        <span className="mt-1.5 flex items-center gap-1 text-[10px] font-semibold text-slate-400">
+                          <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                          pricing…
+                        </span>
+                      ) : null}
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 
@@ -1035,7 +1262,10 @@ export const ErrandsPage: React.FC = () => {
 
               {/* The server's fare — nothing on this page computes money. */}
               {quote && (
-                <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-card">
+                <section
+                  className="rounded-2xl border border-slate-200 bg-white p-4 shadow-card"
+                  aria-live="polite"
+                >
                   <div className="flex items-end justify-between gap-3">
                     <div>
                       <p className="text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">
@@ -1045,51 +1275,70 @@ export const ErrandsPage: React.FC = () => {
                         {formatGHS(quote.estimatedFare)}
                       </p>
                     </div>
-                    <span
-                      className={`rounded-lg px-2 py-1 text-[10px] font-bold ${
-                        quote.distanceSource === 'ROAD_ROUTE'
-                          ? 'bg-emerald-50 text-brand-dark'
-                          : 'bg-slate-100 text-slate-600'
-                      }`}
-                    >
-                      {quote.distanceSource === 'ROAD_ROUTE' ? 'Road route' : 'Straight line'}
+                    <span className="rounded-lg bg-emerald-50 px-2 py-1 text-[10px] font-bold text-brand-dark">
+                      Road route
                     </span>
                   </div>
 
+                  {/* What was measured */}
+                  <div className="mt-3 space-y-1 border-t border-slate-100 pt-3 text-[11px] leading-snug text-slate-600">
+                    <p className="flex items-start gap-1.5">
+                      <MapPin className="mt-0.5 h-3 w-3 flex-shrink-0 text-emerald-500" aria-hidden="true" />
+                      <span className="min-w-0 flex-1 truncate">{quote.pickupAddress}</span>
+                    </p>
+                    <p className="flex items-start gap-1.5">
+                      <MapPin className="mt-0.5 h-3 w-3 flex-shrink-0 text-rose-400" aria-hidden="true" />
+                      <span className="min-w-0 flex-1 truncate">{quote.destinationAddress}</span>
+                    </p>
+                    <p className="flex items-center gap-1.5 pt-0.5 text-slate-500">
+                      <Clock className="h-3 w-3 flex-shrink-0 text-slate-400" aria-hidden="true" />
+                      {formatDistanceKm(quote.distanceKm)}
+                      {quote.estimatedDurationSeconds
+                        ? ` · about ${formatRouteDuration(quote.estimatedDurationSeconds)}`
+                        : ''}
+                    </p>
+                  </div>
+
+                  {/* The breakdown — only the charges that actually apply */}
                   <dl className="mt-3 space-y-1.5 border-t border-slate-100 pt-3 text-xs">
-                    <div className="flex items-center justify-between gap-3">
-                      <dt className="text-slate-500">
-                        {`${quote.distanceKm.toFixed(2)} km × ${formatGHS(quote.perKmRate)}/km`}
-                        {quote.surgeMultiplier !== 1 ? ` × ${quote.surgeMultiplier} surge` : ''}
-                      </dt>
-                      <dd className="shrink-0 font-semibold text-slate-900">
-                        {formatGHS(quote.tripFare)}
-                      </dd>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <dt className="text-slate-500">Tax</dt>
-                      <dd className="font-semibold text-slate-900">{formatGHS(quote.taxAmount)}</dd>
-                    </div>
+                    {fareRows.map((row) => (
+                      <div key={row.label} className="flex items-center justify-between gap-3">
+                        <dt className="min-w-0 text-slate-500">{row.label}</dt>
+                        <dd
+                          className={`shrink-0 font-semibold ${
+                            row.amount < 0 ? 'text-emerald-600' : 'text-slate-900'
+                          }`}
+                        >
+                          {row.amount < 0 ? `−${formatGHS(Math.abs(row.amount))}` : formatGHS(row.amount)}
+                        </dd>
+                      </div>
+                    ))}
                     <div className="flex items-center justify-between border-t border-slate-100 pt-1.5">
-                      <dt className="font-bold text-slate-900">Total</dt>
+                      <dt className="font-bold text-slate-900">Total ({quote.currency})</dt>
                       <dd className="font-bold text-slate-900">{formatGHS(quote.estimatedFare)}</dd>
                     </div>
                   </dl>
 
-                  {quote.estimatedDurationSeconds ? (
-                    <p className="mt-2 text-[11px] text-slate-500">
-                      about {formatRouteDuration(quote.estimatedDurationSeconds)}
+                  {/* Anything that could still move the price, said out loud */}
+                  {quote.variableChargeNote && (
+                    <p className="mt-2 rounded-lg bg-amber-50 p-2 text-[10px] font-medium leading-relaxed text-amber-800">
+                      {quote.variableChargeNote}
                     </p>
-                  ) : null}
+                  )}
+                  {quote.routeNote && (
+                    <p className="mt-2 text-[10px] leading-relaxed text-slate-400">
+                      {quote.routeNote}
+                    </p>
+                  )}
 
-                  <p className="mt-1 text-[10px] text-slate-400">
+                  <p className="mt-2 text-[10px] text-slate-400">
                     {quoteSecondsLeft > 30
                       ? `Price held for ${Math.floor(quoteSecondsLeft / 60)}:${String(quoteSecondsLeft % 60).padStart(2, '0')}`
                       : quoteSecondsLeft > 0
                       ? `Price refreshes in ${quoteSecondsLeft}s`
                       : 'This price has expired — tap Update fare to refresh.'}
                   </p>
-                </div>
+                </section>
               )}
 
               {/* Drivers — only once a real quote exists */}

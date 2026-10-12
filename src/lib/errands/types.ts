@@ -7,23 +7,26 @@
  * answered and posts back only IDs (quote_id, driver_id) plus status moves.
  */
 
-/** The two service categories the platform offers. */
-export type ErrandsServiceCategory = 'ERRAND_MOTORCYCLE' | 'RIDE_CAR';
+/** The three service categories the platform offers. */
+export type ErrandsServiceCategory = 'ERRAND_MOTORCYCLE' | 'CAR_ERRAND' | 'RIDE_CAR';
 
 export const ERRANDS_SERVICES: readonly ErrandsServiceCategory[] = [
   'ERRAND_MOTORCYCLE',
+  'CAR_ERRAND',
   'RIDE_CAR',
 ];
 
 /** Human labels for each service category. */
 export const ERRANDS_SERVICE_LABELS: Record<ErrandsServiceCategory, string> = {
   ERRAND_MOTORCYCLE: 'Motorcycle errand',
+  CAR_ERRAND: 'Car errand',
   RIDE_CAR: 'Passenger ride',
 };
 
 /** Short descriptions shown on the service picker. */
 export const ERRANDS_SERVICE_BLURBS: Record<ErrandsServiceCategory, string> = {
   ERRAND_MOTORCYCLE: 'Parcels, food and small deliveries across town',
+  CAR_ERRAND: 'Bigger parcels and deliveries that need a car',
   RIDE_CAR: 'A car picks you up and takes you there',
 };
 
@@ -206,6 +209,8 @@ export interface ErrandsDriverCapability {
   courierId: string;
   errandsEnabled: boolean;
   motorcycleErrands: boolean;
+  /** Car deliveries — granted by an operator, never self-service. */
+  carErrands: boolean;
   carRides: boolean;
 }
 
@@ -228,4 +233,37 @@ export interface ErrandsPricingSettings {
   driverEarningPercentage: number;
   quoteTtlMinutes: number;
   requestTtlSeconds: number;
+}
+
+/**
+ * One versioned row of `errands_pricing_rules` — the authoritative fare
+ * configuration for a single service (and vehicle) category. Exactly one
+ * row per category is `isActive`; the rest are the history that issued
+ * quotes still point at. Amounts are GHS as stored by the database.
+ */
+export interface ErrandsPricingRule {
+  id: string;
+  serviceCategory: ErrandsServiceCategory;
+  vehicleCategory: 'MOTORCYCLE' | 'CAR';
+  baseFare: number;
+  pricePerKm: number;
+  minFare: number;
+  maxFare: number | null;
+  bookingFee: number;
+  waitingCharge: number;
+  waitingChargeEnabled: boolean;
+  timeChargePerMinute: number;
+  timeChargeEnabled: boolean;
+  surgeEnabled: boolean;
+  surgeMultiplier: number;
+  taxRatePercent: number;
+  discountAmount: number;
+  driverEarningPercent: number;
+  platformCommissionPercent: number;
+  currency: string;
+  pricingVersion: number;
+  effectiveFrom: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
 }

@@ -9,12 +9,16 @@
 -- by raising an exception that starts with "FAIL -", which means a rule from
 -- supabase/migrations/20261012_errands_module.sql or from its per-distance
 -- pricing replacement 20261012_errands_per_distance_pricing.sql is broken.
+-- The fare engine introduced by 20261013_errands_fare_engine.sql (per-category
+-- rules, road-route quotes, revalidation at booking) is checked in
+-- supabase/tests/errands_fare_checks.sql - run BOTH files.
 --
 -- These checks NEVER touch the stored Errands pricing rules or config: the
--- fare formula is exercised with EXPLICIT settings passed to
--- errands_pricing_amounts(...), so running them cannot re-price anything.
--- Checks that would depend on the operator's saved switches read the raw
--- setting row and compare shapes, never hard-coded expectations.
+-- legacy formula is exercised with EXPLICIT settings passed to
+-- errands_pricing_amounts(...) and the current one with EXPLICIT rule rows
+-- passed to errands_fare_amounts(...), so running them cannot re-price
+-- anything. Checks that would depend on the operator's saved switches read
+-- the raw setting row and compare shapes, never hard-coded expectations.
 --
 -- Client-level coverage (quote TTL, transition map mirror, source scans of
 -- the booking flow) lives in scripts/errands_pricing.test.ts - run `npm test`.
@@ -415,8 +419,13 @@ begin
     if to_regprocedure('public.errands_nearby_drivers(double precision, double precision, text, numeric, integer)') is null then
         raise exception 'FAIL - errands_nearby_drivers(lat, lng, service, radius, limit) is missing';
     end if;
-    if to_regprocedure('public.create_errands_quote(double precision, double precision, text, double precision, double precision, text, text, numeric, integer)') is null then
-        raise exception 'FAIL - create_errands_quote(...) is missing';
+    -- The quote RPC is service-role only (11 arguments: customer + measured
+    -- route first, then the address pair, category, provider and distance).
+    if to_regprocedure('public.create_errands_quote(uuid, double precision, double precision, text, double precision, double precision, text, text, numeric, integer, text)') is null then
+        raise exception 'FAIL - create_errands_quote(11 args) is missing';
+    end if;
+    if to_regprocedure('public.create_errands_quote(double precision, double precision, text, double precision, double precision, text, text, numeric, integer)') is not null then
+        raise exception 'FAIL - the old client-callable 9-argument create_errands_quote still exists';
     end if;
     if to_regprocedure('public.create_errands_booking(uuid, uuid)') is null then
         raise exception 'FAIL - create_errands_booking(quote_id, driver_id) is missing';
@@ -430,14 +439,35 @@ begin
     if to_regprocedure('public.set_errands_availability(boolean)') is null then
         raise exception 'FAIL - set_errands_availability(boolean) is missing';
     end if;
-    if to_regprocedure('public.set_errands_pricing(numeric, numeric, numeric, numeric, jsonb)') is null then
-        raise exception 'FAIL - set_errands_pricing(per-km, tax, earning, surge, services) is missing';
+    -- Per-category fare rules: 20 arguments, written only through this setter.
+    if to_regprocedure('public.set_errands_pricing_rules(text, text, numeric, numeric, numeric, numeric, numeric, numeric, boolean, numeric, boolean, boolean, numeric, numeric, numeric, numeric, numeric, text, timestamptz, boolean)') is null then
+        raise exception 'FAIL - set_errands_pricing_rules(...) is missing';
     end if;
-    if to_regprocedure('public.set_errands_pricing(numeric, numeric, numeric, numeric, numeric, numeric, numeric, numeric, jsonb)') is not null then
-        raise exception 'FAIL - the old 9-argument set_errands_pricing still exists (fixed-fee pricing)';
+    if to_regprocedure('public.get_errands_pricing_rules()') is null then
+        raise exception 'FAIL - get_errands_pricing_rules() is missing';
     end if;
-    if to_regprocedure('public.set_driver_service_capabilities(uuid, boolean, boolean)') is null then
-        raise exception 'FAIL - set_driver_service_capabilities(...) is missing';
+    if to_regprocedure('public.get_active_errands_pricing_rule(text)') is null then
+        raise exception 'FAIL - get_active_errands_pricing_rule(text) is missing';
+    end if;
+    if to_regprocedure('public.errands_fare_amounts(numeric, integer, text, jsonb)') is null then
+        raise exception 'FAIL - errands_fare_amounts(...) is missing';
+    end if;
+    if to_regprocedure('public.errands_in_service_area(double precision, double precision)') is null then
+        raise exception 'FAIL - errands_in_service_area(...) is missing';
+    end if;
+    -- Config now carries three service switches.
+    if to_regprocedure('public.set_errands_config(boolean, boolean, boolean, boolean)') is null then
+        raise exception 'FAIL - set_errands_config(enabled, motorcycle, car_errand, ride_car) is missing';
+    end if;
+    if to_regprocedure('public.set_errands_config(boolean, boolean, boolean)') is not null then
+        raise exception 'FAIL - the old 3-argument set_errands_config still exists (no CAR_ERRAND)';
+    end if;
+    -- Capabilities now carry three toggles (the third is CAR_ERRAND).
+    if to_regprocedure('public.set_driver_service_capabilities(uuid, boolean, boolean, boolean)') is null then
+        raise exception 'FAIL - set_driver_service_capabilities(courier, errands, motorcycle, car_errands, car_rides) is missing';
+    end if;
+    if to_regprocedure('public.set_driver_service_capabilities(uuid, boolean, boolean)') is not null then
+        raise exception 'FAIL - the old 3-argument set_driver_service_capabilities still exists';
     end if;
     if to_regprocedure('public.get_errands_pricing_settings()') is null then
         raise exception 'FAIL - get_errands_pricing_settings() is missing';

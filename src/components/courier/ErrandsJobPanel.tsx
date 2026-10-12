@@ -102,7 +102,7 @@ type StatusActionInput = {
 };
 
 const serviceIcon = (category: ErrandsServiceCategory): React.ReactNode =>
-  category === 'RIDE_CAR' ? <Car className="h-4 w-4" /> : <Bike className="h-4 w-4" />;
+  category === 'ERRAND_MOTORCYCLE' ? <Bike className="h-4 w-4" /> : <Car className="h-4 w-4" />;
 
 const primaryButtonClass =
   'flex min-h-[48px] w-full flex-1 items-center justify-center gap-2 rounded-[12px] bg-emerald-600 px-4 text-[13px] font-bold text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto';
@@ -472,7 +472,7 @@ export const ErrandsJobPanel: React.FC<ErrandsJobPanelProps> = ({
         : liveJob.status === 'DRIVER_ARRIVING'
           ? { label: "I've arrived", to: 'DRIVER_ARRIVED', icon: <MapPin className="h-4 w-4" /> }
           : liveJob.status === 'DRIVER_ARRIVED' &&
-              liveJob.serviceCategory === 'ERRAND_MOTORCYCLE'
+              liveJob.serviceCategory !== 'RIDE_CAR'
             ? {
                 label: 'Start delivery',
                 to: 'IN_PROGRESS',

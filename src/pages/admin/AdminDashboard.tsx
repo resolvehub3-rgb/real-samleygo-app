@@ -69,20 +69,26 @@ import {
   ACTIVE_ERRANDS_STATUSES,
   ERRANDS_SERVICE_LABELS,
   ERRANDS_STATUS_LABELS,
+  ERRANDS_SERVICES,
   canTransition,
   type ErrandsBooking,
   type ErrandsBookingDetails,
   type ErrandsBookingStatus,
   type ErrandsConfig,
   type ErrandsDriverCapability,
-  type ErrandsPricingSettings,
+  type ErrandsPricingRule,
+  type ErrandsServiceCategory,
 } from '../../lib/errands/types';
-import { calculateErrandsFare, ERRANDS_PRICING_UNCONFIGURED_MESSAGE } from '../../lib/errands/pricing';
+import {
+  calculateErrandsFare,
+  ERRANDS_PRICING_UNCONFIGURED_MESSAGE,
+  type ErrandsFareRule,
+} from '../../lib/errands/pricing';
 import {
   fetchErrandsConfig,
-  fetchErrandsPricingSettings,
+  fetchErrandsPricingRules,
   parseConfig,
-  parsePricingSettings,
+  saveErrandsPricingRule,
 } from '../../lib/errands/config';
 import { parseBooking, setErrandsBookingStatus } from '../../lib/errands/booking';
 import { DocumentImage } from '../../components/common/DocumentImage';
@@ -523,6 +529,8 @@ const DashboardSkeleton = () => (
 
 /** Distance used by the pricing preview panel. */
 const SAMPLE_DISTANCE_KM = 5;
+/** The preview prices a sample trip duration so time/waiting fees are visible. */
+const SAMPLE_DURATION_SECONDS = 15 * 60;
 
 /** ---- Errands & On-Demand Rides — console helpers ------------------------- */
 
@@ -596,67 +604,276 @@ const Switch: React.FC<SwitchProps> = ({ id, checked, onChange, disabled, label,
   </div>
 );
 
-/** Fare-rules form draft — kept as strings so the fields can be edited freely. */
-interface ErrandsPricingDraft {
-  perKmRate: string;
-  taxRatePercent: string;
-  driverEarningPercentage: string;
-  surgeMultiplier: string;
-}
-
-interface ErrandsPricingDraftValues {
-  perKmRate: number;
-  taxRatePercent: number;
-  driverEarningPercentage: number;
-  surgeMultiplier: number;
+interface RuleFieldProps {
+  id: string;
+  label: string;
+  value: string;
+  step?: string;
+  min?: number;
+  max?: number;
+  hint?: string;
+  disabled?: boolean;
+  onChange: (value: string) => void;
 }
 
 /**
- * Mirrors the bounds enforced by `set_errands_pricing()` in the database, so
- * the admin gets a fast, friendly message; the database validates again and
+ * One numeric input of a fare rule. Kept as a string in the draft so the
+ * field can be cleared and re-typed; validation happens on save (and again
+ * in the database).
+ */
+const RuleField: React.FC<RuleFieldProps> = ({
+  id,
+  label,
+  value,
+  step = '0.01',
+  min = 0,
+  max,
+  hint,
+  disabled,
+  onChange,
+}) => (
+  <div>
+    <label htmlFor={id} className="mb-1.5 block text-xs font-bold text-slate-600">
+      {label}
+    </label>
+    <input
+      id={id}
+      type="number"
+      step={step}
+      min={min}
+      max={max}
+      value={value}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value)}
+      className={INPUT_CLASS}
+    />
+    {hint && <p className="mt-1 text-[10px] leading-relaxed text-slate-400">{hint}</p>}
+  </div>
+);
+
+/** Fare-rules form draft — kept as strings so the fields can be edited freely. */
+interface ErrandsRuleDraft {
+  baseFare: string;
+  pricePerKm: string;
+  minFare: string;
+  maxFare: string;
+  bookingFee: string;
+  waitingCharge: string;
+  waitingChargeEnabled: boolean;
+  timeChargePerMinute: string;
+  timeChargeEnabled: boolean;
+  surgeEnabled: boolean;
+  surgeMultiplier: string;
+  taxRatePercent: string;
+  discountAmount: string;
+  driverEarningPercent: string;
+  platformCommissionPercent: string;
+}
+
+interface ErrandsRuleDraftValues {
+  baseFare: number;
+  pricePerKm: number;
+  minFare: number;
+  maxFare: number | null;
+  bookingFee: number;
+  waitingCharge: number;
+  waitingChargeEnabled: boolean;
+  timeChargePerMinute: number;
+  timeChargeEnabled: boolean;
+  surgeEnabled: boolean;
+  surgeMultiplier: number;
+  taxRatePercent: number;
+  discountAmount: number;
+  driverEarningPercent: number;
+  platformCommissionPercent: number;
+}
+
+/** One category's untouched form state (also what "unconfigured" looks like). */
+const emptyErrandsRuleDraft = (): ErrandsRuleDraft => ({
+  baseFare: '',
+  pricePerKm: '',
+  minFare: '',
+  maxFare: '',
+  bookingFee: '',
+  waitingCharge: '',
+  waitingChargeEnabled: false,
+  timeChargePerMinute: '',
+  timeChargeEnabled: false,
+  surgeEnabled: false,
+  surgeMultiplier: '1',
+  taxRatePercent: '0',
+  discountAmount: '0',
+  driverEarningPercent: '100',
+  platformCommissionPercent: '0',
+});
+
+const emptyErrandsRuleDrafts = (): Record<ErrandsServiceCategory, ErrandsRuleDraft> => ({
+  ERRAND_MOTORCYCLE: emptyErrandsRuleDraft(),
+  CAR_ERRAND: emptyErrandsRuleDraft(),
+  RIDE_CAR: emptyErrandsRuleDraft(),
+});
+
+const moneyOrEmpty = (value: number | null | undefined): string =>
+  value === null || value === undefined ? '' : String(value);
+
+/** A saved rule → the editable draft (active row only). */
+const draftFromRule = (rule: ErrandsPricingRule | undefined): ErrandsRuleDraft => {
+  if (!rule) return emptyErrandsRuleDraft();
+  return {
+    baseFare: moneyOrEmpty(rule.baseFare),
+    pricePerKm: moneyOrEmpty(rule.pricePerKm),
+    minFare: moneyOrEmpty(rule.minFare),
+    maxFare: moneyOrEmpty(rule.maxFare),
+    bookingFee: moneyOrEmpty(rule.bookingFee),
+    waitingCharge: moneyOrEmpty(rule.waitingCharge),
+    waitingChargeEnabled: rule.waitingChargeEnabled,
+    timeChargePerMinute: moneyOrEmpty(rule.timeChargePerMinute),
+    timeChargeEnabled: rule.timeChargeEnabled,
+    surgeEnabled: rule.surgeEnabled,
+    surgeMultiplier: String(rule.surgeMultiplier),
+    taxRatePercent: String(rule.taxRatePercent),
+    discountAmount: moneyOrEmpty(rule.discountAmount),
+    driverEarningPercent: String(rule.driverEarningPercent),
+    platformCommissionPercent: String(rule.platformCommissionPercent),
+  };
+};
+
+/** The ACTIVE rule for a category — the row the server prices with. */
+export const activeErrandsRule = (
+  rules: ErrandsPricingRule[],
+  category: ErrandsServiceCategory
+): ErrandsPricingRule | undefined =>
+  rules.find((rule) => rule.serviceCategory === category && rule.isActive);
+
+/** Every category's saved rule → the editable drafts (blank when unset). */
+const errandsDraftsFromRules = (
+  rules: ErrandsPricingRule[]
+): Record<ErrandsServiceCategory, ErrandsRuleDraft> => ({
+  ERRAND_MOTORCYCLE: draftFromRule(activeErrandsRule(rules, 'ERRAND_MOTORCYCLE')),
+  CAR_ERRAND: draftFromRule(activeErrandsRule(rules, 'CAR_ERRAND')),
+  RIDE_CAR: draftFromRule(activeErrandsRule(rules, 'RIDE_CAR')),
+});
+
+/**
+ * Mirrors the bounds enforced by `set_errands_pricing_rules()` in the database,
+ * so the admin gets a fast, friendly message; the database validates again and
  * remains the authority (its sentences are shown verbatim on failure).
  */
-const parseErrandsPricingDraft = (
-  draft: ErrandsPricingDraft
-): { ok: true; values: ErrandsPricingDraftValues } | { ok: false; error: string } => {
+const parseErrandsRuleDraft = (
+  draft: ErrandsRuleDraft
+): { ok: true; values: ErrandsRuleDraftValues } | { ok: false; error: string } => {
   const read = (raw: string): number | null => {
     const trimmed = raw.trim();
     if (trimmed === '') return null;
     const parsed = Number(trimmed);
     return Number.isFinite(parsed) ? parsed : null;
   };
+  const optional = (raw: string): number | null => (raw.trim() === '' ? 0 : read(raw));
 
-  const perKm = read(draft.perKmRate);
-  if (perKm === null || perKm <= 0 || perKm > 9999.99) {
+  const base = optional(draft.baseFare);
+  const rate = optional(draft.pricePerKm);
+  const min = optional(draft.minFare);
+  const booking = optional(draft.bookingFee);
+  const waiting = optional(draft.waitingCharge);
+  const timeCharge = optional(draft.timeChargePerMinute);
+  const tax = optional(draft.taxRatePercent);
+  const discount = optional(draft.discountAmount);
+
+  if (
+    base === null ||
+    base < 0 ||
+    base > 99999.99 ||
+    rate === null ||
+    rate < 0 ||
+    rate > 9999.99 ||
+    min === null ||
+    min < 0 ||
+    min > 99999.99 ||
+    booking === null ||
+    booking < 0 ||
+    booking > 99999.99 ||
+    waiting === null ||
+    waiting < 0 ||
+    waiting > 9999.99 ||
+    timeCharge === null ||
+    timeCharge < 0 ||
+    timeCharge > 9999.99 ||
+    discount === null ||
+    discount < 0 ||
+    discount > 99999.99
+  ) {
     return {
       ok: false,
       error:
-        'Price per kilometre must be a number greater than 0 (up to 9999.99) — the fare is calculated from the distance travelled.',
+        'One of the fares is outside the allowed range (base/minimum/booking up to 99999.99, price per kilometre up to 9999.99).',
     };
   }
-  const tax = read(draft.taxRatePercent);
-  if (tax === null || tax < 0 || tax > 100) {
-    return { ok: false, error: 'Tax rate must be between 0 and 100 percent.' };
+
+  const maxRaw = draft.maxFare.trim();
+  let max: number | null = null;
+  if (maxRaw !== '') {
+    max = read(maxRaw);
+    if (max === null || max < 0 || max > 99999.99) {
+      return { ok: false, error: 'Maximum fare must be between 0 and 99999.99, or left blank.' };
+    }
+    if (max === 0) max = null;
+    if (max !== null && max < min) {
+      return { ok: false, error: 'The maximum fare cannot be lower than the minimum fare.' };
+    }
   }
-  const earning = read(draft.driverEarningPercentage);
-  if (earning === null || earning < 0 || earning > 100) {
-    return { ok: false, error: 'Driver earning percentage must be between 0 and 100.' };
+
+  if (base <= 0 && rate <= 0 && min <= 0) {
+    return {
+      ok: false,
+      error:
+        'Set at least one of base fare, price per kilometre or minimum fare — a category with no rates cannot be saved.',
+    };
   }
-  const surge = read(draft.surgeMultiplier);
-  if (surge === null || surge < 0.1 || surge > 5) {
+
+  const surgeEnabled = draft.surgeEnabled;
+  const surgeRaw = surgeEnabled ? read(draft.surgeMultiplier) : 1;
+  if (surgeRaw === null || surgeRaw < 0.1 || surgeRaw > 5) {
     return {
       ok: false,
       error:
         'Surge multiplier must be between 0.1 and 5 (use 1 when surge pricing is not in effect).',
     };
   }
+
+  if (tax === null || tax < 0 || tax > 100) {
+    return { ok: false, error: 'Tax rate must be between 0 and 100 percent.' };
+  }
+
+  const earning = read(draft.driverEarningPercent);
+  const commission = read(draft.platformCommissionPercent);
+  if (earning === null || earning < 0 || earning > 100) {
+    return { ok: false, error: 'Driver earning percentage must be between 0 and 100.' };
+  }
+  if (commission === null || commission < 0 || commission > 100) {
+    return { ok: false, error: 'Platform share must be between 0 and 100.' };
+  }
+  if (Math.round((earning + commission) * 100) / 100 !== 100) {
+    return { ok: false, error: 'Driver and platform shares must add up to 100%.' };
+  }
+
   return {
     ok: true,
     values: {
-      perKmRate: perKm,
+      baseFare: base,
+      pricePerKm: rate,
+      minFare: min,
+      maxFare: max,
+      bookingFee: booking,
+      waitingCharge: waiting,
+      waitingChargeEnabled: draft.waitingChargeEnabled,
+      timeChargePerMinute: timeCharge,
+      timeChargeEnabled: draft.timeChargeEnabled,
+      surgeEnabled,
+      surgeMultiplier: surgeEnabled ? surgeRaw : 1,
       taxRatePercent: tax,
-      driverEarningPercentage: earning,
-      surgeMultiplier: surge,
+      discountAmount: discount,
+      driverEarningPercent: earning,
+      platformCommissionPercent: commission,
     },
   };
 };
@@ -752,26 +969,35 @@ export const AdminDashboard: React.FC = () => {
   const [errandsBookings, setErrandsBookings] = useState<ErrandsBooking[]>([]);
   const [errandsCapabilities, setErrandsCapabilities] = useState<ErrandsDriverCapability[]>([]);
   const [errandsConfig, setErrandsConfig] = useState<ErrandsConfig | null>(null);
-  const [errandsPricing, setErrandsPricing] = useState<ErrandsPricingSettings | null>(null);
   const [isErrandsLoading, setIsErrandsLoading] = useState(true);
 
   // Service switches (module enabled + per-category), saved via set_errands_config.
   const [errandsConfigDraft, setErrandsConfigDraft] = useState({
     enabled: true,
     motorcycle: true,
+    carErrand: false,
     rideCar: false,
   });
   const [isSavingErrandsConfig, setIsSavingErrandsConfig] = useState(false);
 
-  // Fare rules draft, saved via set_errands_pricing (the ONLY write path).
-  const [errandsPricingDraft, setErrandsPricingDraft] = useState<ErrandsPricingDraft>({
-    perKmRate: '',
-    taxRatePercent: '',
-    driverEarningPercentage: '',
-    surgeMultiplier: '',
-  });
-  const [errandsPricingFormError, setErrandsPricingFormError] = useState('');
-  const [isSavingErrandsPricing, setIsSavingErrandsPricing] = useState(false);
+  // Fare rules — one draft per service category, saved through
+  // set_errands_pricing_rules (the ONLY write path: it validates, versions
+  // the row so existing quotes keep their snapshot, and audits the change).
+  const [errandsRuleDrafts, setErrandsRuleDrafts] = useState<
+    Record<ErrandsServiceCategory, ErrandsRuleDraft>
+  >(() => emptyErrandsRuleDrafts());
+  const [errandsRuleErrors, setErrandsRuleErrors] = useState<
+    Partial<Record<ErrandsServiceCategory, string>>
+  >({});
+  const [savingErrandsRule, setSavingErrandsRule] =
+    useState<ErrandsServiceCategory | null>(null);
+  /** Active rule per category — what the server is pricing with right now. */
+  const [errandsRules, setErrandsRules] = useState<ErrandsPricingRule[]>([]);
+  /** Set when the rules themselves could not be read (not "unconfigured"). */
+  const [errandsRulesError, setErrandsRulesError] = useState('');
+  /** Which category's rules are being edited AND previewed. */
+  const [errandsRuleCategory, setErrandsRuleCategory] =
+    useState<ErrandsServiceCategory>('ERRAND_MOTORCYCLE');
   // Admin-only preview distance (never a customer price — see pricing.ts).
   const [errandsPreviewKmInput, setErrandsPreviewKmInput] = useState(
     String(SAMPLE_DISTANCE_KM)
@@ -1279,17 +1505,17 @@ export const AdminDashboard: React.FC = () => {
       return;
     }
     try {
-      const [bookingsResult, config, pricing, capsResult] = await Promise.all([
+      const [bookingsResult, config, rules, capsResult] = await Promise.all([
         supabase
           .from('errands_bookings')
           .select('*')
           .order('created_at', { ascending: false })
           .limit(200),
         fetchErrandsConfig(),
-        fetchErrandsPricingSettings(),
+        fetchErrandsPricingRules(),
         supabase
           .from('driver_service_capabilities')
-          .select('courier_id, errands_enabled, motorcycle_errands, car_rides'),
+          .select('courier_id, errands_enabled, motorcycle_errands, car_errands, car_rides'),
       ]);
 
       const bookingRows = Array.isArray(bookingsResult.data)
@@ -1302,7 +1528,13 @@ export const AdminDashboard: React.FC = () => {
       );
 
       setErrandsConfig(config);
-      setErrandsPricing(pricing);
+      setErrandsRules(rules ?? []);
+      setErrandsRulesError(
+        rules === null
+          ? 'The fare rules could not be loaded — check your connection and that the pricing migration is applied, then refresh.'
+          : ''
+      );
+      if (rules) setErrandsRuleDrafts(errandsDraftsFromRules(rules));
 
       const capRows = Array.isArray(capsResult.data)
         ? (capsResult.data as Record<string, unknown>[])
@@ -1313,6 +1545,7 @@ export const AdminDashboard: React.FC = () => {
             courierId: String(row.courier_id ?? ''),
             errandsEnabled: row.errands_enabled === true,
             motorcycleErrands: row.motorcycle_errands === true,
+            carErrands: row.car_errands === true,
             carRides: row.car_rides === true,
           }))
           .filter((cap) => cap.courierId !== '')
@@ -1330,27 +1563,24 @@ export const AdminDashboard: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
-  // Keep both form drafts in step with whatever the database last saved (first
+  // Keep the switch draft in step with whatever the database last saved (first
   // load and every successful save — the server response is the source of truth).
   useEffect(() => {
     if (!errandsConfig) return;
     setErrandsConfigDraft({
       enabled: errandsConfig.enabled,
       motorcycle: errandsConfig.services.ERRAND_MOTORCYCLE,
+      carErrand: errandsConfig.services.CAR_ERRAND,
       rideCar: errandsConfig.services.RIDE_CAR,
     });
   }, [errandsConfig]);
 
+  // The fare-rule drafts follow the active rule rows, so a reload or a save
+  // always shows exactly what the server is pricing with right now.
   useEffect(() => {
-    if (!errandsPricing) return;
-    setErrandsPricingDraft({
-      perKmRate: String(errandsPricing.perKmRate),
-      taxRatePercent: String(errandsPricing.taxRatePercent),
-      driverEarningPercentage: String(errandsPricing.driverEarningPercentage),
-      surgeMultiplier: String(errandsPricing.surgeMultiplier),
-    });
-    setErrandsPricingFormError('');
-  }, [errandsPricing]);
+    setErrandsRuleDrafts(errandsDraftsFromRules(errandsRules));
+    setErrandsRuleErrors({});
+  }, [errandsRules]);
 
   // Service switches — the database (set_errands_config) validates and audits.
   const handleSaveErrandsConfig = async (e: React.FormEvent) => {
@@ -1360,6 +1590,7 @@ export const AdminDashboard: React.FC = () => {
       const { data, error } = await supabase.rpc('set_errands_config', {
         p_enabled: errandsConfigDraft.enabled,
         p_service_motorcycle: errandsConfigDraft.motorcycle,
+        p_service_car_errand: errandsConfigDraft.carErrand,
         p_service_ride_car: errandsConfigDraft.rideCar,
       });
       if (error) throw error;
@@ -1380,30 +1611,30 @@ export const AdminDashboard: React.FC = () => {
   };
 
   // Fare rules — validated here for a fast message AND again by
-  // set_errands_pricing(), whose exact sentence is surfaced on failure.
-  const handleSaveErrandsPricing = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const check = parseErrandsPricingDraft(errandsPricingDraft);
+  // set_errands_pricing_rules(), whose exact sentence is surfaced on failure.
+  // Each save creates a NEW versioned row: quotes already in a customer's
+  // hands keep the rules that priced them.
+  const handleSaveErrandsRule = async (category: ErrandsServiceCategory) => {
+    const draft = errandsRuleDrafts[category];
+    const check = parseErrandsRuleDraft(draft);
     if (!check.ok) {
-      setErrandsPricingFormError(check.error);
+      setErrandsRuleErrors((prev) => ({ ...prev, [category]: check.error }));
       return;
     }
-    setErrandsPricingFormError('');
-    setIsSavingErrandsPricing(true);
+    setErrandsRuleErrors((prev) => ({ ...prev, [category]: '' }));
+    setSavingErrandsRule(category);
     try {
-      const { data, error } = await supabase.rpc('set_errands_pricing', {
-        p_per_km_rate: check.values.perKmRate,
-        p_tax_rate_percent: check.values.taxRatePercent,
-        p_driver_earning_percentage: check.values.driverEarningPercentage,
-        p_surge_multiplier: check.values.surgeMultiplier,
+      const result = await saveErrandsPricingRule({
+        serviceCategory: category,
+        vehicleCategory: category === 'ERRAND_MOTORCYCLE' ? 'MOTORCYCLE' : 'CAR',
+        ...check.values,
       });
-      if (error) throw error;
-      const saved = parsePricingSettings(data);
-      if (saved) setErrandsPricing(saved);
+      if (!result.ok) throw new Error(result.error);
+
+      const fresh = await fetchErrandsPricingRules();
+      if (fresh) setErrandsRules(fresh);
       notify(
-        `Errands fare rules saved — pricing version ${
-          saved?.pricingVersion ?? 'updated'
-        }. New quotes use them; existing bookings never change.`
+        `${ERRANDS_SERVICE_LABELS[category]} fare rules saved — pricing version ${result.rule.pricingVersion}. New quotes use them; quotes already issued keep the version they were priced with.`
       );
     } catch (err) {
       notify(
@@ -1414,7 +1645,7 @@ export const AdminDashboard: React.FC = () => {
         'error'
       );
     } finally {
-      setIsSavingErrandsPricing(false);
+      setSavingErrandsRule(null);
     }
   };
 
@@ -1479,6 +1710,7 @@ export const AdminDashboard: React.FC = () => {
   const handleSaveErrandsCapability = async (
     courierId: string,
     motorcycleErrands: boolean,
+    carErrands: boolean,
     carRides: boolean
   ) => {
     setSavingCapabilityId(courierId);
@@ -1486,6 +1718,7 @@ export const AdminDashboard: React.FC = () => {
       const { data, error } = await supabase.rpc('set_driver_service_capabilities', {
         p_courier_id: courierId,
         p_motorcycle_errands: motorcycleErrands,
+        p_car_errands: carErrands,
         p_car_rides: carRides,
       });
       if (error) throw error;
@@ -1494,6 +1727,7 @@ export const AdminDashboard: React.FC = () => {
         courier_id?: string;
         errands_enabled?: boolean;
         motorcycle_errands?: boolean;
+        car_errands?: boolean;
         car_rides?: boolean;
       } | null;
       const savedFor = String(payload?.courier_id ?? courierId);
@@ -1501,6 +1735,7 @@ export const AdminDashboard: React.FC = () => {
         courierId: savedFor,
         errandsEnabled: payload?.errands_enabled === true,
         motorcycleErrands: payload?.motorcycle_errands === true,
+        carErrands: payload?.car_errands === true,
         carRides: payload?.car_rides === true,
       };
       setErrandsCapabilities((prev) =>
@@ -1842,38 +2077,47 @@ export const AdminDashboard: React.FC = () => {
   // Live preview of the fare rules as they are being typed. This is the
   // admin-preview copy of the formula (see errands/pricing.ts) — customers
   // only ever see what create_errands_quote() answers for their own route.
-  const errandsPreviewSettings = useMemo<ErrandsPricingSettings>(() => {
-    const previewNumber = (raw: string, fallback: number): number => {
-      const parsed = Number(raw.trim());
-      return raw.trim() !== '' && Number.isFinite(parsed) ? parsed : fallback;
-    };
-    return {
-      configured: true,
-      currency: errandsPricing?.currency ?? 'GHS',
-      pricingVersion: errandsPricing?.pricingVersion ?? 1,
-      perKmRate: previewNumber(errandsPricingDraft.perKmRate, errandsPricing?.perKmRate ?? 0),
-      taxRatePercent: previewNumber(
-        errandsPricingDraft.taxRatePercent,
-        errandsPricing?.taxRatePercent ?? 0
-      ),
-      surgeMultiplier: previewNumber(
-        errandsPricingDraft.surgeMultiplier,
-        errandsPricing?.surgeMultiplier ?? 1
-      ),
-      driverEarningPercentage: previewNumber(
-        errandsPricingDraft.driverEarningPercentage,
-        errandsPricing?.driverEarningPercentage ?? 100
-      ),
-      quoteTtlMinutes: errandsPricing?.quoteTtlMinutes ?? 5,
-      requestTtlSeconds: errandsPricing?.requestTtlSeconds ?? 90,
-    };
-  }, [errandsPricingDraft, errandsPricing]);
+  const errandsPreviewCheck = parseErrandsRuleDraft(
+    errandsRuleDrafts[errandsRuleCategory] ?? emptyErrandsRuleDraft()
+  );
+  const errandsPreviewRule: ErrandsFareRule | null = errandsPreviewCheck.ok
+    ? { ...errandsPreviewCheck.values, currency: 'GHS' }
+    : null;
 
   const errandsPreviewKm = Number(errandsPreviewKmInput.trim());
   const errandsPreview = calculateErrandsFare(
     Number.isFinite(errandsPreviewKm) && errandsPreviewKm > 0 ? errandsPreviewKm : 0,
-    errandsPreviewSettings
+    SAMPLE_DURATION_SECONDS,
+    errandsPreviewRule
   );
+
+  /** The preview only lists charges that actually apply to the sample trip. */
+  const errandsPreviewRows: { label: string; amount: number }[] = [];
+  if (errandsPreview) {
+    const push = (label: string, amount: number, show: boolean): void => {
+      if (show) errandsPreviewRows.push({ label, amount });
+    };
+    push('Base fare', errandsPreview.baseFare, errandsPreview.baseFare > 0);
+    push('Distance charge', errandsPreview.distanceCharge, errandsPreview.distanceCharge > 0);
+    push('Time charge (15 min)', errandsPreview.timeCharge, errandsPreview.timeCharge > 0);
+    push('Waiting charge', errandsPreview.waitingCharge, errandsPreview.waitingCharge > 0);
+    push('Booking fee', errandsPreview.bookingFee, errandsPreview.bookingFee > 0);
+    push('Peak pricing', errandsPreview.surgeAmount, errandsPreview.surgeAmount !== 0);
+    push('Discount', -errandsPreview.discountAmount, errandsPreview.discountAmount > 0);
+    push('Tax', errandsPreview.taxAmount, errandsPreview.taxAmount > 0);
+  }
+
+  // The rule form edits ONE category at a time (the same one the preview
+  // prices), so what you type is always what the preview shows.
+  const ruleDraft: ErrandsRuleDraft =
+    errandsRuleDrafts[errandsRuleCategory] ?? emptyErrandsRuleDraft();
+  const setRuleField = (patch: Partial<ErrandsRuleDraft>): void =>
+    setErrandsRuleDrafts((prev) => ({
+      ...prev,
+      [errandsRuleCategory]: { ...prev[errandsRuleCategory], ...patch },
+    }));
+  const ruleDraftError = errandsRuleErrors[errandsRuleCategory] ?? '';
+  const savedRule = activeErrandsRule(errandsRules, errandsRuleCategory);
 
   const errandsCapabilityByCourier = useMemo(() => {
     const map = new Map<string, ErrandsDriverCapability>();
@@ -3901,30 +4145,36 @@ export const AdminDashboard: React.FC = () => {
                           Service switches —
                         </span>
                       )}
-                      {errandsPricing ? (
-                        errandsPricing.configured ? (
-                          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-black text-emerald-700 ring-1 ring-emerald-500/20">
-                            <CheckCircle className="h-3.5 w-3.5" />
-                            Pricing configured · v{errandsPricing.pricingVersion}
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1.5 text-[11px] font-black text-amber-700 ring-1 ring-amber-500/25">
-                            <AlertCircle className="h-3.5 w-3.5" />
-                            Pricing NOT configured
-                          </span>
-                        )
-                      ) : (
+                      {isErrandsLoading ? (
                         <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[11px] font-black text-slate-500 ring-1 ring-slate-200">
-                          Pricing —
+                          Fare rules —
+                        </span>
+                      ) : errandsRulesError ? (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1.5 text-[11px] font-black text-amber-700 ring-1 ring-amber-500/25">
+                          <AlertCircle className="h-3.5 w-3.5" />
+                          Fare rules could not be loaded
+                        </span>
+                      ) : errandsRules.some((rule) => rule.isActive) ? (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-black text-emerald-700 ring-1 ring-emerald-500/20">
+                          <CheckCircle className="h-3.5 w-3.5" />
+                          Fare rules active ·{' '}
+                          {errandsRules.filter((rule) => rule.isActive).length}/3
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1.5 text-[11px] font-black text-amber-700 ring-1 ring-amber-500/25">
+                          <AlertCircle className="h-3.5 w-3.5" />
+                          Fare rules NOT configured
                         </span>
                       )}
                     </div>
-                    {errandsPricing && !errandsPricing.configured && (
-                      <p className="mb-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-[11px] font-bold leading-relaxed text-amber-800">
-                        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
-                        Customers cannot see a fare until pricing is saved below.
-                      </p>
-                    )}
+                    {!isErrandsLoading &&
+                      !errandsRulesError &&
+                      !errandsRules.some((rule) => rule.isActive) && (
+                        <p className="mb-4 flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-[11px] font-bold leading-relaxed text-amber-800">
+                          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+                          Customers cannot see a fare until a super admin saves a fare rule set below.
+                        </p>
+                      )}
 
                     {isErrandsLoading ? (
                       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
@@ -4003,7 +4253,7 @@ export const AdminDashboard: React.FC = () => {
                   {/* ===== B. Service switches ===== */}
                   <SectionCard
                     title="Service switches"
-                    subtitle="The master switch plus the two service categories customers can book — saved through set_errands_config and audited by the database"
+                    subtitle="The master switch plus the three service categories customers can book — saved through set_errands_config and audited by the database"
                   >
                     {errandsConfig ? (
                       <form onSubmit={handleSaveErrandsConfig} className="space-y-4">
@@ -4011,7 +4261,7 @@ export const AdminDashboard: React.FC = () => {
                           <Switch
                             id="errands_module_enabled"
                             label="Errands module enabled"
-                            hint="When the module is off, neither motorcycle errands nor passenger rides can be quoted or booked."
+                            hint="When the module is off, no errand or ride can be quoted or booked."
                             checked={errandsConfigDraft.enabled}
                             disabled={isSavingErrandsConfig}
                             onChange={(next) =>
@@ -4027,6 +4277,18 @@ export const AdminDashboard: React.FC = () => {
                               disabled={isSavingErrandsConfig}
                               onChange={(next) =>
                                 setErrandsConfigDraft((d) => ({ ...d, motorcycle: next }))
+                              }
+                            />
+                          </div>
+                          <div className="border-t border-slate-200 pt-4">
+                            <Switch
+                              id="errands_service_car_errand"
+                              label="Car errands (CAR_ERRAND)"
+                              hint="Bigger parcels and deliveries that need a car or van — off by default until its fare rules and eligible drivers are in place."
+                              checked={errandsConfigDraft.carErrand}
+                              disabled={isSavingErrandsConfig}
+                              onChange={(next) =>
+                                setErrandsConfigDraft((d) => ({ ...d, carErrand: next }))
                               }
                             />
                           </div>
@@ -4078,9 +4340,16 @@ export const AdminDashboard: React.FC = () => {
                   <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
                     <SectionCard
                       title="Fare rules"
-                      subtitle="Route distance × per-km rate × surge, then tax and the driver's share — no base fare, no booking fee, no floor or cap"
+                      subtitle="One rule set per service category: base, per-km, floor and ceiling, optional fees, surge, tax and the earnings split. Every save writes a NEW version, so a quote already in a customer's hand keeps the rules that priced it."
                     >
-                      {errandsPricing && !errandsPricing.configured && (
+                      {errandsRulesError ? (
+                        <div className="mb-4 flex items-start gap-2.5 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3">
+                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+                          <p className="min-w-0 text-xs font-bold leading-relaxed text-rose-700">
+                            {errandsRulesError}
+                          </p>
+                        </div>
+                      ) : errandsRules.length === 0 ? (
                         <div className="mb-4 flex items-start gap-2.5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
                           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
                           <div className="min-w-0">
@@ -4095,105 +4364,244 @@ export const AdminDashboard: React.FC = () => {
                             </p>
                           </div>
                         </div>
-                      )}
+                      ) : null}
 
-                      <form onSubmit={handleSaveErrandsPricing} className="space-y-4">
-                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                          <div>
-                            <label htmlFor="errands_per_km" className="mb-1.5 block text-xs font-bold text-slate-600">
-                              Price per kilometre (GH₵ / km)
-                            </label>
-                            <input
-                              id="errands_per_km"
-                              type="number"
-                              step="0.10"
-                              min={0}
-                              max={9999.99}
-                              value={errandsPricingDraft.perKmRate}
-                              onChange={(e) =>
-                                setErrandsPricingDraft((d) => ({ ...d, perKmRate: e.target.value }))
-                              }
-                              className={INPUT_CLASS}
+                      {/* Category picker — the same category is edited and previewed. */}
+                      <div className="mb-4 flex flex-wrap gap-2">
+                        {ERRANDS_SERVICES.map((category) => {
+                          const saved = activeErrandsRule(errandsRules, category);
+                          return (
+                            <button
+                              key={category}
+                              type="button"
+                              aria-pressed={errandsRuleCategory === category}
+                              onClick={() => setErrandsRuleCategory(category)}
+                              className={`rounded-xl border px-3 py-2 text-xs font-bold transition ${
+                                errandsRuleCategory === category
+                                  ? 'border-brand bg-emerald-50 text-slate-900 ring-1 ring-brand'
+                                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+                              }`}
+                            >
+                              {ERRANDS_SERVICE_LABELS[category]}
+                              <span className="ml-2 font-black text-slate-400">
+                                {saved ? `v${saved.pricingVersion} · live` : 'not set'}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void handleSaveErrandsRule(errandsRuleCategory);
+                        }}
+                        className="space-y-5"
+                      >
+                        <div>
+                          <p className="mb-2 text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">
+                            Distance
+                          </p>
+                          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                            <RuleField
+                              id="errands_base_fare"
+                              label="Base fare (GH₵)"
+                              value={ruleDraft.baseFare}
+                              onChange={(value) => setRuleField({ baseFare: value })}
+                              disabled={savingErrandsRule !== null}
+                              hint="Fixed part of every trip in this category."
                             />
-                          </div>
-                          <div>
-                            <label htmlFor="errands_tax_rate" className="mb-1.5 block text-xs font-bold text-slate-600">
-                              Tax rate (%)
-                            </label>
-                            <input
-                              id="errands_tax_rate"
-                              type="number"
-                              step="0.5"
-                              min={0}
-                              max={100}
-                              value={errandsPricingDraft.taxRatePercent}
-                              onChange={(e) =>
-                                setErrandsPricingDraft((d) => ({ ...d, taxRatePercent: e.target.value }))
-                              }
-                              className={INPUT_CLASS}
+                            <RuleField
+                              id="errands_price_per_km"
+                              label="Price per kilometre (GH₵ / km)"
+                              value={ruleDraft.pricePerKm}
+                              onChange={(value) => setRuleField({ pricePerKm: value })}
+                              disabled={savingErrandsRule !== null}
+                              hint="Route distance × this rate = the distance charge."
                             />
-                          </div>
-                          <div>
-                            <label htmlFor="errands_earning_pct" className="mb-1.5 block text-xs font-bold text-slate-600">
-                              Driver earning (% of the total the customer pays)
-                            </label>
-                            <input
-                              id="errands_earning_pct"
-                              type="number"
-                              step="1"
-                              min={0}
-                              max={100}
-                              value={errandsPricingDraft.driverEarningPercentage}
-                              onChange={(e) =>
-                                setErrandsPricingDraft((d) => ({
-                                  ...d,
-                                  driverEarningPercentage: e.target.value,
-                                }))
-                              }
-                              className={INPUT_CLASS}
+                            <RuleField
+                              id="errands_min_fare"
+                              label="Minimum fare (GH₵)"
+                              value={ruleDraft.minFare}
+                              onChange={(value) => setRuleField({ minFare: value })}
+                              disabled={savingErrandsRule !== null}
+                              hint="Floor applied to the fare before tax."
                             />
-                          </div>
-                          <div>
-                            <label htmlFor="errands_surge" className="mb-1.5 block text-xs font-bold text-slate-600">
-                              Surge multiplier
-                            </label>
-                            <input
-                              id="errands_surge"
-                              type="number"
-                              step="0.1"
-                              min={0.1}
-                              max={5}
-                              value={errandsPricingDraft.surgeMultiplier}
-                              onChange={(e) =>
-                                setErrandsPricingDraft((d) => ({ ...d, surgeMultiplier: e.target.value }))
-                              }
-                              className={INPUT_CLASS}
+                            <RuleField
+                              id="errands_max_fare"
+                              label="Maximum fare (GH₵, blank = none)"
+                              value={ruleDraft.maxFare}
+                              onChange={(value) => setRuleField({ maxFare: value })}
+                              disabled={savingErrandsRule !== null}
+                              hint="Ceiling applied after the floor — never below it."
                             />
-                            <p className="mt-1 text-[10px] text-slate-400">
-                              Between 0.1 and 5 — use 1 when surge pricing is not in effect.
-                            </p>
                           </div>
                         </div>
 
-                        {errandsPricingFormError && (
-                          <p className="text-[11px] font-bold text-rose-600">
-                            {errandsPricingFormError}
+                        <div className="border-t border-slate-100 pt-4">
+                          <p className="mb-2 text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">
+                            Optional charges — off unless you switch them on
                           </p>
+                          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                            <RuleField
+                              id="errands_booking_fee"
+                              label="Booking fee (GH₵)"
+                              value={ruleDraft.bookingFee}
+                              onChange={(value) => setRuleField({ bookingFee: value })}
+                              disabled={savingErrandsRule !== null}
+                              hint="Flat service charge — never multiplied by surge."
+                            />
+                            <RuleField
+                              id="errands_time_charge"
+                              label="Time charge (GH₵ / minute)"
+                              value={ruleDraft.timeChargePerMinute}
+                              onChange={(value) => setRuleField({ timeChargePerMinute: value })}
+                              disabled={savingErrandsRule !== null || !ruleDraft.timeChargeEnabled}
+                              hint="Charged on the routed trip duration (0 when the route has no duration)."
+                            />
+                            <RuleField
+                              id="errands_waiting_charge"
+                              label="Waiting charge (GH₵)"
+                              value={ruleDraft.waitingCharge}
+                              onChange={(value) => setRuleField({ waitingCharge: value })}
+                              disabled={savingErrandsRule !== null || !ruleDraft.waitingChargeEnabled}
+                              hint="Applies once per waiting request that is accepted."
+                            />
+                            <RuleField
+                              id="errands_discount"
+                              label="Discount (GH₵)"
+                              value={ruleDraft.discountAmount}
+                              onChange={(value) => setRuleField({ discountAmount: value })}
+                              disabled={savingErrandsRule !== null}
+                              hint="Shown as its own line on every quote for this category."
+                            />
+                          </div>
+                          <div className="mt-4 grid grid-cols-1 gap-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:grid-cols-3">
+                            <Switch
+                              id="errands_time_charge_enabled"
+                              label="Time charge on"
+                              hint="Prices the time the trip takes, not just its length."
+                              checked={ruleDraft.timeChargeEnabled}
+                              disabled={savingErrandsRule !== null}
+                              onChange={(next) => setRuleField({ timeChargeEnabled: next })}
+                            />
+                            <Switch
+                              id="errands_waiting_charge_enabled"
+                              label="Waiting charge on"
+                              hint="Charged when a driver waits at the pickup."
+                              checked={ruleDraft.waitingChargeEnabled}
+                              disabled={savingErrandsRule !== null}
+                              onChange={(next) => setRuleField({ waitingChargeEnabled: next })}
+                            />
+                            <Switch
+                              id="errands_surge_enabled"
+                              label="Surge on"
+                              hint="Disclosed on the quote before the customer confirms."
+                              checked={ruleDraft.surgeEnabled}
+                              disabled={savingErrandsRule !== null}
+                              onChange={(next) =>
+                                setRuleField({
+                                  surgeEnabled: next,
+                                  surgeMultiplier: next ? ruleDraft.surgeMultiplier || '1' : '1',
+                                })
+                              }
+                            />
+                          </div>
+                        </div>
+
+                        <div className="border-t border-slate-100 pt-4">
+                          <p className="mb-2 text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">
+                            Adjustments
+                          </p>
+                          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                            <RuleField
+                              id="errands_surge"
+                              label="Surge multiplier"
+                              value={ruleDraft.surgeMultiplier}
+                              step="0.1"
+                              min={0.1}
+                              max={5}
+                              onChange={(value) => setRuleField({ surgeMultiplier: value })}
+                              disabled={savingErrandsRule !== null || !ruleDraft.surgeEnabled}
+                              hint="Between 0.1 and 5. Only applied when surge is on."
+                            />
+                            <RuleField
+                              id="errands_tax_rate"
+                              label="Tax rate (%)"
+                              value={ruleDraft.taxRatePercent}
+                              step="0.5"
+                              max={100}
+                              onChange={(value) => setRuleField({ taxRatePercent: value })}
+                              disabled={savingErrandsRule !== null}
+                              hint="Added on top of the discounted fare."
+                            />
+                            <div />
+                          </div>
+                        </div>
+
+                        <div className="border-t border-slate-100 pt-4">
+                          <p className="mb-2 text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">
+                            Earnings split — must add up to 100%
+                          </p>
+                          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                            <RuleField
+                              id="errands_driver_earning_pct"
+                              label="Driver earns (% of the total the customer pays)"
+                              value={ruleDraft.driverEarningPercent}
+                              step="1"
+                              max={100}
+                              onChange={(value) => {
+                                const earning = Number(value);
+                                setRuleField({
+                                  driverEarningPercent: value,
+                                  platformCommissionPercent:
+                                    value.trim() !== '' && Number.isFinite(earning)
+                                      ? String(Math.round((100 - earning) * 100) / 100)
+                                      : ruleDraft.platformCommissionPercent,
+                                });
+                              }}
+                              disabled={savingErrandsRule !== null}
+                            />
+                            <RuleField
+                              id="errands_platform_commission_pct"
+                              label="Platform keeps (%)"
+                              value={ruleDraft.platformCommissionPercent}
+                              step="1"
+                              max={100}
+                              onChange={(value) => {
+                                const commission = Number(value);
+                                setRuleField({
+                                  platformCommissionPercent: value,
+                                  driverEarningPercent:
+                                    value.trim() !== '' && Number.isFinite(commission)
+                                      ? String(Math.round((100 - commission) * 100) / 100)
+                                      : ruleDraft.driverEarningPercent,
+                                });
+                              }}
+                              disabled={savingErrandsRule !== null}
+                            />
+                          </div>
+                        </div>
+
+                        {ruleDraftError && (
+                          <p className="text-[11px] font-bold text-rose-600">{ruleDraftError}</p>
                         )}
 
                         <div className="flex flex-wrap items-center gap-3 pt-1">
                           <button
                             type="submit"
-                            disabled={isSavingErrandsPricing}
+                            disabled={savingErrandsRule !== null}
                             className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-6 py-2.5 text-xs font-bold text-white shadow-lg shadow-emerald-600/20 transition hover:bg-emerald-700 disabled:opacity-50"
                           >
                             <CheckCircle className="h-4 w-4" />
-                            {isSavingErrandsPricing ? 'Saving…' : 'Apply fare rules'}
+                            {savingErrandsRule === errandsRuleCategory
+                              ? 'Saving…'
+                              : `Apply ${ERRANDS_SERVICE_LABELS[errandsRuleCategory].toLowerCase()} rules`}
                           </button>
                           <span className="text-[11px] text-slate-400">
                             Applies to new quotes and bookings only ·{' '}
-                            {errandsPricing?.configured
-                              ? `pricing version ${errandsPricing.pricingVersion}`
+                            {savedRule
+                              ? `pricing version ${savedRule.pricingVersion}`
                               : 'not configured yet'}
                           </span>
                         </div>
@@ -4203,10 +4611,10 @@ export const AdminDashboard: React.FC = () => {
                     <aside className="space-y-4">
                       <div className={`${CARD} p-5`}>
                         <p className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-600">
-                          Live preview
+                          Live preview · {ERRANDS_SERVICE_LABELS[errandsRuleCategory]}
                         </p>
                         <p className="mt-1 text-sm font-black text-slate-900">
-                          A {Number.isFinite(errandsPreviewKm) && errandsPreviewKm > 0 ? errandsPreviewKm : 0} km trip
+                          A {Number.isFinite(errandsPreviewKm) && errandsPreviewKm > 0 ? errandsPreviewKm : 0} km, 15 minute trip
                         </p>
                         <div className="mt-3 flex items-center gap-2">
                           <input
@@ -4239,29 +4647,23 @@ export const AdminDashboard: React.FC = () => {
                         </div>
                         {errandsPreview ? (
                           <div className="mt-4 space-y-2.5 text-xs">
-                            <div className="flex items-center justify-between gap-3">
-                              <span className="text-slate-500">
-                                {`Trip fare · ${
-                                  Number.isFinite(errandsPreviewKm) && errandsPreviewKm > 0
-                                    ? errandsPreviewKm
-                                    : 0
-                                } km × ${formatGHS(errandsPreviewSettings.perKmRate)}/km`}
-                                {errandsPreviewSettings.surgeMultiplier !== 1
-                                  ? ` × ${errandsPreviewSettings.surgeMultiplier} surge`
-                                  : ''}
-                              </span>
-                              <span className="font-black tabular-nums text-slate-900">
-                                {formatGHS(errandsPreview.tripFare)}
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between gap-3">
-                              <span className="text-slate-500">
-                                Tax ({errandsPreviewSettings.taxRatePercent}%)
-                              </span>
-                              <span className="font-black tabular-nums text-slate-900">
-                                {formatGHS(errandsPreview.taxAmount)}
-                              </span>
-                            </div>
+                            {errandsPreviewRows.map((row) => (
+                              <div
+                                key={row.label}
+                                className="flex items-center justify-between gap-3"
+                              >
+                                <span className="text-slate-500">{row.label}</span>
+                                <span
+                                  className={`font-black tabular-nums ${
+                                    row.amount < 0 ? 'text-emerald-700' : 'text-slate-900'
+                                  }`}
+                                >
+                                  {row.amount < 0
+                                    ? `−${formatGHS(Math.abs(row.amount))}`
+                                    : formatGHS(row.amount)}
+                                </span>
+                              </div>
+                            ))}
                             <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-2.5">
                               <span className="font-bold text-slate-700">Customer pays</span>
                               <span className="text-base font-black tabular-nums text-slate-900">
@@ -4270,16 +4672,25 @@ export const AdminDashboard: React.FC = () => {
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <span className="text-slate-500">
-                                Driver earns ({errandsPreviewSettings.driverEarningPercentage}%)
+                                Driver earns ({ruleDraft.driverEarningPercent || 0}%)
                               </span>
                               <span className="font-black tabular-nums text-emerald-700">
                                 {formatGHS(errandsPreview.driverEarning)}
                               </span>
                             </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-slate-500">
+                                Platform keeps ({ruleDraft.platformCommissionPercent || 0}%)
+                              </span>
+                              <span className="font-black tabular-nums text-slate-700">
+                                {formatGHS(errandsPreview.platformRevenue)}
+                              </span>
+                            </div>
                           </div>
                         ) : (
                           <p className="mt-4 text-[11px] font-bold text-amber-600">
-                            Set a price per kilometre greater than 0 to preview these rules.
+                            Set a base fare, a price per kilometre or a minimum fare to preview
+                            these rules.
                           </p>
                         )}
                         <p className="mt-4 border-t border-slate-100 pt-3 text-[11px] leading-relaxed text-slate-400">
@@ -4289,11 +4700,13 @@ export const AdminDashboard: React.FC = () => {
                           for their real route.
                         </p>
                         <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
-                          No base fare, no booking fee, no floor and no cap — the price follows
-                          the route: distance × {formatGHS(errandsPreviewSettings.perKmRate)}/km
-                          {errandsPreviewSettings.surgeMultiplier !== 1
-                            ? ` × ${errandsPreviewSettings.surgeMultiplier} surge`
-                            : ''}.
+                          Distance charge = km × {formatGHS(Number(ruleDraft.pricePerKm) || 0)}/km
+                          {ruleDraft.surgeEnabled && Number(ruleDraft.surgeMultiplier) !== 1
+                            ? ` × ${ruleDraft.surgeMultiplier} surge`
+                            : ''}
+                          ; optional fees are added only when they are switched on, the result is
+                          clamped between the minimum and maximum, then tax and the earnings split
+                          are applied.
                         </p>
                       </div>
 
@@ -4304,18 +4717,29 @@ export const AdminDashboard: React.FC = () => {
                         <ul className="mt-3 space-y-2.5 text-[11px] leading-relaxed text-slate-500">
                           <li className="flex gap-2">
                             <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
-                            Trip fare = route distance × per-km rate × surge — there is no fixed
-                            component, so a longer trip always costs more
+                            Fare = base + (km × price per kilometre) + any fee switched on, then
+                            clamped between the minimum and the maximum
                           </li>
                           <li className="flex gap-2">
                             <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
-                            Tax is a percentage of the trip fare; the driver's share is a
-                            percentage of the customer's total
+                            Surge multiplies the trip components only — a booking fee stays flat,
+                            and surge is disclosed on the quote before the customer confirms
                           </li>
                           <li className="flex gap-2">
                             <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
-                            A rate change bumps the pricing version — existing bookings keep the
-                            rules they were priced with
+                            Tax is a percentage of the discounted fare; the driver's share is a
+                            percentage of the customer's total and the platform keeps the rest
+                          </li>
+                          <li className="flex gap-2">
+                            <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                            A save bumps the pricing version — quotes already issued keep the
+                            version they were priced with, and re-pricing at booking raises an
+                            honest error instead of silently changing the number
+                          </li>
+                          <li className="flex gap-2">
+                            <CheckCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                            All amounts are computed in whole pesewas by the database — the browser
+                            never calculates a customer's price
                           </li>
                         </ul>
                       </div>
@@ -4861,6 +5285,22 @@ export const AdminDashboard: React.FC = () => {
                                     handleSaveErrandsCapability(
                                       c.id,
                                       next,
+                                      cap?.carErrands ?? false,
+                                      cap?.carRides ?? false
+                                    )
+                                  }
+                                />
+                                <Switch
+                                  id={`cap_car_errand_${c.id}`}
+                                  label="Car errands"
+                                  hint="Bigger parcels and deliveries that need a car or van."
+                                  checked={cap?.carErrands ?? false}
+                                  disabled={isSaving}
+                                  onChange={(next) =>
+                                    handleSaveErrandsCapability(
+                                      c.id,
+                                      cap?.motorcycleErrands ?? false,
+                                      next,
                                       cap?.carRides ?? false
                                     )
                                   }
@@ -4882,6 +5322,7 @@ export const AdminDashboard: React.FC = () => {
                                     handleSaveErrandsCapability(
                                       c.id,
                                       cap?.motorcycleErrands ?? false,
+                                      cap?.carErrands ?? false,
                                       next
                                     )
                                   }

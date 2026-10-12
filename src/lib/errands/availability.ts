@@ -3,8 +3,8 @@
  *
  * Opting IN to Errands discovery is the driver's decision (through
  * `set_errands_availability`); the per-service categories (motorcycle
- * errands, passenger rides) are granted by a super admin — a driver can never
- * grant themselves a regulated service.
+ * errands, car errands, passenger rides) are granted by a super admin — a
+ * driver can never grant themselves a regulated service.
  */
 
 import { supabase, isSupabaseConfigured, cleanRpcErrorMessage } from '../supabase';
@@ -18,6 +18,7 @@ interface CapabilityRow {
   courier_id?: string;
   errands_enabled?: boolean;
   motorcycle_errands?: boolean;
+  car_errands?: boolean;
   car_rides?: boolean;
 }
 
@@ -28,6 +29,7 @@ const parseCapability = (raw: unknown): ErrandsDriverCapability | null => {
     courierId: String(row.courier_id ?? ''),
     errandsEnabled: row.errands_enabled === true,
     motorcycleErrands: row.motorcycle_errands === true,
+    carErrands: row.car_errands === true,
     carRides: row.car_rides === true,
   };
 };
@@ -70,7 +72,7 @@ export async function fetchMyErrandsCapability(): Promise<ErrandsDriverCapabilit
   if (!isSupabaseConfigured) return null;
   const { data, error } = await supabase
     .from('driver_service_capabilities')
-    .select('courier_id, errands_enabled, motorcycle_errands, car_rides')
+    .select('courier_id, errands_enabled, motorcycle_errands, car_errands, car_rides')
     .maybeSingle();
   if (error || !data) return null;
   return parseCapability(data);
