@@ -180,6 +180,14 @@ export const ErrandsPage: React.FC = () => {
   const [discoveryNonce, setDiscoveryNonce] = useState(0);
   const [selectedDriverId, setSelectedDriverId] = useState<string | null>(null);
 
+  /**
+   * While the map is fullscreen it renders as a fixed overlay, but it still
+   * lives inside this sticky wrapper — whose stacking context would otherwise
+   * paint it underneath the z-40 navbar. So the wrapper is lifted above the
+   * navbar for exactly as long as the map is fullscreen.
+   */
+  const [mapFullscreen, setMapFullscreen] = useState(false);
+
   // ── Booking actions ───────────────────────────────────────────────────────
   const [confirming, setConfirming] = useState(false);
   const [bookingError, setBookingError] = useState<string | null>(null);
@@ -675,8 +683,16 @@ export const ErrandsPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-canvas pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-12">
-      {/* Sticky map — always visible while the form scrolls underneath */}
-      <div className="sticky top-[calc(3.5rem+env(safe-area-inset-bottom))] z-30">
+      {/* Sticky map — parks flush against the navbar's bottom edge on scroll
+          (navbar = safe-area-inset-top + h-14 mobile / h-16 sm+). Lifted above
+          the navbar only while the map itself is fullscreen. */}
+      <div
+        className={
+          mapFullscreen
+            ? 'sticky top-0 z-50'
+            : 'sticky top-[calc(3.5rem+env(safe-area-inset-top))] z-30 sm:top-[calc(4rem+env(safe-area-inset-top))]'
+        }
+      >
         <ErrandsMap
           pickup={activeBooking ? activePickup : pickupPoint}
           destination={activeBooking ? activeDestination : destPoint}
@@ -684,6 +700,7 @@ export const ErrandsPage: React.FC = () => {
           selectedDriverId={activeBooking ? activeBooking.driverId : selectedDriverId}
           activeDriverPosition={activeBooking ? activeDriverPosition : null}
           serviceCategory={activeBooking ? activeBooking.serviceCategory : (service ?? 'ERRAND_MOTORCYCLE')}
+          onFullscreenChange={setMapFullscreen}
         />
       </div>
 

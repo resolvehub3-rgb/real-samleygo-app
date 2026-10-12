@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { MapPin } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Maximize2, Minimize2, MapPin } from 'lucide-react';
 
 import {
   ACCRA,
@@ -34,6 +34,12 @@ export interface ErrandsMapProps {
   activeDriverPosition: LatLng | null;
   serviceCategory: ErrandsServiceCategory;
   heightClassName?: string;
+  /**
+   * Reported when the map enters/leaves fullscreen. The page uses it to lift
+   * its sticky wrapper above the navbar while fullscreen — otherwise the
+   * wrapper's stacking context would paint the overlay underneath it.
+   */
+  onFullscreenChange?: (isFullscreen: boolean) => void;
 }
 
 interface DriverMarkerEntry {
@@ -84,6 +90,7 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
   activeDriverPosition,
   serviceCategory,
   heightClassName = 'h-[45dvh]',
+  onFullscreenChange,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
@@ -102,6 +109,57 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
 
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  /** Nudge the map so it re-measures its container after a size/parent change. */
+  const triggerResize = useCallback((delayMs = 140) => {
+    if (resizeTimerRef.current !== null) window.clearTimeout(resizeTimerRef.current);
+    resizeTimerRef.current = window.setTimeout(() => {
+      resizeTimerRef.current = null;
+      const map = mapRef.current;
+      if (map) google.maps.event.trigger(map, 'resize');
+    }, delayMs);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    setIsFullscreen((prev) => {
+      const next = !prev;
+      // The canvas swaps between the inline block and a fixed overlay, so the
+      // map must re-measure once the new box has painted.
+      triggerResize(next ? 260 : 180);
+      return next;
+    });
+  }, [triggerResize]);
+
+  // While fullscreen, Escape exits and the page behind must not scroll. The
+  // scroll position is pinned and the scrollbar width compensated, so locking
+  // the body neither jumps the page to the top nor shifts it sideways.
+  useEffect(() => {
+    onFullscreenChange?.(isFullscreen);
+    if (!isFullscreen) return undefined;
+
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsFullscreen(false);
+    };
+
+    const scrollY = window.scrollY;
+    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+    const body = document.body;
+    const previousOverflow = body.style.overflow;
+    const previousPaddingRight = body.style.paddingRight;
+    body.style.overflow = 'hidden';
+    if (scrollbarWidth > 0) body.style.paddingRight = `${scrollbarWidth}px`;
+    window.addEventListener('keydown', onKey);
+
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      body.style.overflow = previousOverflow;
+      body.style.paddingRight = previousPaddingRight;
+      // Re-pin the scroll spot the overlay was opened from.
+      window.scrollTo({ top: scrollY, left: 0, behavior: 'instant' as ScrollBehavior });
+      triggerResize(180);
+    };
+  }, [isFullscreen, triggerResize, onFullscreenChange]);
 
   // ── Map lifecycle ─────────────────────────────────────────────────────────
 
@@ -371,9 +429,32 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
 
   return (
     <div
-      className={`relative overflow-hidden rounded-b-2xl border border-slate-200 bg-slate-100 ${heightClassName}`}
+      className={
+        isFullscreen
+          ? 'fixed inset-0 z-[60] h-dvh w-full bg-slate-100'
+          : `relative overflow-hidden rounded-b-2xl border border-slate-200 bg-slate-100 ${heightClassName}`
+      }
     >
       <div ref={containerRef} className="absolute inset-0" />
+
+      {/* Real fullscreen toggle: the box becomes a fixed overlay and the map is
+          re-measured, so every marker/polyline keeps its place. Top-LEFT so it
+          never collides with Google's own zoom control on the right. */}
+      {mapReady && !mapError && (
+        <button
+          type="button"
+          onClick={toggleFullscreen}
+          aria-label={isFullscreen ? 'Exit fullscreen map' : 'View map fullscreen'}
+          aria-pressed={isFullscreen}
+          className="absolute left-3 top-3 z-10 flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white/95 text-slate-700 shadow-card backdrop-blur transition hover:bg-white active:scale-95"
+        >
+          {isFullscreen ? (
+            <Minimize2 className="h-4 w-4" aria-hidden="true" />
+          ) : (
+            <Maximize2 className="h-4 w-4" aria-hidden="true" />
+          )}
+        </button>
+      )}
 
       {mapError && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-slate-100 px-6 text-center">

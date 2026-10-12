@@ -536,8 +536,12 @@ test('the FAB sits bottom-right above the nav, safe-area aware, and links to /er
 test('the Errands map stays visible: sticky under the navbar at ~45dvh', () => {
   const page = read('src', 'pages', 'customer', 'ErrandsPage.tsx');
   assert.ok(
-    page.includes('sticky top-[calc(3.5rem+env(safe-area-inset-bottom))]'),
-    'the map must be sticky under the h-14 navbar'
+    page.includes('sticky top-[calc(3.5rem+env(safe-area-inset-top))]'),
+    'the map must stick flush under the h-14 navbar (safe-area-inset-TOP drives its height)'
+  );
+  assert.ok(
+    page.includes('sm:top-[calc(4rem+env(safe-area-inset-top))]'),
+    'on sm+ the navbar is h-16, so the sticky offset must grow with it'
   );
   const map = read('src', 'components', 'errands', 'ErrandsMap.tsx');
   assert.ok(
@@ -547,6 +551,24 @@ test('the Errands map stays visible: sticky under the navbar at ~45dvh', () => {
   assert.ok(
     page.includes('pb-[calc(5rem+env(safe-area-inset-bottom))]'),
     'the page must clear the bottom nav with safe-area padding'
+  );
+});
+
+test('the map has a real, functional fullscreen toggle', () => {
+  const map = read('src', 'components', 'errands', 'ErrandsMap.tsx');
+  assert.ok(/onClick=\{toggleFullscreen\}/.test(map), 'the fullscreen button must actually toggle');
+  assert.ok(/'fixed inset-0/.test(map), 'fullscreen must expand the map into a viewport overlay');
+  assert.ok(map.includes("'Escape'"), 'Escape must exit the fullscreen map');
+  assert.ok(map.includes("body.style.overflow = 'hidden'"), 'page behind must not scroll');
+  assert.ok(
+    map.includes('google.maps.event.trigger(map'),
+    'the map must be re-measured after the box size changes'
+  );
+  assert.ok(map.includes('Maximize2') && map.includes('Minimize2'), 'expand/contract icons');
+  const page = read('src', 'pages', 'customer', 'ErrandsPage.tsx');
+  assert.ok(
+    page.includes('onFullscreenChange={setMapFullscreen}'),
+    'the page must be told when fullscreen starts so its sticky wrapper can clear the navbar'
   );
 });
 
