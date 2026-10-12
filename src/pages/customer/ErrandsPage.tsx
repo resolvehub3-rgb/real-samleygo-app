@@ -5,6 +5,7 @@ import {
   Bike,
   Car,
   Check,
+  ChevronRight,
   Clock,
   Loader2,
   MapPin,
@@ -12,6 +13,7 @@ import {
   RefreshCw,
   Star,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
@@ -85,18 +87,6 @@ const PIN_VISIBLE_STATUSES = [
   'DRIVER_ARRIVING',
   'DRIVER_ARRIVED',
 ] as const;
-
-/** "3 min ago" style helper for the history list. */
-const timeAgo = (iso: string): string => {
-  const time = new Date(iso).getTime();
-  if (!Number.isFinite(time)) return '';
-  const mins = Math.floor((Date.now() - time) / 60000);
-  if (mins < 1) return 'Just now';
-  if (mins < 60) return `${mins} min ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return new Date(time).toLocaleDateString([], { month: 'short', day: 'numeric' });
-};
 
 const samePoint = (a: LatLng | null, b: LatLng | null): boolean =>
   (!a && !b) || (!!a && !!b && a.lat === b.lat && a.lng === b.lng);
@@ -1259,39 +1249,29 @@ export const ErrandsPage: React.FC = () => {
           </>
         )}
 
-        {/* ------------------------------ History ------------------------------ */}
-        {history.length > 0 ? (
+        {/* Past trips now live in Orders — this page only books and tracks
+            the trip in progress. */}
+        {history.length > 0 && (
           <section className="mt-8">
-            <h2 className="mb-2 text-sm font-bold tracking-tight text-slate-900">
-              Your past errands
-            </h2>
-            <ul className="space-y-2">
-              {history.map((booking) => (
-                <li
-                  key={booking.id}
-                  className="rounded-xl border border-slate-200 bg-white p-3 shadow-card"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="min-w-0 truncate text-xs font-bold text-slate-900">
-                      {ERRANDS_STATUS_LABELS[booking.status]}
-                    </span>
-                    <span className="flex-shrink-0 text-xs font-bold text-slate-900">
-                      {formatGHS(booking.finalFare ?? booking.estimatedFare)}
-                    </span>
-                  </div>
-                  <p className="mt-0.5 truncate text-[11px] text-slate-500">
-                    {booking.pickupArea ?? 'Pickup'} → {booking.destinationArea ?? 'Destination'}
-                  </p>
-                  <p className="mt-0.5 text-[10px] text-slate-400">
-                    {ERRANDS_SERVICE_LABELS[booking.serviceCategory]} · #{booking.bookingNumber}
-                    {timeAgo(booking.createdAt) && ` · ${timeAgo(booking.createdAt)}`}
-                  </p>
-                </li>
-              ))}
-            </ul>
+            <Link
+              to="/orders"
+              className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3 shadow-card transition hover:border-emerald-500/50 hover:shadow-md"
+            >
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-slate-900">Your past errands</p>
+                <p className="mt-0.5 truncate text-[11px] text-slate-500">
+                  {history.length === 1
+                    ? '1 past trip'
+                    : `${history.length} past trips`}{' '}
+                  — kept in your Orders history
+                </p>
+              </div>
+              <ChevronRight className="h-4 w-4 flex-shrink-0 text-slate-400" aria-hidden="true" />
+            </Link>
           </section>
-        ) : (
-          bookingsLoaded &&
+        )}
+        {bookingsLoaded &&
+          history.length === 0 &&
           !activeBooking &&
           !configLoading && (
             <div className="mt-6">
@@ -1301,8 +1281,7 @@ export const ErrandsPage: React.FC = () => {
                 description="Your errands and rides will appear here once you book your first trip."
               />
             </div>
-          )
-        )}
+          )}
       </main>
     </div>
   );

@@ -29,6 +29,8 @@ export type ErrandsCreateResult =
     }
   | { ok: false; error: string };
 
+export type ErrandsDeleteResult = { ok: true } | { ok: false; error: string };
+
 interface BookingRow {
   id?: string;
   booking_number?: string;
@@ -228,6 +230,28 @@ export async function setErrandsBookingStatus(input: {
     return { ok: false, error: 'The booking could not be updated. Please try again.' };
   }
   return { ok: true, booking };
+}
+
+/**
+ * Remove a FINISHED trip from this customer's Orders history (soft delete).
+ * The database re-checks that the caller owns the row and that the trip is
+ * terminal, then hides it from THIS customer only — the driver, support and
+ * the Super Admin keep the record, and an in-flight trip can never vanish.
+ * The server's own sentence is surfaced verbatim on refusal.
+ */
+export async function deleteCustomerErrandsBooking(
+  bookingId: string
+): Promise<ErrandsDeleteResult> {
+  if (!isSupabaseConfigured) {
+    return { ok: false, error: 'Connect Supabase to manage your trip history.' };
+  }
+  if (!bookingId) return { ok: false, error: 'Missing booking.' };
+
+  const { error } = await supabase.rpc('delete_customer_errands_booking', {
+    p_booking_id: bookingId,
+  });
+  if (error) return { ok: false, error: actionError(error, 'Could not remove this trip.') };
+  return { ok: true };
 }
 
 /**

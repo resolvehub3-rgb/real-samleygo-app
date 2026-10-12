@@ -1,10 +1,31 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ShoppingBag, ChevronRight, Clock, MapPin, AlertCircle, Navigation } from 'lucide-react';
+import {
+  ShoppingBag,
+  ChevronRight,
+  Clock,
+  MapPin,
+  AlertCircle,
+  Navigation,
+  Bike,
+  Loader2,
+  Trash2,
+} from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { Order, Profile } from '../../types/database';
 import { useAuth } from '../../context/AuthContext';
 import { formatGHS } from '../../lib/pricing';
+import { deleteCustomerOrder } from '../../lib/orders';
+import {
+  deleteCustomerErrandsBooking,
+  fetchMyErrandsBookings,
+} from '../../lib/errands/booking';
+import {
+  ERRANDS_SERVICE_LABELS,
+  ERRANDS_STATUS_LABELS,
+  TERMINAL_ERRANDS_STATUSES,
+  type ErrandsBooking,
+} from '../../lib/errands/types';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { ReorderButton } from '../../components/common/ReorderButton';
 import { TestRingBellButton } from '../../components/common/TestRingBellButton';
@@ -16,6 +37,15 @@ export const OrdersPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [mapOrder, setMapOrder] = useState<Order | null>(null);
   const [mapCourierPos, setMapCourierPos] = useState<{ lat: number; lng: number } | null>(null);
+  /** Past Errands & rides — the history that now lives on Orders. */
+  const [errands, setErrands] = useState<ErrandsBooking[]>([]);
+  /** The row currently armed for removal — two steps: tap the bin, then confirm. */
+  const [deleteTarget, setDeleteTarget] = useState<
+    { kind: 'order' | 'errand'; id: string } | null
+  >(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  /** The database's own refusal sentence ("only finished orders…"), shown inline. */
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   // Last status we alerted about per order, so a chime fires exactly once per
   // transition. payload.old is unreliable (REPLICA IDENTITY default only ships
   // the primary key), so the realtime handler compares against this instead.
@@ -172,8 +202,56 @@ export const OrdersPage: React.FC = () => {
     }
   };
 
+  /**
+   * Past errands & rides (terminal trips only) — stored alongside the food
+   * orders, scoped by RLS: rows the customer removed no longer come back.
+   */
+  const fetchErrands = async () => {
+    if (!user || !isSupabaseConfigured) return;
+    const rows = await fetchMyErrandsBookings(20);
+    setErrands(rows.filter((booking) => TERMINAL_ERRANDS_STATUSES.includes(booking.status)));
+  };
+
+  /** Arm (or un-arm) the two-step removal for one row. */
+  const armDelete = (kind: 'order' | 'errand', id: string): void => {
+    setDeleteError(null);
+    setDeleteTarget((prev) => (prev && prev.kind === kind && prev.id === id ? null : { kind, id }));
+  };
+
+  const cancelDelete = (): void => {
+    setDeleteTarget(null);
+    setDeleteError(null);
+  };
+
+  /**
+   * Confirm the removal. The server re-checks ownership and terminal status
+   * itself — on refusal its sentence is shown and the row stays put.
+   */
+  const confirmDelete = async (): Promise<void> => {
+    if (!deleteTarget || isDeleting) return;
+    const target = deleteTarget;
+    setIsDeleting(true);
+    setDeleteError(null);
+    const result =
+      target.kind === 'order'
+        ? await deleteCustomerOrder(target.id)
+        : await deleteCustomerErrandsBooking(target.id);
+    setIsDeleting(false);
+    if (!result.ok) {
+      setDeleteError(result.error);
+      return;
+    }
+    if (target.kind === 'order') {
+      setOrders((prev) => prev.filter((order) => order.id !== target.id));
+    } else {
+      setErrands((prev) => prev.filter((booking) => booking.id !== target.id));
+    }
+    setDeleteTarget(null);
+  };
+
   useEffect(() => {
     fetchOrders();
+    fetchErrands();
 
     // Realtime subscription to customer's orders
     if (user && isSupabaseConfigured) {
@@ -358,33 +436,210 @@ export const OrdersPage: React.FC = () => {
                     </div>
 
                     <div className="flex items-center gap-2 flex-shrink-0">
-                      {!isActive && (
-                        <ReorderButton order={order} className="px-2.5 py-1 text-[11px]" />
+                      {deleteTarget?.kind === 'order' && deleteTarget.id === order.id ? (
+                        /* Two-step confirm — the database refuses anything unfinished. */
+                        <span className="flex flex-wrap items-center justify-end gap-2">
+                          <span className="text-[11px] font-bold text-rose-600">
+                            Remove from list?
+                          </span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void confirmDelete();
+                            }}
+                            disabled={isDeleting}
+                            className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 disabled:opacity-60 active:scale-95 text-white font-bold text-[11px] flex items-center gap-1 shadow-xs transition"
+                          >
+                            {isDeleting ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Trash2 className="w-3 h-3" />
+                            )}
+                            <span>{isDeleting ? 'Removing…' : 'Delete'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              cancelDelete();
+                            }}
+                            disabled={isDeleting}
+                            className="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 font-bold text-[11px] hover:bg-slate-50 active:scale-95 transition"
+                          >
+                            Keep
+                          </button>
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-2">
+                          {!isActive && (
+                            <ReorderButton order={order} className="px-2.5 py-1 text-[11px]" />
+                          )}
+                          {isActive && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setMapOrder(order);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-[11px] flex items-center gap-1 shadow-xs transition"
+                            >
+                              <Navigation className="w-3 h-3" />
+                              <span>Live Map</span>
+                            </button>
+                          )}
+                          {!isActive && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                armDelete('order', order.id);
+                              }}
+                              aria-label={`Remove order ${order.order_number} from my list`}
+                              title="Remove from my list"
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 active:scale-95 transition"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          <div className="flex items-center gap-1 text-emerald-700 font-bold">
+                            <span>{isActive ? 'Track Live' : 'View Details'}</span>
+                            <ChevronRight className="w-4 h-4" />
+                          </div>
+                        </span>
                       )}
-                      {isActive && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setMapOrder(order);
-                          }}
-                          className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-[11px] flex items-center gap-1 shadow-xs transition"
-                        >
-                          <Navigation className="w-3 h-3" />
-                          <span>Live Map</span>
-                        </button>
-                      )}
-                      <div className="flex items-center gap-1 text-emerald-700 font-bold">
-                        <span>{isActive ? 'Track Live' : 'View Details'}</span>
-                        <ChevronRight className="w-4 h-4" />
-                      </div>
                     </div>
                   </div>
+
+                  {deleteError &&
+                    deleteTarget?.kind === 'order' &&
+                    deleteTarget.id === order.id && (
+                      <p className="mt-2 text-[11px] font-bold text-rose-600">{deleteError}</p>
+                    )}
                 </Link>
               );
             })}
           </div>
+        )}
+
+        {/* ------------------ Errands & Rides history ------------------------ */}
+        {errands.length > 0 && (
+          <section className="mt-8">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="flex items-center gap-1.5 text-sm font-extrabold text-slate-900">
+                <Bike className="w-4 h-4 text-brand" aria-hidden="true" />
+                Errands &amp; Rides
+              </h2>
+              <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-xl">
+                {errands.length} {errands.length === 1 ? 'Trip' : 'Trips'}
+              </span>
+            </div>
+            <ul className="space-y-4">
+              {errands.map((booking) => {
+                const armed =
+                  deleteTarget?.kind === 'errand' && deleteTarget.id === booking.id;
+                return (
+                  <li
+                    key={booking.id}
+                    className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-xs"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-extrabold text-sm text-slate-900">
+                            #{booking.bookingNumber}
+                          </span>
+                          <span
+                            className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md ${
+                              booking.status === 'COMPLETED'
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-slate-200 text-slate-700'
+                            }`}
+                          >
+                            {ERRANDS_STATUS_LABELS[booking.status]}
+                          </span>
+                        </div>
+                        <h4 className="font-bold text-sm text-slate-800 mt-1">
+                          {ERRANDS_SERVICE_LABELS[booking.serviceCategory]}
+                        </h4>
+                      </div>
+
+                      <div className="text-left sm:text-right">
+                        <span className="font-bold text-sm text-emerald-700 block">
+                          {formatGHS(booking.finalFare ?? booking.estimatedFare)}
+                        </span>
+                        <span className="text-[11px] text-slate-400">
+                          {new Date(booking.createdAt).toLocaleDateString([], {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 flex items-center justify-between text-xs text-slate-500 flex-wrap gap-2">
+                      <div className="flex items-center gap-1.5 truncate max-w-xs sm:max-w-md">
+                        <MapPin className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+                        <span className="truncate">
+                          {booking.pickupArea ?? 'Pickup'} → {booking.destinationArea ?? 'Destination'}
+                        </span>
+                      </div>
+
+                      {armed ? (
+                        /* Two-step confirm — only terminal trips are ever offered. */
+                        <span className="flex flex-wrap items-center justify-end gap-2 flex-shrink-0">
+                          <span className="text-[11px] font-bold text-rose-600">
+                            Remove from list?
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void confirmDelete()}
+                            disabled={isDeleting}
+                            className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 disabled:opacity-60 active:scale-95 text-white font-bold text-[11px] flex items-center gap-1 shadow-xs transition"
+                          >
+                            {isDeleting ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Trash2 className="w-3 h-3" />
+                            )}
+                            <span>{isDeleting ? 'Removing…' : 'Delete'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={cancelDelete}
+                            disabled={isDeleting}
+                            className="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 font-bold text-[11px] hover:bg-slate-50 active:scale-95 transition"
+                          >
+                            Keep
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => armDelete('errand', booking.id)}
+                          aria-label={`Remove trip ${booking.bookingNumber} from my list`}
+                          title="Remove from my list"
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 active:scale-95 transition flex-shrink-0"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    {armed && deleteError && (
+                      <p className="mt-2 text-[11px] font-bold text-rose-600">{deleteError}</p>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
         )}
 
         {/* Live Delivery Map Modal */}

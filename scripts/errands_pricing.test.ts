@@ -19,6 +19,10 @@
  *      FAB sits bottom-right above the nav, the map stays visible (~45dvh,
  *      sticky under the navbar), no Leaflet, and no fabricated coordinates
  *      or placeholder drivers anywhere in the module.
+ *   6. Order history — past errands are stored on the Orders screen (not on
+ *      /errands), removal is customer-facing but SERVER-guarded (soft delete,
+ *      terminal rows only, owner-only, no DELETE policy ever), and the FAB
+ *      is animated (entrance + attention halo) with reduced motion honoured.
  *
  * IMPORTANT: the database is still the authority. These tests lock down the
  * client helpers that render its answers and the invariants that keep money,
@@ -711,6 +715,126 @@ test('the admin tab saves pricing through the RPC, never a table write', () => {
   assert.ok(
     /rpc\('set_driver_service_capabilities'/.test(admin),
     'service capabilities must be granted through the admin RPC'
+  );
+});
+
+test('the FAB is animated — spring entrance, attention halo, hover/press — and reduced motion wins', () => {
+  const fab = read('src', 'components', 'customer', 'ErrandsFab.tsx');
+  const css = read('src', 'index.css');
+
+  assert.ok(fab.includes('animate-fab-in'), 'the FAB lands with a springy entrance');
+  assert.ok(fab.includes('fab-ring'), 'a slow attention halo breathes behind the button');
+  assert.ok(
+    fab.includes('group-hover:scale-110') && fab.includes('group-active:scale-95'),
+    'hover lifts the button, press squashes it'
+  );
+  assert.ok(
+    css.includes('--animate-fab-in') && css.includes('@keyframes fab-in'),
+    'the entrance keyframes live in the theme'
+  );
+  assert.ok(css.includes('@keyframes fab-ring'), 'the halo keyframes exist');
+  assert.ok(
+    /prefers-reduced-motion[\s\S]*?\.animate-fab-in/.test(css),
+    'the entrance animation is disabled under prefers-reduced-motion'
+  );
+  assert.ok(
+    /prefers-reduced-motion[\s\S]*?\.fab-ring/.test(css),
+    'the halo is disabled (and hidden) under prefers-reduced-motion'
+  );
+});
+
+test('past errands live on Orders now — the Errands page keeps only a pointer', () => {
+  const errandsPage = read('src', 'pages', 'customer', 'ErrandsPage.tsx');
+  const ordersPage = read('src', 'pages', 'customer', 'OrdersPage.tsx');
+
+  assert.ok(
+    !errandsPage.includes('history.map'),
+    'the past-errands list no longer renders on /errands'
+  );
+  assert.ok(
+    !errandsPage.includes('timeAgo('),
+    'the history-only helper left the Errands page with the list'
+  );
+  assert.ok(
+    /to="\/orders"/.test(errandsPage),
+    'the Errands page points to Orders for past trips'
+  );
+  assert.ok(
+    ordersPage.includes('fetchMyErrandsBookings'),
+    'Orders fetches the customer’s errands'
+  );
+  assert.ok(
+    /Errands (&amp;|&) Rides/.test(ordersPage),
+    'the Orders screen hosts the Errands & Rides history'
+  );
+  assert.ok(
+    ordersPage.includes('TERMINAL_ERRANDS_STATUSES'),
+    'only terminal trips are listed (an active trip stays on /errands)'
+  );
+  assert.ok(
+    ordersPage.includes('ERRANDS_STATUS_LABELS') && ordersPage.includes('ERRANDS_SERVICE_LABELS'),
+    'errand rows show their real status and service, never invented copy'
+  );
+});
+
+test('the customer can remove finished orders — guarded by the server, never a hard delete', () => {
+  const historyMigration = strip(
+    read('supabase', 'migrations', '20261012_order_history_deletion.sql')
+  );
+  const ordersPage = read('src', 'pages', 'customer', 'OrdersPage.tsx');
+  const ordersLib = read('src', 'lib', 'orders.ts');
+  const bookingLib = read('src', 'lib', 'errands', 'booking.ts');
+
+  // Both RPCs exist, SECURITY DEFINER, owner-guarded, terminal-only.
+  assert.ok(
+    historyMigration.includes('delete_customer_order'),
+    'the food removal RPC exists'
+  );
+  assert.ok(
+    historyMigration.includes('delete_customer_errands_booking'),
+    'the errands removal RPC exists'
+  );
+  assert.ok(
+    historyMigration.includes('security definer'),
+    'both RPCs are SECURITY DEFINER (no write policy is granted)'
+  );
+  assert.ok(
+    /customer_id = auth\.uid\(\)/.test(historyMigration),
+    'only the owner can remove their own row'
+  );
+  assert.ok(
+    historyMigration.includes("'DELIVERED', 'COMPLETED', 'CANCELLED', 'REJECTED', 'FAILED'"),
+    'food: only finished or cancelled orders are removable'
+  );
+  assert.ok(
+    historyMigration.includes("'COMPLETED', 'CANCELLED', 'EXPIRED', 'FAILED'"),
+    'errands: only terminal trips are removable — never an in-flight one'
+  );
+  assert.ok(
+    !/for\s+delete/i.test(historyMigration) && !/for\s+insert/i.test(historyMigration),
+    'no write policy is added — the money tables stay behind RPCs only'
+  );
+  assert.ok(
+    historyMigration.includes('customer_deleted_at is null'),
+    'RLS hides the row from that customer afterwards'
+  );
+  assert.ok(
+    ordersLib.includes("rpc('delete_customer_order'"),
+    'the food path calls the guarded RPC'
+  );
+  assert.ok(
+    bookingLib.includes("rpc('delete_customer_errands_booking'"),
+    'the errands path calls the guarded RPC'
+  );
+  assert.ok(
+    ordersPage.includes('deleteCustomerOrder(') &&
+      ordersPage.includes('deleteCustomerErrandsBooking('),
+    'both removal actions are wired into the Orders screen'
+  );
+  assert.ok(
+    /aria-label=\{`Remove order/.test(ordersPage) &&
+      /aria-label=\{`Remove trip/.test(ordersPage),
+    'both remove buttons carry accessible labels'
   );
 });
 
