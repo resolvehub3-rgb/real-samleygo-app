@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useSearchParams } from 'react-router-dom';
 import {
   Star,
   MapPin,
@@ -18,10 +18,28 @@ import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import { Restaurant, MenuItem, RestaurantCategory } from '../../types/database';
 import { useCart } from '../../context/CartContext';
 import { formatGHS } from '../../lib/pricing';
+import { MealExtrasPicker } from '../../components/customer/MealExtrasPicker';
+import {
+  AddonSelection,
+  cartLineKey,
+  extrasToSelection,
+  lineTotal,
+  mealAddonView,
+  selectionToExtras,
+  validateAddonSelection,
+} from '../../lib/addons';
+import {
+  EMPTY_ADDON_CATALOG,
+  RestaurantAddonCatalog,
+  loadRestaurantAddonCatalog,
+} from '../../lib/addonCatalog';
 
 export const RestaurantDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
-  const { addItem, totalCount, subtotal } = useCart();
+  const { addItem, updateLine, totalCount, subtotal, items: cartItems } = useCart();
+  // "/restaurant/x?item=<dish>&line=<key>" is how the cart says
+  // "open this dish with the extras it already has".
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
   const [categories, setCategories] = useState<RestaurantCategory[]>([]);
@@ -35,11 +53,28 @@ export const RestaurantDetailPage: React.FC = () => {
   const [addedToast, setAddedToast] = useState(false);
   const [menuLiveToast, setMenuLiveToast] = useState<string | null>(null);
 
+  // ── Add extras ────────────────────────────────────────────────────────
+  const [catalog, setCatalog] = useState<RestaurantAddonCatalog>(EMPTY_ADDON_CATALOG);
+  const [selection, setSelection] = useState<AddonSelection>({});
+  const [selectionError, setSelectionError] = useState('');
+  /** The cart line being edited, when the customer came here from the cart. */
+  const [editingLineKey, setEditingLineKey] = useState<string | null>(null);
+
   useEffect(() => {
-    async function loadRestaurant() {
+    let disposed = false;
+    let menuChannel: ReturnType<typeof supabase.channel> | null = null;
+    let addonChannel: ReturnType<typeof supabase.channel> | null = null;
+
+    /**
+     * Loads the dishes, the categories and the add-on catalogue.
+     * Returns whether the database can serve add-ons at all (i.e. migration
+     * 20261015 has been applied) so the add-on realtime listener is only
+     * created when there is a table to listen to.
+     */
+    const loadRestaurant = async (): Promise<boolean> => {
       if (!id || !isSupabaseConfigured) {
         setIsLoading(false);
-        return;
+        return false;
       }
 
       setIsLoading(true);
@@ -54,7 +89,7 @@ export const RestaurantDetailPage: React.FC = () => {
 
         if (restError || !restData) {
           setIsLoading(false);
-          return;
+          return false;
         }
 
         setRestaurant(restData as Restaurant);
@@ -75,53 +110,166 @@ export const RestaurantDetailPage: React.FC = () => {
           .eq('restaurant_id', id)
           .order('name', { ascending: true });
 
-        if (itemsData) setMenuItems(itemsData as MenuItem[]);
+        const items = (itemsData ?? []) as MenuItem[];
+        setMenuItems(items);
+
+        // Add-ons are optional. A kitchen that configured none — or a database
+        // that has not run migration 20261015 — shows a plain menu, and this
+        // never throws and never delays the dishes it already has.
+        const addonCatalog = await loadRestaurantAddonCatalog(
+          id,
+          items.map((item) => item.id)
+        );
+        setCatalog(addonCatalog);
+        return addonCatalog.supported;
       } catch {
-        // Handled
+        return false;
       } finally {
         setIsLoading(false);
       }
-    }
+    };
 
-    loadRestaurant();
+    (async () => {
+      const addonsSupported = await loadRestaurant();
+      if (disposed) return;
 
-    // Subscribe to menu changes in real-time
-    if (isSupabaseConfigured && id) {
-      const channel = supabase
-        .channel(`restaurant-menu-${id}`)
-        .on(
-          'postgres_changes',
-          {
-            event: '*',
-            schema: 'public',
-            table: 'menu_items',
-            filter: `restaurant_id=eq.${id}`,
-          },
-          (payload) => {
-            loadRestaurant();
-            if (payload.eventType === 'INSERT') {
-              setMenuLiveToast('A new dish was just added to this menu.');
-              setTimeout(() => setMenuLiveToast(null), 4000);
-            } else if (payload.eventType === 'UPDATE') {
-              setMenuLiveToast('A dish price or availability just changed.');
-              setTimeout(() => setMenuLiveToast(null), 3000);
+      // Subscribe to menu changes in real-time
+      if (isSupabaseConfigured && id) {
+        menuChannel = supabase
+          .channel(`restaurant-menu-${id}`)
+          .on(
+            'postgres_changes',
+            {
+              event: '*',
+              schema: 'public',
+              table: 'menu_items',
+              filter: `restaurant_id=eq.${id}`,
+            },
+            (payload) => {
+              loadRestaurant();
+              if (payload.eventType === 'INSERT') {
+                setMenuLiveToast('A new dish was just added to this menu.');
+                setTimeout(() => setMenuLiveToast(null), 4000);
+              } else if (payload.eventType === 'UPDATE') {
+                setMenuLiveToast('A dish price or availability just changed.');
+                setTimeout(() => setMenuLiveToast(null), 3000);
+              }
             }
-          }
-        )
-        .subscribe();
+          )
+          .subscribe();
 
-      return () => {
-        supabase.removeChannel(channel);
-      };
-    }
+        // An extra that sells out or changes price must reach an open menu too.
+        if (addonsSupported) {
+          addonChannel = supabase
+            .channel(`restaurant-addons-${id}`)
+            .on(
+              'postgres_changes',
+              {
+                event: '*',
+                schema: 'public',
+                table: 'menu_addons',
+                filter: `restaurant_id=eq.${id}`,
+              },
+              () => {
+                loadRestaurant();
+              }
+            )
+            .subscribe();
+        }
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      if (menuChannel) supabase.removeChannel(menuChannel);
+      if (addonChannel) supabase.removeChannel(addonChannel);
+    };
   }, [id]);
+
+  // ── Opening / closing the dish sheet ──────────────────────────────────
+  const resetExtras = () => {
+    setSelection({});
+    setSelectionError('');
+    setEditingLineKey(null);
+  };
+
+  /** A plain tap on a dish: nothing selected yet, nothing carried over. */
+  const openItem = (item: MenuItem) => {
+    setSelectedItem(item);
+    setItemQuantity(1);
+    setItemNotes('');
+    resetExtras();
+  };
+
+  /**
+   * Every close path goes through here so the cart's deep link
+   * (`?item=…&line=…`) is cleared too — otherwise the sheet would pop straight
+   * back open the next time the menu refetched.
+   */
+  const closeItemModal = () => {
+    setSelectedItem(null);
+    resetExtras();
+    if (searchParams.has('item') || searchParams.has('line')) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('item');
+      next.delete('line');
+      setSearchParams(next, { replace: true });
+    }
+  };
+
+  // The cart's "Edit extras" link: reopen this dish carrying the quantities
+  // and notes the line already has, so the customer edits instead of guessing.
+  useEffect(() => {
+    const itemId = searchParams.get('item');
+    if (!itemId || menuItems.length === 0 || selectedItem) return;
+    const target = menuItems.find((item) => item.id === itemId);
+    if (!target || !target.is_available) return;
+
+    const lineKey = searchParams.get('line');
+    const line = lineKey
+      ? cartItems.find(
+          (item) => cartLineKey(item) === lineKey && item.menuItem.id === itemId
+        )
+      : undefined;
+
+    setSelectedItem(target);
+    setItemQuantity(line?.quantity ?? 1);
+    setItemNotes(line?.notes ?? '');
+    setSelection(line ? extrasToSelection(line.extras) : {});
+    setSelectionError('');
+    setEditingLineKey(line && lineKey ? lineKey : null);
+    // Deliberately keyed on the link and the menu: the cart is only read once,
+    // when the link is opened.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, menuItems]);
 
   const handleAddToCart = () => {
     if (!selectedItem || !restaurant) return;
-    for (let i = 0; i < itemQuantity; i++) {
-      addItem(selectedItem, restaurant, itemNotes);
+
+    const view = mealAddonView(selectedItem, catalog);
+
+    // The restaurant's rules first: required groups, minimums, maximums,
+    // sold-out extras and per-extra quantity caps.
+    const problem = validateAddonSelection(selection, view.groups, view.mealAddons);
+    if (problem) {
+      setSelectionError(problem);
+      return;
     }
-    setSelectedItem(null);
+    setSelectionError('');
+
+    const extras = selectionToExtras(selection, view.mealAddons);
+
+    if (editingLineKey) {
+      // Came here from the cart → replace that line, keep it as one line.
+      updateLine(editingLineKey, { quantity: itemQuantity, notes: itemNotes, extras });
+    } else {
+      // The same dish with a different combination becomes its own line.
+      for (let i = 0; i < itemQuantity; i++) {
+        addItem(selectedItem, restaurant, itemNotes, extras);
+      }
+    }
+
+    closeItemModal();
     setItemQuantity(1);
     setItemNotes('');
     setAddedToast(true);
@@ -160,6 +308,13 @@ export const RestaurantDetailPage: React.FC = () => {
 
   // Group items by category
   const uncategorizedItems = menuItems.filter((i) => !i.category_id);
+
+  // Everything the open sheet needs to show, price and validate the extras.
+  const activeView = selectedItem ? mealAddonView(selectedItem, catalog) : null;
+  const activeExtras = activeView ? selectionToExtras(selection, activeView.mealAddons) : [];
+  const activeTotal = selectedItem
+    ? lineTotal({ menuItem: selectedItem, quantity: itemQuantity, extras: activeExtras })
+    : 0;
 
   return (
     <div className="min-h-screen pb-[calc(7.5rem+env(safe-area-inset-bottom))] md:pb-14 bg-canvas">
@@ -290,10 +445,7 @@ export const RestaurantDetailPage: React.FC = () => {
                       <MenuItemCard
                         key={item.id}
                         item={item}
-                        onSelect={() => {
-                          setSelectedItem(item);
-                          setItemQuantity(1);
-                        }}
+                        onSelect={() => openItem(item)}
                       />
                     ))}
                   </div>
@@ -312,10 +464,7 @@ export const RestaurantDetailPage: React.FC = () => {
                     <MenuItemCard
                       key={item.id}
                       item={item}
-                      onSelect={() => {
-                        setSelectedItem(item);
-                        setItemQuantity(1);
-                      }}
+                      onSelect={() => openItem(item)}
                     />
                   ))}
                 </div>
@@ -355,7 +504,7 @@ export const RestaurantDetailPage: React.FC = () => {
                   className="w-full h-full object-cover"
                 />
                 <button
-                  onClick={() => setSelectedItem(null)}
+                  onClick={() => closeItemModal()}
                   className="absolute right-3 top-3 flex h-11 w-11 items-center justify-center rounded-full bg-black/60 text-white transition hover:bg-black/80"
                 >
                   <X className="w-5 h-5" />
@@ -373,7 +522,7 @@ export const RestaurantDetailPage: React.FC = () => {
                 </div>
                 {!selectedItem.image_url && (
                   <button
-                    onClick={() => setSelectedItem(null)}
+                    onClick={() => closeItemModal()}
                     className="flex h-11 w-11 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
                   >
                     <X className="w-5 h-5" />
@@ -386,6 +535,19 @@ export const RestaurantDetailPage: React.FC = () => {
                   {selectedItem.description}
                 </p>
               )}
+
+              {/* Add extras / Make it a combo — only rendered when the
+                  restaurant actually configured extras for this dish. */}
+              <MealExtrasPicker
+                menuItem={selectedItem}
+                catalog={catalog}
+                selection={selection}
+                onChange={(next) => {
+                  setSelection(next);
+                  setSelectionError('');
+                }}
+                error={selectionError}
+              />
 
               {/* Special Instructions */}
               <div className="mt-5">
@@ -426,7 +588,7 @@ export const RestaurantDetailPage: React.FC = () => {
                 >
                   <ShoppingBag className="w-4 h-4" />
                   <span>
-                    Add to Cart · {formatGHS(selectedItem.price * itemQuantity)}
+                    {editingLineKey ? 'Update Cart' : 'Add to Cart'} · {formatGHS(activeTotal)}
                   </span>
                 </button>
               </div>

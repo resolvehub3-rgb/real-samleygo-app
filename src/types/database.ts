@@ -116,6 +116,87 @@ export interface MenuItem {
   updated_at: string;
 }
 
+/**
+ * When an add-on is offered: on every dish of the restaurant (`ALL`, the
+ * default so a new extra works immediately) or only on the meals listed
+ * in `menu_item_addons` (`SELECT`).
+ */
+export type AddonOffering = 'ALL' | 'SELECT';
+
+/**
+ * An "extra" a restaurant sells beside a meal (extra chicken, bottled water,
+ * a fried egg). `menu_addons` is its own table rather than a flag on
+ * `menu_items` so listing dishes never accidentally shows an extra as a meal.
+ */
+export interface MenuAddon {
+  id: string;
+  restaurant_id: string;
+  category_id?: string | null;
+  name: string;
+  description?: string | null;
+  price: number;
+  image_url?: string | null;
+  /** Sold-out flag the restaurant toggles without archiving the extra. */
+  is_available: boolean;
+  /** Retired from every menu, but still readable on orders already placed. */
+  is_archived: boolean;
+  /** Highest quantity a customer may put on one line (1–100). */
+  max_quantity: number;
+  offering: AddonOffering;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * A configurable selection group — "Choose a drink", "Add protein".
+ * `max_select = 0` means "no maximum"; `is_required` forces at least one pick.
+ * A group is offered on a meal when at least one of its options is.
+ */
+export interface AddonGroup {
+  id: string;
+  restaurant_id: string;
+  name: string;
+  description?: string | null;
+  is_required: boolean;
+  min_select: number;
+  max_select: number;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A group option: the join row plus the add-on it points at. */
+export interface AddonGroupOption {
+  menu_addon_id: string;
+  sort_order: number;
+  addon: MenuAddon;
+}
+
+/** meal → extra association, consulted only when the extra is `offering = 'SELECT'`. */
+export interface MenuItemAddonLink {
+  id: string;
+  menu_item_id: string;
+  menu_addon_id: string;
+  sort_order: number;
+  created_at: string;
+}
+
+/**
+ * The snapshot written onto a placed order. `addon_name` / `unit_price` are
+ * filled in by the database from `menu_addons` — the browser's numbers are
+ * discarded — so a later rename or price change never rewrites history.
+ */
+export interface OrderItemExtra {
+  id: string;
+  order_item_id: string;
+  menu_addon_id: string;
+  addon_name: string;
+  unit_price: number;
+  quantity: number;
+  subtotal: number;
+}
+
 export type CourierVerificationStatus =
   | 'UNSUBMITTED'
   | 'PENDING'
@@ -225,6 +306,12 @@ export interface OrderItem {
   quantity: number;
   notes?: string;
   subtotal: number;
+  /**
+   * Selected add-ons for this line. The meal's `subtotal` is the meal alone —
+   * the order's food subtotal is the sum of every line plus every add-on line
+   * (see `recalc_single_order()`), which is what the totals below already show.
+   */
+  extras?: OrderItemExtra[];
 }
 
 export interface OrderStatusHistory {

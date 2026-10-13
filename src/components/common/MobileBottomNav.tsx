@@ -29,6 +29,7 @@ export const MobileBottomNav: React.FC = () => {
   if (
     location.pathname.startsWith('/restaurant/dashboard') ||
     location.pathname.startsWith('/restaurant/menu') ||
+    location.pathname.startsWith('/restaurant/addons') ||
     location.pathname.startsWith('/restaurant/settings')
   ) {
     return null;

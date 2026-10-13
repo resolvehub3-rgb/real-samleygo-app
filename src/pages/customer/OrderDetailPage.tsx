@@ -23,6 +23,7 @@ import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import {
   Order,
   OrderItem,
+  OrderItemExtra,
   OrderStatusHistory,
   DeliveryLocation,
   Courier,
@@ -108,13 +109,30 @@ export const OrderDetailPage: React.FC = () => {
       setOrder(orderData as Order);
       prevStatusRef.current = orderData.status;
 
-      // 2. Fetch Order Items
+      // 2. Fetch Order Items, plus the add-ons snapshot for each line.
+      //    The extras are read in their own query so this receipt still
+      //    renders on a database that has not run migration 20261015 yet.
       const { data: itemsData } = await supabase
         .from('order_items')
         .select('*')
         .eq('order_id', id);
 
-      if (itemsData) setItems(itemsData as OrderItem[]);
+      if (itemsData) {
+        const extrasByLine: Record<string, OrderItemExtra[]> = {};
+        const lineIds = itemsData.map((row) => row.id as string);
+        if (lineIds.length > 0) {
+          const { data: extrasData } = await supabase
+            .from('order_item_extras')
+            .select('*')
+            .in('order_item_id', lineIds);
+          for (const extra of extrasData ?? []) {
+            (extrasByLine[extra.order_item_id as string] ??= []).push(extra as OrderItemExtra);
+          }
+        }
+        setItems(
+          (itemsData as OrderItem[]).map((line) => ({ ...line, extras: extrasByLine[line.id] }))
+        );
+      }
 
       // 3. Fetch Status History
       const { data: historyData } = await supabase
@@ -957,19 +975,66 @@ export const OrderDetailPage: React.FC = () => {
             </h3>
 
             <div className="divide-y divide-slate-100">
-              {items.map((item) => (
-                <div key={item.id} className="py-2.5 flex items-center justify-between text-xs">
-                  <div>
-                    <span className="font-bold text-slate-900">{item.quantity}x </span>
-                    <span className="text-slate-800">{item.item_name}</span>
-                    {item.notes && (
-                      <p className="text-[11px] text-slate-400 italic">Note: {item.notes}</p>
-                    )}
+              {items.map((item) => {
+                const extras = item.extras ?? [];
+                const extrasTotal = extras.reduce((sum, extra) => sum + extra.subtotal, 0);
+                return (
+                  <div key={item.id} className="py-2.5 flex items-start justify-between text-xs gap-3">
+                    <div className="min-w-0 flex-1">
+                      <span className="font-bold text-slate-900">{item.quantity}x </span>
+                      <span className="text-slate-800">{item.item_name}</span>
+                      <span className="ml-1 text-[10px] text-slate-400 tabular-nums">
+                        @ {formatGHS(item.item_price)}
+                      </span>
+
+                      {extras.length > 0 && (
+                        <ul className="mt-1 space-y-0.5 border-l-2 border-emerald-100 pl-2">
+                          {extras.map((extra) => (
+                            <li
+                              key={extra.id}
+                              className="flex items-center justify-between gap-2 text-[11px] text-slate-600"
+                            >
+                              <span className="truncate">
+                                <span className="font-bold text-emerald-700">+</span>{' '}
+                                {extra.addon_name}
+                                <span className="text-slate-400 tabular-nums">
+                                  {' '}
+                                  ×{extra.quantity}
+                                </span>
+                              </span>
+                              <span className="flex-shrink-0 tabular-nums">
+                                {formatGHS(extra.subtotal)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+
+                      {item.notes && (
+                        <p className="text-[11px] text-slate-400 italic">Note: {item.notes}</p>
+                      )}
+                    </div>
+                    <span className="font-bold text-slate-800 flex-shrink-0 tabular-nums">
+                      {formatGHS(item.subtotal + extrasTotal)}
+                    </span>
                   </div>
-                  <span className="font-bold text-slate-800">{formatGHS(item.subtotal)}</span>
-                </div>
-              ))}
+                );
+              })}
             </div>
+
+            {/* Once the kitchen has the order, its lines are frozen at the
+                prices the customer actually paid — say so instead of offering
+                an edit that cannot be honoured. */}
+            {!isCancelled && order.status !== 'PENDING_PAYMENT' && (
+              <p className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] leading-relaxed text-slate-500">
+                This order is confirmed and its items and prices can no longer be
+                changed. Need something added or removed?{' '}
+                <Link to="/support" className="font-bold text-emerald-700 underline">
+                  Contact support
+                </Link>{' '}
+                or cancel and place a new order, subject to the cancellation policy.
+              </p>
+            )}
 
             <div className="pt-3 border-t border-slate-100 space-y-1.5 text-xs text-slate-600">
               <div className="flex justify-between">

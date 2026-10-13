@@ -49,6 +49,7 @@ export const Navbar: React.FC = () => {
   if (
     location.pathname.startsWith('/restaurant/dashboard') ||
     location.pathname.startsWith('/restaurant/menu') ||
+    location.pathname.startsWith('/restaurant/addons') ||
     location.pathname.startsWith('/restaurant/settings')
   ) {
     return null;
@@ -324,6 +325,13 @@ export const Navbar: React.FC = () => {
                             className="w-full text-left px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 rounded-lg block"
                           >
                             Manage Menu Items
+                          </Link>
+                          <Link
+                            to="/restaurant/addons"
+                            onClick={() => setShowUserMenu(false)}
+                            className="w-full text-left px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 rounded-lg block"
+                          >
+                            Manage Add-ons
                           </Link>
                           <Link
                             to="/restaurant/settings"

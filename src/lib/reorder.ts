@@ -12,6 +12,15 @@ const round2 = (value: number) => Math.round(value * 100) / 100;
 const randomOrderNumber = () => `SG-${Math.floor(100000 + Math.random() * 900000)}`;
 const randomPaymentRef = () => `PAY-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
+/** An add-on line on the rebuilt order, priced at today's rate. */
+interface ReorderExtra {
+  menu_addon_id: string;
+  addon_name: string;
+  unit_price: number;
+  quantity: number;
+  subtotal: number;
+}
+
 /**
  * Re-place a previous order as the signed-in customer.
  *
@@ -19,6 +28,12 @@ const randomPaymentRef = () => `PAY-${Date.now()}-${Math.floor(Math.random() * 1
  * menu is re-read first: current prices are charged, items the kitchen no
  * longer sells (or deleted rows) are dropped and reported, and a kitchen that
  * closed its doors refuses the order instead of accepting a ghost.
+ *
+ * The extras a customer chose last time travel with the meal, at today's
+ * price. An extra that was archived, repriced-as-unavailable or sold out is
+ * dropped and reported in `skipped` — the order is never placed with extras the
+ * kitchen cannot make, and the database re-prices every add-on row on the way
+ * in regardless of what this function believed.
  *
  * Everything runs through the same `orders` INSERT the checkout form writes,
  * so the kitchen's live bell, the customer's list and the detail-page stream
@@ -30,7 +45,7 @@ export const placeReorder = async (source: Order): Promise<ReorderOutcome> => {
   // ── 1. What did the customer buy last time? ───────────────────────────
   const { data: sourceItems, error: sourceItemsError } = await supabase
     .from('order_items')
-    .select('menu_item_id, item_name, quantity, notes')
+    .select('id, menu_item_id, item_name, quantity, notes')
     .eq('order_id', source.id);
 
   if (sourceItemsError) return { ok: false, error: sourceItemsError.message };
@@ -44,10 +59,51 @@ export const placeReorder = async (source: Order): Promise<ReorderOutcome> => {
   const menuIds = [...new Set(wanted.map((line) => line.menu_item_id as string))];
   const { data: menuRows, error: menuError } = await supabase
     .from('menu_items')
-    .select('id, name, price, is_available')
+    .select('id, restaurant_id, name, price, is_available')
     .in('id', menuIds);
 
   if (menuError) return { ok: false, error: menuError.message };
+
+  // Add-ons from the original order. Missing on a pre-migration database?
+  // Then the order never had any, and there is nothing to carry over.
+  const sourceLineIds = (sourceItems ?? []).map((line) => line.id as string);
+  const extrasBySourceLine: Record<
+    string,
+    { addonId: string; quantity: number }[]
+  > = {};
+  const { data: sourceExtras } = await supabase
+    .from('order_item_extras')
+    .select('order_item_id, menu_addon_id, quantity')
+    .in('order_item_id', sourceLineIds.length > 0 ? sourceLineIds : ['']);
+  for (const extra of sourceExtras ?? []) {
+    (extrasBySourceLine[extra.order_item_id as string] ??= []).push({
+      addonId: extra.menu_addon_id as string,
+      quantity: Number(extra.quantity) || 1,
+    });
+  }
+
+  const wantedAddonIds = [
+    ...new Set(Object.values(extrasBySourceLine).flat().map((extra) => extra.addonId)),
+  ];
+  const addonsById = new Map<
+    string,
+    {
+      id: string;
+      name: string;
+      price: number;
+      is_available: boolean;
+      is_archived: boolean;
+      max_quantity: number;
+      restaurant_id: string;
+    }
+  >();
+  if (wantedAddonIds.length > 0) {
+    const { data: addonRows } = await supabase
+      .from('menu_addons')
+      .select('id, name, price, is_available, is_archived, max_quantity, restaurant_id')
+      .in('id', wantedAddonIds);
+    for (const row of addonRows ?? []) addonsById.set(row.id, row);
+  }
 
   const menuById = new Map((menuRows ?? []).map((row) => [row.id, row]));
   const skipped: string[] = [];
@@ -58,6 +114,7 @@ export const placeReorder = async (source: Order): Promise<ReorderOutcome> => {
     quantity: number;
     notes: string | null;
     subtotal: number;
+    extras: ReorderExtra[];
   }[] = [];
 
   for (const line of wanted) {
@@ -68,6 +125,30 @@ export const placeReorder = async (source: Order): Promise<ReorderOutcome> => {
       continue;
     }
     const price = Number(menu.price);
+
+    const extras: ReorderExtra[] = [];
+    for (const chosen of extrasBySourceLine[line.id as string] ?? []) {
+      const addon = addonsById.get(chosen.addonId);
+      if (
+        !addon ||
+        addon.restaurant_id !== menu.restaurant_id ||
+        addon.is_archived ||
+        !addon.is_available
+      ) {
+        // The kitchen stopped selling this extra — report it, never fake it.
+        skipped.push(chosen.addonId);
+        continue;
+      }
+      const qty = Math.min(Math.max(1, chosen.quantity), addon.max_quantity);
+      extras.push({
+        menu_addon_id: addon.id,
+        addon_name: addon.name,
+        unit_price: Number(addon.price),
+        quantity: qty,
+        subtotal: round2(Number(addon.price) * qty),
+      });
+    }
+
     lines.push({
       menu_item_id: menu.id,
       item_name: menu.name,
@@ -75,6 +156,7 @@ export const placeReorder = async (source: Order): Promise<ReorderOutcome> => {
       quantity: line.quantity,
       notes: line.notes?.trim() || null,
       subtotal: round2(price * line.quantity),
+      extras,
     });
   }
 
@@ -93,7 +175,15 @@ export const placeReorder = async (source: Order): Promise<ReorderOutcome> => {
   }
 
   // ── 4. Money at today's rates (the old fee was a snapshot too) ────────
-  const subtotal = round2(lines.reduce((sum, line) => sum + line.subtotal, 0));
+  const subtotal = round2(
+    lines.reduce(
+      (sum, line) =>
+        sum +
+        line.subtotal +
+        line.extras.reduce((extraSum, extra) => extraSum + extra.subtotal, 0),
+      0
+    )
+  );
 
   // The drop-off point of the original order is reused, but the PRICE is
   // never reused: the backend measures the route again against the current
@@ -155,17 +245,39 @@ export const placeReorder = async (source: Order): Promise<ReorderOutcome> => {
     return { ok: false, error: orderError?.message || 'Could not place the reorder.' };
   }
 
-  const { error: itemsError } = await supabase.from('order_items').insert(
-    lines.map((line) => ({
-      order_id: created.id,
-      ...line,
-    }))
-  );
+  const { data: insertedItems, error: itemsError } = await supabase
+    .from('order_items')
+    .insert(
+      lines.map((line) => ({
+        order_id: created.id,
+        menu_item_id: line.menu_item_id,
+        item_name: line.item_name,
+        item_price: line.item_price,
+        quantity: line.quantity,
+        notes: line.notes,
+        subtotal: line.subtotal,
+      }))
+    )
+    .select('id');
 
-  if (itemsError) {
+  if (itemsError || !insertedItems || insertedItems.length !== lines.length) {
     // Never leave an empty order shell in the customer's list.
     await supabase.from('orders').delete().eq('id', created.id);
-    return { ok: false, error: itemsError.message };
+    return { ok: false, error: itemsError?.message || 'Could not save the reordered items.' };
+  }
+
+  // Carry the extras onto the matching line. The database re-prices every row
+  // from `menu_addons`, so a price that moved since the original order is
+  // charged at today's rate — never silently copied from history.
+  const extraRows = lines.flatMap((line, index) =>
+    line.extras.map((extra) => ({ order_item_id: insertedItems[index].id, ...extra }))
+  );
+  if (extraRows.length > 0) {
+    const { error: extrasError } = await supabase.from('order_item_extras').insert(extraRows);
+    if (extrasError) {
+      await supabase.from('orders').delete().eq('id', created.id);
+      return { ok: false, error: extrasError.message };
+    }
   }
 
   // Best effort: the timeline is a nicety, the order itself is already live.

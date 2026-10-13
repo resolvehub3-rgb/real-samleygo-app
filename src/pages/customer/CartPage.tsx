@@ -7,6 +7,7 @@ import {
   Minus,
   MapPin,
   Phone,
+  Pencil,
   CreditCard,
   Navigation,
   ArrowRight,
@@ -35,6 +36,8 @@ import { PlatformPricingSettings } from '../../types/database';
 import { supabase, isSupabaseConfigured, cleanRpcErrorMessage } from '../../lib/supabase';
 import { isGeolocationAvailable } from '../../lib/geolocation';
 import { readDeliverTo } from '../../lib/deliverTo';
+import { cartItemCount, cartLineKey, lineTotal, orderItemExtraPayload } from '../../lib/addons';
+import { cartExtrasTotal, validateCartExtrasForCheckout } from '../../lib/addonCatalog';
 import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
 import { DeliveryLocationPicker } from '../../components/common/DeliveryLocationPicker';
 
@@ -275,6 +278,8 @@ export const CartPage: React.FC = () => {
   // Customer pays food + delivery (+ optional tip) — nothing else. The
   // breakdown below is the whole story: no hidden lines of any kind.
   const { total: grandTotal } = computeCustomerTotals(subtotal, deliveryFee, tip);
+  /** How much of the food subtotal is extras — shown so nothing is hidden. */
+  const extrasTotal = cartExtrasTotal(items);
 
   // Use the browser Geolocation API: a live watch that keeps the delivery
   // coordinates (and the readable address) fresh while the customer checks out.
@@ -324,6 +329,16 @@ export const CartPage: React.FC = () => {
       const orderNumber = `SG-${Math.floor(100000 + Math.random() * 900000)}`;
       const paymentRef = `PAY-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
+      // 0. Re-read every extra a moment before the order exists. If one was
+      //    archived, sold out or repriced while the customer filled in the
+      //    form, they are told WHICH one — before any order is created, so
+      //    nothing has to be cancelled afterwards.
+      const extraCheck = await validateCartExtrasForCheckout(items, restaurant.id);
+      if (!extraCheck.ok) {
+        setErrorMsg(extraCheck.message);
+        return;
+      }
+
       // Ask the backend for the quote it will actually charge: a quote
       // that expired while the customer filled the form is replaced by a
       // fresh one, never submitted as-is.
@@ -369,7 +384,10 @@ export const CartPage: React.FC = () => {
         throw new Error(orderError?.message || 'Failed to create order');
       }
 
-      // 2. Insert Order Items
+      // 2. Insert Order Items. The generated ids come back so each line's
+      //    extras can be attached to the exact line they belong to. A failure
+      //    here must stop the checkout — an order with no lines would be
+      //    charged for food the kitchen cannot see.
       const orderItemsToInsert = items.map((i) => ({
         order_id: orderData.id,
         menu_item_id: i.menuItem.id,
@@ -380,7 +398,31 @@ export const CartPage: React.FC = () => {
         subtotal: i.menuItem.price * i.quantity,
       }));
 
-      await supabase.from('order_items').insert(orderItemsToInsert);
+      const { data: insertedItems, error: itemsError } = await supabase
+        .from('order_items')
+        .insert(orderItemsToInsert)
+        .select('id, menu_item_id');
+
+      if (itemsError || !insertedItems || insertedItems.length !== orderItemsToInsert.length) {
+        throw new Error(itemsError?.message || 'Failed to save your order items');
+      }
+
+      // 2b. Attach the selected extras. Every row is re-priced by
+      //     enforce_order_item_extra_pricing() on the way in — this payload is
+      //     a request, never an instruction about what to charge.
+      const extrasRows = items.flatMap((line, index) =>
+        orderItemExtraPayload(insertedItems[index].id, line.extras)
+      );
+      if (extrasRows.length > 0) {
+        const { error: extrasError } = await supabase
+          .from('order_item_extras')
+          .insert(extrasRows);
+        if (extrasError) {
+          // The extras could not be recorded, so the order would be missing
+          // food the customer believes they are paying for. Stop and say so.
+          throw new Error(extrasError.message);
+        }
+      }
 
       // 3. Insert Initial Order Status History
       await supabase.from('order_status_history').insert({
@@ -413,11 +455,15 @@ export const CartPage: React.FC = () => {
       }
 
       // 5. Create Realtime Notification for Restaurant Owner
+      //    The owner's order card renders the full detail (every dish, every
+      //    extra, quantities, notes and prices); this message only has to say
+      //    that a complete order is waiting and how big it is.
       if (restaurant.owner_id) {
+        const itemCount = cartItemCount(items);
         await supabase.from('notifications').insert({
           user_id: restaurant.owner_id,
           title: 'New order received',
-          message: `Order #${orderNumber} for ${formatGHS(
+          message: `Order #${orderNumber} (${itemCount} item${itemCount === 1 ? '' : 's'}) for ${formatGHS(
             orderData.total_amount ?? grandTotal
           )} is waiting for your kitchen acceptance.`,
           type: 'NEW_ORDER',
@@ -505,50 +551,103 @@ export const CartPage: React.FC = () => {
                 Order Items ({items.length})
               </h3>
               <div className="divide-y divide-slate-100">
-                {items.map((item) => (
-                  <div key={item.menuItem.id} className="py-3 flex items-center justify-between gap-3">
-                    <div className="flex-1 min-w-0">
-                      <h4 className="font-bold text-xs sm:text-sm text-slate-900 truncate">
-                        {item.menuItem.name}
-                      </h4>
-                      {item.notes && (
-                        <p className="text-[11px] text-slate-400 italic">Note: {item.notes}</p>
-                      )}
-                      <p className="text-xs font-semibold text-emerald-700 mt-0.5">
-                        {formatGHS(item.menuItem.price * item.quantity)}
-                      </p>
-                    </div>
+                {items.map((item) => {
+                  // Identity is the LINE: the same dish with different extras
+                  // is a different line and is edited on its own.
+                  const lineKey = cartLineKey(item);
+                  const extras = item.extras ?? [];
 
-                    <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1">
+                  return (
+                    <div key={lineKey} className="py-3 flex items-center justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-bold text-xs sm:text-sm text-slate-900 truncate">
+                          {item.menuItem.name}
+                          <span className="ml-1.5 font-semibold text-slate-400 tabular-nums">
+                            ×{item.quantity}
+                          </span>
+                        </h4>
+
+                        {extras.length > 0 && (
+                          <ul className="mt-1 space-y-0.5 border-l-2 border-emerald-100 pl-2">
+                            {extras.map((extra) => (
+                              <li
+                                key={extra.addonId}
+                                className="flex items-center justify-between gap-2 text-[11px] text-slate-600"
+                              >
+                                <span className="truncate">
+                                  <span className="font-bold text-emerald-700">+</span> {extra.name}
+                                  <span className="text-slate-400 tabular-nums"> ×{extra.quantity}</span>
+                                </span>
+                                <span className="flex-shrink-0 font-semibold tabular-nums">
+                                  {formatGHS(extra.unitPrice * extra.quantity)}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+
+                        {item.notes && (
+                          <p className="mt-0.5 text-[11px] text-slate-400 italic">Note: {item.notes}</p>
+                        )}
+
+                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <p className="text-xs font-semibold text-emerald-700 tabular-nums">
+                            {formatGHS(lineTotal(item))}
+                          </p>
+                          {extras.length > 0 && (
+                            <span className="text-[10px] text-slate-400 tabular-nums">
+                              {formatGHS(item.menuItem.price)} + extras
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              navigate(
+                                `/restaurant/${restaurant?.id}?item=${
+                                  item.menuItem.id
+                                }&line=${encodeURIComponent(lineKey)}`
+                              )
+                            }
+                            aria-label={`Edit ${item.menuItem.name} and its extras`}
+                            className="flex h-11 items-center gap-1 rounded-lg px-1.5 text-[11px] font-bold text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
+                          >
+                            <Pencil className="h-3 w-3" />
+                            <span>{extras.length > 0 ? 'Edit extras' : 'Edit'}</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1">
+                        <button
+                          type="button"
+                          onClick={() => updateQuantity(lineKey, -1)}
+                          aria-label={`Decrease ${item.menuItem.name} quantity`}
+                          className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-slate-700 shadow-xs transition hover:bg-slate-100 active:scale-95"
+                        >
+                          <Minus className="h-3.5 w-3.5" />
+                        </button>
+                        <span className="w-6 text-center text-xs font-bold tabular-nums">{item.quantity}</span>
+                        <button
+                          type="button"
+                          onClick={() => updateQuantity(lineKey, 1)}
+                          aria-label={`Increase ${item.menuItem.name} quantity`}
+                          className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-slate-700 shadow-xs transition hover:bg-slate-100 active:scale-95"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+
                       <button
                         type="button"
-                        onClick={() => updateQuantity(item.menuItem.id, -1)}
-                        aria-label={`Decrease ${item.menuItem.name} quantity`}
-                        className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-slate-700 shadow-xs transition hover:bg-slate-100 active:scale-95"
+                        onClick={() => removeItem(lineKey)}
+                        aria-label={`Remove ${item.menuItem.name} from cart`}
+                        className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
                       >
-                        <Minus className="h-3.5 w-3.5" />
-                      </button>
-                      <span className="w-6 text-center text-xs font-bold tabular-nums">{item.quantity}</span>
-                      <button
-                        type="button"
-                        onClick={() => updateQuantity(item.menuItem.id, 1)}
-                        aria-label={`Increase ${item.menuItem.name} quantity`}
-                        className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-slate-700 shadow-xs transition hover:bg-slate-100 active:scale-95"
-                      >
-                        <Plus className="h-3.5 w-3.5" />
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
-
-                    <button
-                      type="button"
-                      onClick={() => removeItem(item.menuItem.id)}
-                      aria-label={`Remove ${item.menuItem.name} from cart`}
-                      className="flex h-11 w-11 items-center justify-center rounded-lg text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
@@ -701,8 +800,15 @@ export const CartPage: React.FC = () => {
               <div className="space-y-2.5 text-xs text-slate-600">
                 <div className="flex justify-between">
                   <span>Food subtotal</span>
-                  <span className="font-bold text-slate-900">{formatGHS(subtotal)}</span>
+                  <span className="font-bold text-slate-900 tabular-nums">{formatGHS(subtotal)}</span>
                 </div>
+
+                {extrasTotal > 0 && (
+                  <div className="-mt-1.5 flex justify-between text-[10px] text-slate-400">
+                    <span>of which extras</span>
+                    <span className="tabular-nums">{formatGHS(extrasTotal)}</span>
+                  </div>
+                )}
 
                 <div className="flex justify-between items-center">
                   <div>

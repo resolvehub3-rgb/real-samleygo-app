@@ -11,6 +11,7 @@ import {
   LogOut,
   MapPin,
   Star,
+  Tag,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { Restaurant } from '../../types/database';
@@ -45,6 +46,7 @@ export const RestaurantShell: React.FC<RestaurantShellProps> = ({
   const navItems = [
     { to: '/restaurant/dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { to: '/restaurant/menu', label: 'Menu Manager', icon: Utensils },
+    { to: '/restaurant/addons', label: 'Add Extras', icon: Tag },
     { to: '/restaurant/settings', label: 'Settings', icon: Settings },
   ];
 

@@ -63,6 +63,7 @@ const SHORTCUTS: Record<UserRole, Shortcut[]> = {
   RESTAURANT_OWNER: [
     { to: '/restaurant/dashboard', label: 'Orders', hint: 'Incoming orders and cooking status.', icon: Receipt },
     { to: '/restaurant/menu', label: 'Menu', hint: 'Dishes, prices and availability.', icon: ChefHat },
+    { to: '/restaurant/addons', label: 'Add-ons', hint: 'Extras, combos and selection limits.', icon: ChefHat },
     { to: '/restaurant/settings', label: 'Settings', hint: 'Opening hours, photos and address.', icon: Settings },
   ],
   SUPER_ADMIN: [

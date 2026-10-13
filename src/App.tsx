@@ -22,6 +22,7 @@ import { CourierEarningsPage } from './pages/courier/CourierEarningsPage';
 
 import { RestaurantDashboard } from './pages/restaurant/RestaurantDashboard';
 import { RestaurantMenuPage } from './pages/restaurant/RestaurantMenuPage';
+import { RestaurantAddonsPage } from './pages/restaurant/RestaurantAddonsPage';
 import { RestaurantSettingsPage } from './pages/restaurant/RestaurantSettingsPage';
 
 import { AdminDashboard } from './pages/admin/AdminDashboard';
@@ -128,6 +129,14 @@ export default function App() {
                   element={
                     <ProtectedRoute allowedRoles={['RESTAURANT_OWNER', 'SUPER_ADMIN']}>
                       <RestaurantMenuPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/restaurant/addons"
+                  element={
+                    <ProtectedRoute allowedRoles={['RESTAURANT_OWNER', 'SUPER_ADMIN']}>
+                      <RestaurantAddonsPage />
                     </ProtectedRoute>
                   }
                 />

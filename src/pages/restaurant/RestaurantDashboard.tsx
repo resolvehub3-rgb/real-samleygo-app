@@ -125,12 +125,29 @@ export const RestaurantDashboard: React.FC = () => {
       if (restData) {
         setRestaurant(restData as Restaurant);
 
-        // 2. Fetch orders for this restaurant
-        const { data: ordersData } = await supabase
+        // 2. Fetch orders for this restaurant.
+        //    `extras:` is the add-on snapshot written by migration 20261015.
+        //    If that migration has not been applied yet the embed fails, so
+        //    the plain query is retried and the kitchen still sees its orders.
+        const { data: withExtras } = await supabase
           .from('orders')
-          .select('*, order_items(*), customer:profiles!orders_customer_id_fkey(*), courier:profiles!orders_courier_id_fkey(*)')
+          .select(
+            '*, order_items(*, extras:order_item_extras(*)), customer:profiles!orders_customer_id_fkey(*), courier:profiles!orders_courier_id_fkey(*)'
+          )
           .eq('restaurant_id', restData.id)
           .order('created_at', { ascending: false });
+
+        let ordersData = withExtras;
+        if (!ordersData) {
+          const { data: plain } = await supabase
+            .from('orders')
+            .select(
+              '*, order_items(*), customer:profiles!orders_customer_id_fkey(*), courier:profiles!orders_courier_id_fkey(*)'
+            )
+            .eq('restaurant_id', restData.id)
+            .order('created_at', { ascending: false });
+          ordersData = plain;
+        }
 
         if (ordersData) {
           setOrders(ordersData as Order[]);
@@ -1520,24 +1537,64 @@ const RestaurantOrderCard: React.FC<OrderCardProps> = ({
 
         {/* Items List */}
         <div className="space-y-2">
-          {order.order_items?.map((item) => (
-            <div key={item.id} className="flex items-start justify-between gap-3">
-              <div className="flex items-start gap-2.5 min-w-0">
-                <span className="mt-0.5 min-w-[22px] h-[22px] px-1 rounded-lg bg-slate-100 text-slate-700 text-[11px] font-black flex items-center justify-center flex-shrink-0">
-                  {item.quantity}x
-                </span>
-                <div className="min-w-0">
-                  <span className="text-xs font-semibold text-slate-800 break-words">{item.item_name}</span>
-                  {item.notes && (
-                    <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1">
-                      ✏️ {item.notes}
-                    </p>
+          {order.order_items?.map((item) => {
+            const extras = item.extras ?? [];
+            const extrasTotal = extras.reduce((sum, extra) => sum + extra.subtotal, 0);
+            return (
+              <div key={item.id} className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <span className="mt-0.5 min-w-[22px] h-[22px] px-1 rounded-lg bg-slate-100 text-slate-700 text-[11px] font-black flex items-center justify-center flex-shrink-0">
+                    {item.quantity}x
+                  </span>
+                  <div className="min-w-0">
+                    <span className="text-xs font-semibold text-slate-800 break-words">
+                      {item.item_name}
+                    </span>
+                    <span className="ml-1.5 text-[10px] text-slate-400 tabular-nums">
+                      @ {formatGHS(item.item_price)}
+                    </span>
+
+                    {/* Every extra the customer chose, with its own quantity
+                        and price — the snapshot taken when they ordered. */}
+                    {extras.length > 0 && (
+                      <ul className="mt-1 space-y-0.5 border-l-2 border-emerald-200 pl-2">
+                        {extras.map((extra) => (
+                          <li
+                            key={extra.id}
+                            className="flex items-center justify-between gap-2 text-[11px] text-slate-600"
+                          >
+                            <span className="truncate">
+                              <span className="font-bold text-emerald-700">+</span> {extra.addon_name}
+                              <span className="text-slate-400 tabular-nums"> ×{extra.quantity}</span>
+                            </span>
+                            <span className="flex-shrink-0 tabular-nums">
+                              {formatGHS(extra.subtotal)}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {item.notes && (
+                      <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-100 rounded-lg px-2 py-1 mt-1">
+                        ✏️ {item.notes}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex-shrink-0 text-right">
+                  <span className="text-xs font-bold text-slate-600 tabular-nums block">
+                    {formatGHS(item.subtotal)}
+                  </span>
+                  {extrasTotal > 0 && (
+                    <span className="text-[10px] text-slate-500 tabular-nums block">
+                      +{formatGHS(extrasTotal)} extras
+                    </span>
                   )}
                 </div>
               </div>
-              <span className="text-xs font-bold text-slate-600 flex-shrink-0">{formatGHS(item.subtotal)}</span>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* Gross → commission → net, straight from this order's DB snapshot */}
