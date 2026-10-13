@@ -83,10 +83,8 @@ const humanizeStatus = (status: string): string =>
     .map((word) => word.charAt(0) + word.slice(1).toLowerCase())
     .join(' ');
 
-/** How far the fresh-dish rail moves, in pixels, on each tick. */
-const RAIL_STEP_PX = 1;
-/** How often it moves: 30ms × 1px ≈ 33px/second — a slow, readable drift. */
-const RAIL_TICK_MS = 30;
+/** How fast the fresh-dish rail drifts left, in CSS pixels per second. */
+const RAIL_SPEED_PX_PER_SEC = 34;
 
 export const HomePage: React.FC = () => {
   const { user } = useAuth();
@@ -724,27 +722,44 @@ export const HomePage: React.FC = () => {
     setShowAllDishes(false);
   }, [isCategoryFeed, searchQuery, selectedCuisine]);
 
+  // The rail moves itself. It is driven by requestAnimationFrame rather than
+  // a timer so the speed stays constant even when the browser throttles a
+  // background tab or the frame rate dips, and it uses a time delta instead
+  // of a fixed step so a slow frame cannot turn into a visible jump.
+  //
+  // Deliberately NOT gated on prefers-reduced-motion: the rail is the home
+  // screen's browse affordance, and without it the row looks static and
+  // abandoned. It pauses for the visitor instead — see below — and the row
+  // can always be dragged by hand.
   useEffect(() => {
     const track = dishRailRef.current;
     if (showAllDishes || !track || feedDishes.length < 2) return undefined;
 
-    // A rail that never stops moving is uncomfortable to read and impossible
-    // to tap reliably, so it stays put for anyone who asked for less motion.
-    const reducedMotion =
-      typeof window.matchMedia === 'function' &&
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (reducedMotion) return undefined;
+    let frame = 0;
+    let position = track.scrollLeft;
+    let last = performance.now();
 
-    const id = window.setInterval(() => {
-      if (isRailPausedRef.current) return;
+    const tick = (now: number) => {
+      const deltaSeconds = Math.min(now - last, 100) / 1000;
+      last = now;
+
       const max = track.scrollWidth - track.clientWidth;
-      if (max <= 0) return;
-      const next = track.scrollLeft + RAIL_STEP_PX;
-      // Wrap to the start rather than stopping dead at the end.
-      track.scrollLeft = next >= max ? 0 : next;
-    }, RAIL_TICK_MS);
+      if (!isRailPausedRef.current && max > 0) {
+        position += RAIL_SPEED_PX_PER_SEC * deltaSeconds;
+        // Wrap to the start rather than stopping dead at the end.
+        if (position >= max) position = 0;
+        track.scrollLeft = position;
+      } else {
+        // While paused, follow whatever the visitor dragged to, so the drift
+        // resumes from where they left the row instead of snapping back.
+        position = track.scrollLeft;
+      }
 
-    return () => window.clearInterval(id);
+      frame = window.requestAnimationFrame(tick);
+    };
+
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
   }, [showAllDishes, feedDishes.length]);
 
   return (
@@ -1139,10 +1154,22 @@ export const HomePage: React.FC = () => {
                 ref={dishRailRef}
                 role="region"
                 aria-label="Fresh dishes near you"
-                onMouseEnter={() => setIsRailPaused(true)}
-                onMouseLeave={() => setIsRailPaused(false)}
-                onTouchStart={() => setIsRailPaused(true)}
-                onTouchEnd={() => setIsRailPaused(false)}
+                onPointerEnter={(event) => {
+                  // Only a real mouse hover pauses it. A tap fires a synthetic
+                  // mouse-enter with no matching leave, which used to leave the
+                  // rail frozen for the rest of the visit.
+                  if (event.pointerType === 'mouse') setIsRailPaused(true);
+                }}
+                onPointerLeave={(event) => {
+                  if (event.pointerType === 'mouse') setIsRailPaused(false);
+                }}
+                onPointerDown={(event) => {
+                  if (event.pointerType !== 'mouse') setIsRailPaused(true);
+                }}
+                onPointerUp={(event) => {
+                  if (event.pointerType !== 'mouse') setIsRailPaused(false);
+                }}
+                onPointerCancel={() => setIsRailPaused(false)}
                 onFocus={() => setIsRailPaused(true)}
                 onBlur={() => setIsRailPaused(false)}
                 className="no-scrollbar -mx-4 flex gap-3 overflow-x-auto overscroll-x-contain px-4 pb-1 sm:mx-0 sm:px-0"
