@@ -748,6 +748,49 @@ test('the picker never prices, labels or records money', () => {
   );
 });
 
+test('the home delivery address is typed and searched, never picked from a list', () => {
+  const home = read('src', 'pages', 'customer', 'HomePage.tsx');
+  const field = read('src', 'components', 'common', 'AddressSearchField.tsx');
+
+  // The canned neighbourhood shortcut is gone — nobody is funneled into
+  // somebody else's idea of a popular area.
+  assert.equal(/POPULAR_LOCATIONS/.test(home), false, 'no hand-picked area list remains');
+  assert.equal(/Popular areas/.test(home), false, 'and no section offers one');
+
+  // What replaces it: type the address, search it in realtime, or use the fix.
+  assert.ok(/<AddressSearchField/.test(home), 'the customer types where it should go');
+  assert.ok(/searchLabel="Search"/.test(home), 'with a Search button that runs it now');
+  assert.ok(/onPick=\{handleAddressPicked\}/.test(home), 'only a picked place sets the address');
+  assert.ok(/Use current device location/.test(home), 'the device fix stays');
+  assert.ok(
+    /onChange=\{setAddressQuery\}/.test(home),
+    'the page owns the text, so a half-typed address never becomes an address'
+  );
+  assert.equal(
+    /setLocationName\(\s*addressQuery/.test(home),
+    false,
+    'free typing on its own must never set the delivery address'
+  );
+
+  // The field searches as the customer types and immediately on demand.
+  assert.ok(/loadGooglePlaces\(/.test(field), 'Google Places when the key allows it');
+  assert.ok(/searchAddresses\(/.test(field), 'keyless OpenStreetMap fallback underneath');
+  assert.ok(/const handleSubmit = useCallback/.test(field), 'the button skips the debounce');
+  assert.ok(/if \(rows\.length === 1\)/.test(field), 'a single match is taken, several are shown');
+  assert.ok(
+    /onMouseDown=\{\(event\) => event\.preventDefault\(\)\}/.test(field),
+    'a suggestion mousedown must beat the blur close'
+  );
+
+  // The picked address is the one the checkout reads back.
+  assert.ok(
+    /persistDeliverTo\(picked\.address\)/.test(home),
+    'the saved place is what the checkout address seeds from'
+  );
+  const cart = read('src', 'pages', 'customer', 'CartPage.tsx');
+  assert.ok(/readDeliverTo\(\)/.test(cart), 'and the checkout still reads it');
+});
+
 // ---------------------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

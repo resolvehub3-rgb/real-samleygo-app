@@ -70,7 +70,7 @@ import {
   selectRideLabel,
   type ErrandsPaymentMethodId,
 } from '../../lib/errands/rideOptions';
-import { AddressSearchField } from '../../components/errands/AddressSearchField';
+import { AddressSearchField } from '../../components/common/AddressSearchField';
 import { ErrandsMap } from '../../components/errands/ErrandsMap';
 import { RideLocationBar } from '../../components/errands/RideLocationBar';
 import { RideSheet } from '../../components/errands/RideSheet';

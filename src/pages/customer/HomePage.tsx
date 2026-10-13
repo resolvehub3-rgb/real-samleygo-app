@@ -29,7 +29,9 @@ import {
 import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
 import { playCustomerStatusAlert } from '../../lib/soundAlerts';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
+import { AddressSearchField } from '../../components/common/AddressSearchField';
 import { ErrandsFab } from '../../components/customer/ErrandsFab';
+import type { LatLng } from '../../lib/routing';
 import {
   FOOD_CATEGORIES,
   ALL_CATEGORIES,
@@ -63,18 +65,6 @@ const HOME_STATUS_TOASTS: Record<string, string> = {
   DELIVERED: 'Your order has been delivered. Enjoy!',
   COMPLETED: 'Your order is complete.',
 };
-
-const POPULAR_LOCATIONS = [
-  'East Legon, Accra',
-  'Osu Oxford Street, Accra',
-  'Airport Residential Area, Accra',
-  'Cantonments, Accra',
-  'Spintex Road, Accra',
-  'Labone, Accra',
-  'Tema Community 1, Greater Accra',
-  'Adum, Kumasi',
-  'Ahodwo, Kumasi',
-];
 
 const QUICK_SEARCH_SUGGESTIONS = [
   'Jollof Rice',
@@ -143,6 +133,8 @@ export const HomePage: React.FC = () => {
   // default address such as "East Legon, Accra".
   const [locationName, setLocationName] = useState<string>(readDeliverTo);
   const [showLocationModal, setShowLocationModal] = useState(false);
+  /** What the customer is typing in the delivery-address search box. */
+  const [addressQuery, setAddressQuery] = useState('');
   const [isDetectingLocation, setIsDetectingLocation] = useState(false);
   /** Friendly, inline copy for a failed fix — never an alert, never coords. */
   const [locationError, setLocationError] = useState<string | null>(null);
@@ -579,6 +571,20 @@ export const HomePage: React.FC = () => {
     void startLiveLocation();
   };
 
+  // A searched address wins over the live device follow: the customer said
+  // where the order should go, so that is what the pill and the checkout keep.
+  // Only REAL picked places reach here — the point travels with the address,
+  // and free typing never sets an address on its own.
+  const handleAddressPicked = useCallback((picked: { point: LatLng; address: string }) => {
+    setIsUsingDeviceLocation(false);
+    persistLiveTracking(false);
+    setLocationName(picked.address);
+    persistDeliverTo(picked.address);
+    setAddressQuery(picked.address);
+    setLocationError(null);
+    setShowLocationModal(false);
+  }, []);
+
   // Follow the live fix in realtime while device location is enabled.
   useEffect(() => {
     if (!isUsingDeviceLocation || !liveLocation.point) return;
@@ -673,6 +679,14 @@ export const HomePage: React.FC = () => {
 
   /** The saved place, without the live-tracking emoji prefix. */
   const displayLocation = locationName.replace(/^📍\s*/, '').trim();
+
+  // The search box opens on the customer's current choice so they can edit it
+  // rather than retype it. Keyed on the sheet ALONE: a live fix landing
+  // mid-sentence must never overwrite what they are typing.
+  useEffect(() => {
+    if (showLocationModal) setAddressQuery(displayLocation);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+  }, [showLocationModal]);
 
   /** "12 dishes" / "1 dish" — never "1 Dishes". */
   const dishCountLabel =
@@ -1135,9 +1149,18 @@ export const HomePage: React.FC = () => {
 
             <p className="text-xs leading-relaxed text-slate-500">
               {displayLocation
-                ? `Delivering to ${displayLocation}. Pick a different area or use your device location.`
-                : 'Pick your area or use your current location so we only show kitchens that deliver to you.'}
+                ? `Delivering to ${displayLocation}. Search for another address, or use your device location.`
+                : 'Search for the address where your order should be delivered, or use your current location.'}
             </p>
+
+            <AddressSearchField
+              label="Search address"
+              value={addressQuery}
+              onChange={setAddressQuery}
+              onPick={handleAddressPicked}
+              placeholder="Area, street or landmark"
+              searchLabel="Search"
+            />
 
             <button
               type="button"
@@ -1161,37 +1184,6 @@ export const HomePage: React.FC = () => {
                 <span>{locationError}</span>
               </div>
             )}
-
-            <div>
-              <span className="mb-2 block text-[11px] font-bold uppercase tracking-[0.08em] text-slate-400">
-                Popular areas
-              </span>
-              <div className="space-y-1">
-                {POPULAR_LOCATIONS.map((loc) => (
-                  <button
-                    key={loc}
-                    type="button"
-                    onClick={() => {
-                      // A hand-picked area wins over the live device follow.
-                      setIsUsingDeviceLocation(false);
-                      persistLiveTracking(false);
-                      setLocationName(loc);
-                      persistDeliverTo(loc);
-                      setLocationError(null);
-                      setShowLocationModal(false);
-                    }}
-                    className={`flex h-11 w-full items-center justify-between rounded-xl px-3.5 text-left text-xs transition ${
-                      locationName === loc
-                        ? 'bg-brand text-white font-bold'
-                        : 'text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    <span className="truncate">{loc}</span>
-                    {locationName === loc && <Check className="h-4 w-4 flex-shrink-0" />}
-                  </button>
-                ))}
-              </div>
-            </div>
           </div>
         </div>
       )}

@@ -869,7 +869,7 @@ test("the accepted errand's real endpoints are wired into the driver's map", () 
 test('no Leaflet anywhere in the Errands module (Google Maps only)', () => {
   for (const file of [
     ['src', 'components', 'errands', 'ErrandsMap.tsx'],
-    ['src', 'components', 'errands', 'AddressSearchField.tsx'],
+    ['src', 'components', 'common', 'AddressSearchField.tsx'],
     ['src', 'pages', 'customer', 'ErrandsPage.tsx'],
   ]) {
     const source = read(...file);
