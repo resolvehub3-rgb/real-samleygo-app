@@ -83,9 +83,6 @@ const humanizeStatus = (status: string): string =>
     .map((word) => word.charAt(0) + word.slice(1).toLowerCase())
     .join(' ');
 
-/** How fast the fresh-dish rail drifts left, in CSS pixels per second. */
-const RAIL_SPEED_PX_PER_SEC = 34;
-
 export const HomePage: React.FC = () => {
   const { user } = useAuth();
   const { addItem } = useCart();
@@ -701,66 +698,17 @@ export const HomePage: React.FC = () => {
     `${feedRestaurants.length} ${feedRestaurants.length === 1 ? 'Restaurant' : 'Restaurants'}`;
 
   /* ---------------------------------------------------------------------
-     Fresh-dish rail: one row that drifts to the left on its own.
+     Fresh-dish rail: one row the visitor scrolls by hand.
      --------------------------------------------------------------------- */
 
-  const dishRailRef = useRef<HTMLDivElement>(null);
   /** True once the visitor has expanded the rail into the full grid. */
   const [showAllDishes, setShowAllDishes] = useState(false);
-  /** Hover, touch or keyboard focus all pause the drift. */
-  const [isRailPaused, setIsRailPaused] = useState(false);
-  /** The interval reads this ref, so pausing never restarts the timer. */
-  const isRailPausedRef = useRef(false);
-
-  useEffect(() => {
-    isRailPausedRef.current = isRailPaused;
-  }, [isRailPaused]);
 
   // Close the rail again when the feed underneath it changes — a new search
   // or category must not land behind a grid the visitor never asked for.
   useEffect(() => {
     setShowAllDishes(false);
   }, [isCategoryFeed, searchQuery, selectedCuisine]);
-
-  // The rail moves itself. It is driven by requestAnimationFrame rather than
-  // a timer so the speed stays constant even when the browser throttles a
-  // background tab or the frame rate dips, and it uses a time delta instead
-  // of a fixed step so a slow frame cannot turn into a visible jump.
-  //
-  // Deliberately NOT gated on prefers-reduced-motion: the rail is the home
-  // screen's browse affordance, and without it the row looks static and
-  // abandoned. It pauses for the visitor instead — see below — and the row
-  // can always be dragged by hand.
-  useEffect(() => {
-    const track = dishRailRef.current;
-    if (showAllDishes || !track || feedDishes.length < 2) return undefined;
-
-    let frame = 0;
-    let position = track.scrollLeft;
-    let last = performance.now();
-
-    const tick = (now: number) => {
-      const deltaSeconds = Math.min(now - last, 100) / 1000;
-      last = now;
-
-      const max = track.scrollWidth - track.clientWidth;
-      if (!isRailPausedRef.current && max > 0) {
-        position += RAIL_SPEED_PX_PER_SEC * deltaSeconds;
-        // Wrap to the start rather than stopping dead at the end.
-        if (position >= max) position = 0;
-        track.scrollLeft = position;
-      } else {
-        // While paused, follow whatever the visitor dragged to, so the drift
-        // resumes from where they left the row instead of snapping back.
-        position = track.scrollLeft;
-      }
-
-      frame = window.requestAnimationFrame(tick);
-    };
-
-    frame = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(frame);
-  }, [showAllDishes, feedDishes.length]);
 
   return (
     <div className="min-h-screen bg-canvas pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-12">
@@ -1147,32 +1095,15 @@ export const HomePage: React.FC = () => {
                 ))}
               </div>
             ) : (
-              /* Default: one row, drifting left, that stops for a hovering,
-                 touched or focused card and stays still for anyone who asked
-                 for reduced motion. */
+              /* Default: one row the visitor scrolls by hand — swipe on a
+                 phone, drag or shift-scroll on a desktop. Nothing moves on
+                 its own. The scrollbar itself is hidden, so the cut-off card
+                 at the right edge is what shows there is more to see. */
               <div
-                ref={dishRailRef}
+                tabIndex={0}
                 role="region"
-                aria-label="Fresh dishes near you"
-                onPointerEnter={(event) => {
-                  // Only a real mouse hover pauses it. A tap fires a synthetic
-                  // mouse-enter with no matching leave, which used to leave the
-                  // rail frozen for the rest of the visit.
-                  if (event.pointerType === 'mouse') setIsRailPaused(true);
-                }}
-                onPointerLeave={(event) => {
-                  if (event.pointerType === 'mouse') setIsRailPaused(false);
-                }}
-                onPointerDown={(event) => {
-                  if (event.pointerType !== 'mouse') setIsRailPaused(true);
-                }}
-                onPointerUp={(event) => {
-                  if (event.pointerType !== 'mouse') setIsRailPaused(false);
-                }}
-                onPointerCancel={() => setIsRailPaused(false)}
-                onFocus={() => setIsRailPaused(true)}
-                onBlur={() => setIsRailPaused(false)}
-                className="no-scrollbar -mx-4 flex gap-3 overflow-x-auto overscroll-x-contain px-4 pb-1 sm:mx-0 sm:px-0"
+                aria-label="Fresh dishes near you — scroll sideways for more"
+                className="no-scrollbar -mx-4 flex gap-3 overflow-x-auto overscroll-x-contain px-4 pb-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-4 sm:mx-0 sm:px-0"
               >
                 {feedDishes.map((dish) => (
                   <div key={dish.id} className="w-44 shrink-0 sm:w-52 lg:w-56">
