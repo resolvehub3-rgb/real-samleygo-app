@@ -243,6 +243,25 @@ export const RestaurantDetailPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, menuItems]);
 
+  // While the sheet is open the page behind it must not scroll, and the
+  // Escape key closes it — the same thing the X and the backdrop do.
+  useEffect(() => {
+    if (!selectedItem) return undefined;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeItemModal();
+    };
+    window.addEventListener('keydown', onKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKeyDown);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedItem]);
+
   const handleAddToCart = () => {
     if (!selectedItem || !restaurant) return;
 
@@ -494,44 +513,99 @@ export const RestaurantDetailPage: React.FC = () => {
 
       {/* Item Details & Add to Cart Modal */}
       {selectedItem && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="w-full max-w-lg rounded-3xl bg-white overflow-hidden shadow-2xl animate-in zoom-in-95">
-            {selectedItem.image_url && (
-              <div className="h-48 w-full bg-slate-100 relative">
-                <img
-                  src={selectedItem.image_url}
-                  alt={selectedItem.name}
-                  className="w-full h-full object-cover"
-                />
-                <button
-                  onClick={() => closeItemModal()}
-                  className="absolute right-3 top-3 flex h-11 w-11 items-center justify-center rounded-full bg-black/60 text-white transition hover:bg-black/80"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            )}
+        <div className="fixed inset-0 z-50 flex items-end justify-center overflow-hidden sm:items-center sm:p-4">
+          {/* Tapping the dimmed backdrop closes the sheet, exactly like the X. */}
+          <button
+            type="button"
+            aria-label="Close dish details"
+            onClick={() => closeItemModal()}
+            className="absolute inset-0 cursor-default bg-nav-ink/60 backdrop-blur-[3px] animate-in fade-in"
+          />
 
-            <div className="p-6">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h3 className="text-xl font-bold text-slate-900">{selectedItem.name}</h3>
-                  <p className="text-base font-extrabold text-emerald-700 mt-1">
-                    {formatGHS(selectedItem.price)}
-                  </p>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={selectedItem.name}
+            className="relative flex max-h-[94vh] w-full flex-col overflow-hidden bg-white shadow-[0_-12px_50px_rgba(2,71,45,0.35)] animate-in slide-in-from-bottom-10 duration-300 sm:max-h-[88vh] sm:max-w-lg sm:rounded-[28px] sm:shadow-2xl sm:animate-in sm:zoom-in-95"
+          >
+            {/* Mobile grab handle — visual only; the sheet itself is not draggable. */}
+            <div className="absolute left-1/2 top-2 z-20 h-1 w-10 -translate-x-1/2 rounded-full bg-white/60 sm:hidden" />
+
+            {/* Hero */}
+            <div className="relative h-56 shrink-0 overflow-hidden bg-brand-deep sm:h-60">
+              {selectedItem.image_url ? (
+                <>
+                  <img
+                    src={selectedItem.image_url}
+                    alt={selectedItem.name}
+                    className="h-full w-full object-cover"
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-nav-ink/80 via-nav-ink/10 to-nav-ink/35" />
+                </>
+              ) : (
+                /* A kitchen that uploaded no photo gets brand art, not a grey box. */
+                <div className="h-full w-full bg-[radial-gradient(circle_at_22%_18%,#059669_0%,transparent_55%),radial-gradient(circle_at_82%_78%,#22d3ee_0%,transparent_48%),linear-gradient(140deg,#02472d_0%,#0f6b62_55%,#059669_100%)]">
+                  <Utensils
+                    className="absolute left-1/2 top-1/2 h-16 w-16 -translate-x-1/2 -translate-y-1/2 text-white/25"
+                    aria-hidden="true"
+                  />
                 </div>
-                {!selectedItem.image_url && (
-                  <button
-                    onClick={() => closeItemModal()}
-                    className="flex h-11 w-11 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => closeItemModal()}
+                aria-label="Close dish details"
+                className="absolute right-3 top-3 flex h-11 w-11 items-center justify-center rounded-full bg-nav-ink/45 text-white backdrop-blur-sm transition hover:bg-nav-ink/70 active:scale-95"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              {!selectedItem.is_available && (
+                <span className="absolute left-3 top-3 rounded-full bg-rose-600 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-white shadow">
+                  Sold out
+                </span>
+              )}
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto overscroll-contain px-5 pb-4 pt-4 sm:px-6">
+              <div className="flex items-start justify-between gap-3">
+                <h3 className="text-lg font-black leading-tight tracking-tight text-slate-900 sm:text-xl">
+                  {selectedItem.name}
+                </h3>
+                <div className="shrink-0 rounded-2xl bg-emerald-50 px-3 py-1.5 text-right ring-1 ring-emerald-100">
+                  <span className="block text-[9px] font-bold uppercase tracking-widest text-emerald-600">
+                    Price
+                  </span>
+                  <span className="block text-base font-black tabular-nums text-brand-dark">
+                    {formatGHS(selectedItem.price)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Only facts the kitchen actually configured — never an invented rating. */}
+              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                <span className="inline-flex items-center gap-1">
+                  <Utensils className="h-3 w-3 text-emerald-600" aria-hidden="true" />
+                  <span className="font-semibold text-slate-600">{restaurant.name}</span>
+                </span>
+                {selectedItem.preparation_time_minutes > 0 && (
+                  <span className="inline-flex items-center gap-1">
+                    <Clock className="h-3 w-3 text-emerald-600" aria-hidden="true" />
+                    <span>{selectedItem.preparation_time_minutes} min prep</span>
+                  </span>
+                )}
+                {Number(restaurant.rating) > 0 && (
+                  <span className="inline-flex items-center gap-1">
+                    <Star className="h-3 w-3 fill-amber-400 text-amber-400" aria-hidden="true" />
+                    <span className="tabular-nums">{Number(restaurant.rating).toFixed(1)}</span>
+                  </span>
                 )}
               </div>
 
               {selectedItem.description && (
-                <p className="text-xs text-slate-500 mt-2 leading-relaxed">
+                <p className="mt-3 text-xs leading-relaxed text-slate-500">
                   {selectedItem.description}
                 </p>
               )}
@@ -551,44 +625,83 @@ export const RestaurantDetailPage: React.FC = () => {
 
               {/* Special Instructions */}
               <div className="mt-5">
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Special Kitchen Notes (Optional)
-                </label>
+                <div className="mb-1.5 flex items-baseline justify-between gap-2">
+                  <label htmlFor="dish-notes" className="text-xs font-bold text-slate-700">
+                    Special Kitchen Notes
+                  </label>
+                  <span className="text-[10px] tabular-nums text-slate-400">
+                    {itemNotes.length}/140 · optional
+                  </span>
+                </div>
                 <textarea
+                  id="dish-notes"
                   rows={2}
+                  maxLength={140}
                   value={itemNotes}
                   onChange={(e) => setItemNotes(e.target.value)}
                   placeholder="e.g. Extra shito, separate gravy, mild pepper..."
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-xs leading-relaxed placeholder:text-slate-300 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
               </div>
+            </div>
 
-              {/* Quantity Controls & Action */}
-              <div className="mt-6 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-                <div className="flex items-center gap-2 self-start rounded-xl border border-slate-200 bg-slate-50 p-1">
+            {/* Sticky action bar — the total here is meal + extras + quantity,
+                recalculated on every change above. */}
+            <div className="shrink-0 border-t border-slate-100 bg-white/95 px-5 py-3.5 backdrop-blur-sm sm:px-6">
+              <div className="flex items-center gap-3">
+                <div className="flex shrink-0 items-center gap-1 rounded-2xl border border-slate-200 bg-slate-50 p-1">
                   <button
+                    type="button"
                     onClick={() => setItemQuantity(Math.max(1, itemQuantity - 1))}
-                    className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-slate-700 shadow-xs transition hover:bg-slate-100 active:scale-95"
+                    disabled={itemQuantity <= 1 || !selectedItem.is_available}
+                    aria-label={`Decrease ${selectedItem.name} quantity`}
+                    className="flex h-11 w-11 items-center justify-center rounded-xl bg-white text-slate-700 shadow-sm transition hover:bg-slate-100 active:scale-95 disabled:cursor-not-allowed disabled:text-slate-300 disabled:shadow-none"
                   >
                     <Minus className="w-4 h-4" />
                   </button>
-                  <span className="font-bold text-sm w-6 text-center">{itemQuantity}</span>
+                  <span className="w-6 text-center text-sm font-black tabular-nums text-slate-900">
+                    {itemQuantity}
+                  </span>
                   <button
+                    type="button"
                     onClick={() => setItemQuantity(itemQuantity + 1)}
-                    className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-slate-700 shadow-xs transition hover:bg-slate-100 active:scale-95"
+                    disabled={!selectedItem.is_available}
+                    aria-label={`Increase ${selectedItem.name} quantity`}
+                    className="flex h-11 w-11 items-center justify-center rounded-xl bg-white text-slate-700 shadow-sm transition hover:bg-slate-100 active:scale-95 disabled:cursor-not-allowed disabled:text-slate-300 disabled:shadow-none"
                   >
                     <Plus className="w-4 h-4" />
                   </button>
                 </div>
 
                 <button
+                  type="button"
                   onClick={handleAddToCart}
                   disabled={!selectedItem.is_available}
-                  className="flex h-12 w-full flex-1 items-center justify-center gap-2 rounded-xl bg-brand px-4 text-xs font-bold text-white shadow-md transition hover:bg-brand-dark disabled:opacity-50 active:scale-[0.98]"
+                  className="group relative flex h-14 flex-1 items-center justify-between gap-2 overflow-hidden rounded-2xl bg-brand pl-2.5 pr-3 text-white shadow-lg shadow-brand/25 transition hover:bg-brand-dark focus:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 active:scale-[0.985] disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-500 disabled:shadow-none"
                 >
-                  <ShoppingBag className="w-4 h-4" />
-                  <span>
-                    {editingLineKey ? 'Update Cart' : 'Add to Cart'} · {formatGHS(activeTotal)}
+                  {/* One soft sheen sweep on hover — pure decoration. */}
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/25 to-transparent transition-transform duration-700 ease-out group-hover:translate-x-full"
+                  />
+
+                  <span className="relative flex items-center gap-2">
+                    {editingLineKey ? (
+                      <Check className="h-4.5 w-4.5" />
+                    ) : (
+                      <ShoppingBag className="h-4.5 w-4.5" />
+                    )}
+                    <span className="text-[13px] font-extrabold tracking-tight">
+                      {selectedItem.is_available
+                        ? editingLineKey
+                          ? 'Update Cart'
+                          : 'Add to Cart'
+                        : 'Sold out today'}
+                    </span>
+                  </span>
+
+                  <span className="relative rounded-xl bg-white/20 px-3 py-1.5 text-[13px] font-black tabular-nums">
+                    {formatGHS(activeTotal)}
                   </span>
                 </button>
               </div>

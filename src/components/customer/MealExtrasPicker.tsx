@@ -90,13 +90,13 @@ export const MealExtrasPicker: React.FC<MealExtrasPickerProps> = ({
 
     return (
       <div
-        className={`flex items-center gap-3 rounded-xl border p-2.5 transition ${
+        className={`flex items-center gap-3 rounded-xl border bg-white p-2.5 transition ${
           quantity > 0
-            ? 'border-emerald-500 bg-emerald-50/50'
-            : 'border-slate-200 bg-white'
+            ? 'border-emerald-500 shadow-[0_1px_10px_rgba(5,150,105,0.15)] ring-1 ring-emerald-500/25'
+            : 'border-slate-200 hover:border-slate-300'
         } ${available ? '' : 'opacity-70'}`}
       >
-        <div className="h-11 w-11 flex-shrink-0 overflow-hidden rounded-lg bg-slate-100 flex items-center justify-center">
+        <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded-xl bg-slate-100 ring-1 ring-slate-900/5 flex items-center justify-center">
           {addon.image_url ? (
             <img
               src={addon.image_url}
@@ -121,7 +121,9 @@ export const MealExtrasPicker: React.FC<MealExtrasPickerProps> = ({
           {addon.description && (
             <p className="truncate text-[11px] leading-snug text-slate-500">{addon.description}</p>
           )}
-          <span className="text-xs font-extrabold text-emerald-700">{formatGHS(addon.price)}</span>
+          <span className="text-xs font-extrabold tabular-nums text-emerald-700">
+            {formatGHS(addon.price)}
+          </span>
         </div>
 
         {quantity === 0 ? (
@@ -163,7 +165,7 @@ export const MealExtrasPicker: React.FC<MealExtrasPickerProps> = ({
   };
 
   return (
-    <div className="mt-5 border-t border-slate-100 pt-4">
+    <div className="mt-5 rounded-2xl border border-slate-100 bg-slate-50/70 p-3">
       {(showComboTitle || showPlainTitle) && (
         <div className="mb-2.5">
           <h4 className="text-xs font-bold text-slate-700">
