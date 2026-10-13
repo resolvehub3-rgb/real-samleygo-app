@@ -36,6 +36,7 @@ import { SupportPage } from './pages/public/SupportPage';
 
 // Legal document centre — one layout, one route per published document.
 import { LegalDocumentLayout } from './components/legal/LegalDocumentLayout';
+import { SiteFooter } from './components/legal/SiteFooter';
 import { LEGAL_DOCUMENTS } from './legal/registry';
 
 export default function App() {
@@ -180,6 +181,10 @@ export default function App() {
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </div>
+
+            {/* Legal & support links on every page that does not carry its
+                own footer — see SiteFooter for the routes it steps aside on. */}
+            <SiteFooter />
 
             <MobileBottomNav />
             <OfflineIndicator />

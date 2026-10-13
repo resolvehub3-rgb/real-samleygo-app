@@ -1,19 +1,23 @@
 /**
- * Official SamleyGo contact channels, in one place so the support page, the
+ * Official SamleyGo contact channels, in one place so the support screen, the
  * footer and every legal document quote exactly the same details.
  *
- * These are the channels already published in the product (Support screen).
- * A dedicated legal/privacy mailbox has not been published, so privacy and
- * legal requests are routed through the existing support channel rather than
- * inventing an address that no one monitors.
+ * These are SamleyGo's published support channels for the Ghana market.
+ * There is no separate legal or privacy mailbox, so privacy requests and
+ * legal notices are routed through the same support channel rather than
+ * inventing an address nobody monitors.
  */
 
-/** Primary support mailbox — published on the in-app Support screen. */
-export const SUPPORT_EMAIL = 'support@samleygo.com.gh';
+/** Primary support mailbox — the address customers are asked to write to. */
+export const SUPPORT_EMAIL = 'samleygo@gmail.com';
 
-/** Dispatch/support hotline — published on the in-app Support screen. */
-export const SUPPORT_PHONE = '+233 (0) 30 200 4567';
-export const SUPPORT_PHONE_HREF = '+233302004567';
+/** Primary support line. Digits only, as dialled with the Ghana country code. */
+export const SUPPORT_PHONE = '0594345424';
+export const SUPPORT_PHONE_HREF = '+233594345424';
+
+/** Secondary support line, used when the primary line is busy. */
+export const SUPPORT_PHONE_ALT = '0572207831';
+export const SUPPORT_PHONE_ALT_HREF = '+233572207831';
 
 /** Where privacy requests and legal notices are sent (routes to support). */
 export const PRIVACY_CONTACT_EMAIL = SUPPORT_EMAIL;

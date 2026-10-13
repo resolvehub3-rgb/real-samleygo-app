@@ -335,6 +335,34 @@ export const ProfilePage: React.FC = () => {
               </p>
             </div>
 
+            {/* Legal & policies — the documents that govern this account */}
+            <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 space-y-2">
+              <p className="text-xs font-bold text-slate-700">Legal &amp; policies</p>
+              <p className="text-[11px] text-slate-500">
+                The terms and privacy information that apply to your account.
+              </p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 pt-0.5">
+                <Link
+                  to="/terms"
+                  className="inline-flex min-h-6 items-center text-xs font-semibold text-emerald-700 underline-offset-4 hover:underline"
+                >
+                  Terms of Service
+                </Link>
+                <Link
+                  to="/privacy"
+                  className="inline-flex min-h-6 items-center text-xs font-semibold text-emerald-700 underline-offset-4 hover:underline"
+                >
+                  Privacy Policy
+                </Link>
+                <Link
+                  to="/support"
+                  className="inline-flex min-h-6 items-center text-xs font-semibold text-emerald-700 underline-offset-4 hover:underline"
+                >
+                  Help &amp; Support
+                </Link>
+              </div>
+            </div>
+
             <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between pt-1">
               <div aria-live="polite" className="text-xs font-semibold">
                 {saveState === 'saved' && (

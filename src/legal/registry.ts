@@ -13,8 +13,8 @@ import { courierTermsDocument } from './documents/courierTerms';
  * Shared dates for the legal centre. Every document is re-issued together in
  * this production update, so one pair of dates is shown across the set.
  */
-export const LEGAL_LAST_UPDATED = 'October 8, 2026';
-export const LEGAL_EFFECTIVE_DATE = 'October 8, 2026';
+export const LEGAL_LAST_UPDATED = 'October 13, 2026';
+export const LEGAL_EFFECTIVE_DATE = 'October 13, 2026';
 
 /**
  * Every legal document, in the order they appear in the footer and in any

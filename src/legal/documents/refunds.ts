@@ -306,7 +306,7 @@ export const refundsDocument: LegalDocument = {
           kind: 'list',
           ordered: true,
           items: [
-            'Contact us as soon as possible through the in-app [Support screen](/support), by email at [support@samleygo.com.gh](mailto:support@samleygo.com.gh), or by phone on +233 (0) 30 200 4567.',
+            'Contact us as soon as possible through the in-app [Support screen](/support), by email at [samleygo@gmail.com](mailto:samleygo@gmail.com), or by phone on 0594345424.',
             'Give us the order reference, what went wrong, and any photos or details that help (for example, a missing or damaged item).',
             'Allow us reasonable time to check with the restaurant or courier — we usually need their side of the story too.',
             'We will tell you the outcome and, where a refund is due, how it will be returned.',
@@ -360,7 +360,7 @@ export const refundsDocument: LegalDocument = {
       blocks: [
         {
           kind: 'p',
-          text: 'For cancellations, claims and refund questions: [Support screen](/support) · [support@samleygo.com.gh](mailto:support@samleygo.com.gh) · +233 (0) 30 200 4567.',
+          text: 'For cancellations, claims and refund questions: [Support screen](/support) · [samleygo@gmail.com](mailto:samleygo@gmail.com) · 0594345424.',
         },
         {
           kind: 'p',

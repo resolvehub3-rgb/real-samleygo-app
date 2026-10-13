@@ -8,7 +8,7 @@
 
 /**
  * Body copy. Links use a markdown-lite form — `[Support](/support)` or
- * `[support@samleygo.com.gh](mailto:support@samleygo.com.gh)` — rendered as
+ * `[samleygo@gmail.com](mailto:samleygo@gmail.com)` — rendered as
  * real anchors with the site's focus styles. No other markup is interpreted.
  */
 export type LegalText = string;

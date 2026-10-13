@@ -1,7 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { LEGAL_DOCUMENTS } from '../../legal/registry';
-import { SUPPORT_EMAIL, SUPPORT_PHONE, SUPPORT_PHONE_HREF, SUPPORT_PATH } from '../../legal/contact';
+import { SUPPORT_EMAIL, SUPPORT_PHONE, SUPPORT_PHONE_HREF, SUPPORT_PHONE_ALT, SUPPORT_PHONE_ALT_HREF, SUPPORT_PATH } from '../../legal/contact';
 
 /**
  * The legal centre's footer: brand block, the full document index and the
@@ -78,6 +78,14 @@ export const LegalFooter: React.FC = () => {
                   className="inline-flex min-h-6 items-center text-sm text-slate-600 underline-offset-4 transition hover:text-brand-dark hover:underline"
                 >
                   {SUPPORT_PHONE}
+                </a>
+              </li>
+              <li>
+                <a
+                  href={`tel:${SUPPORT_PHONE_ALT_HREF}`}
+                  className="inline-flex min-h-6 items-center text-sm text-slate-600 underline-offset-4 transition hover:text-brand-dark hover:underline"
+                >
+                  {SUPPORT_PHONE_ALT}
                 </a>
               </li>
             </ul>

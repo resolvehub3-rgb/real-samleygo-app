@@ -365,7 +365,7 @@ export const restaurantTermsDocument: LegalDocument = {
       blocks: [
         {
           kind: 'p',
-          text: '[Support screen](/support) · [support@samleygo.com.gh](mailto:support@samleygo.com.gh) · +233 (0) 30 200 4567.',
+          text: '[Support screen](/support) · [samleygo@gmail.com](mailto:samleygo@gmail.com) · 0594345424.',
         },
         {
           kind: 'p',

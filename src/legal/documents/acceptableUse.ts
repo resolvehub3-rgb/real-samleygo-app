@@ -200,7 +200,7 @@ export const acceptableUseDocument: LegalDocument = {
         },
         {
           kind: 'p',
-          text: 'This does not prevent you from reporting a security vulnerability to us responsibly — we welcome responsible disclosure at [support@samleygo.com.gh](mailto:support@samleygo.com.gh).',
+          text: 'This does not prevent you from reporting a security vulnerability to us responsibly — we welcome responsible disclosure at [samleygo@gmail.com](mailto:samleygo@gmail.com).',
         },
       ],
     },
@@ -302,7 +302,7 @@ export const acceptableUseDocument: LegalDocument = {
       blocks: [
         {
           kind: 'p',
-          text: 'If you see behaviour that breaches this policy, tell us through the in-app [Support screen](/support) or at [support@samleygo.com.gh](mailto:support@samleygo.com.gh), with as much detail as you can — the order reference, the account involved, what happened and when.',
+          text: 'If you see behaviour that breaches this policy, tell us through the in-app [Support screen](/support) or at [samleygo@gmail.com](mailto:samleygo@gmail.com), with as much detail as you can — the order reference, the account involved, what happened and when.',
         },
         {
           kind: 'p',
@@ -316,7 +316,7 @@ export const acceptableUseDocument: LegalDocument = {
       blocks: [
         {
           kind: 'p',
-          text: '[Support screen](/support) · [support@samleygo.com.gh](mailto:support@samleygo.com.gh) · +233 (0) 30 200 4567.',
+          text: '[Support screen](/support) · [samleygo@gmail.com](mailto:samleygo@gmail.com) · 0594345424.',
         },
         {
           kind: 'p',

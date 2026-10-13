@@ -137,7 +137,7 @@ export const cookiesDocument: LegalDocument = {
           kind: 'list',
           items: [
             'Information in your browser is only as safe as your device — use a screen lock and do not share your sign-in.',
-            'If you suspect your session has been compromised, sign out, change your password and contact [support@samleygo.com.gh](mailto:support@samleygo.com.gh).',
+            'If you suspect your session has been compromised, sign out, change your password and contact [samleygo@gmail.com](mailto:samleygo@gmail.com).',
             'Clearing your browser data removes the local session; it does not delete your account.',
           ],
         },
@@ -247,7 +247,7 @@ export const cookiesDocument: LegalDocument = {
       blocks: [
         {
           kind: 'p',
-          text: 'Questions about this policy, or about data stored in your browser, can be sent to [support@samleygo.com.gh](mailto:support@samleygo.com.gh), through the in-app [Support screen](/support), or by phone on +233 (0) 30 200 4567.',
+          text: 'Questions about this policy, or about data stored in your browser, can be sent to [samleygo@gmail.com](mailto:samleygo@gmail.com), through the in-app [Support screen](/support), or by phone on 0594345424.',
         },
       ],
     },
