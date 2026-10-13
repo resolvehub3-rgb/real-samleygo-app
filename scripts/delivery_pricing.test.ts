@@ -791,6 +791,37 @@ test('the home delivery address is typed and searched, never picked from a list'
   assert.ok(/readDeliverTo\(\)/.test(cart), 'and the checkout still reads it');
 });
 
+test('the address sheet hands over to a map where the pin is pinned live', () => {
+  const home = read('src', 'pages', 'customer', 'HomePage.tsx');
+  const field = read('src', 'components', 'common', 'AddressSearchField.tsx');
+  const map = stripComments(read('src', 'components', 'common', 'DeliveryMapPicker.tsx'));
+
+  // The button sits inline with Search, in the same row.
+  assert.ok(/trailing=\{\s*<button/.test(home), 'the map button rides in the field row');
+  assert.ok(/setShowMapPicker\(true\)/.test(home), 'and it opens the map view');
+  assert.ok(/\{trailing\}/.test(field), 'the field renders it beside the Search button');
+  assert.ok(/<DeliveryMapPicker/.test(home), 'the home page mounts the picker');
+
+  // Pinning is realtime, and a name is only ever shown for the CURRENT pin.
+  assert.ok(/reverseGeocodeAddress\(next\)/.test(map), 'the pin resolves to a readable address');
+  assert.ok(/setLabel\(null\)/.test(map), 'a moved pin drops its old name before looking up a new one');
+  assert.ok(/gmpDraggable/.test(map), 'the pin can be dragged to fine-tune');
+  assert.ok(/map\.addListener\('click'/.test(map), 'and tapping the map moves it');
+
+  // Back is a pure back; nothing is written until the pin is confirmed.
+  assert.ok(
+    /onCancel=\{\(\) => setShowMapPicker\(false\)\}/.test(home),
+    'cancel only closes the view — it changes no address'
+  );
+  assert.ok(/disabled=\{!canConfirm\}/.test(map), 'an unresolved pin cannot be confirmed');
+
+  // Honest failure: a missing or refused key is a way back to the search box.
+  assert.ok(/setMapError\(true\)/.test(map), 'a refused map load is caught, not thrown');
+  assert.ok(/Search instead/.test(map), 'and offers the search box again');
+  assert.equal(/alert\(/.test(map), false, 'no blocking alert');
+  assert.equal(/formatGHS|delivery_fee/i.test(map), false, 'a location is never a price');
+});
+
 // ---------------------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Search,
   MapPin,
+  Map as MapIcon,
   ChevronDown,
   ChevronRight,
   Store,
@@ -30,6 +31,7 @@ import { useLiveLocationLabel } from '../../hooks/useLiveLocationLabel';
 import { playCustomerStatusAlert } from '../../lib/soundAlerts';
 import { PWAInstallButton } from '../../components/common/PWAInstallButton';
 import { AddressSearchField } from '../../components/common/AddressSearchField';
+import { DeliveryMapPicker } from '../../components/common/DeliveryMapPicker';
 import { ErrandsFab } from '../../components/customer/ErrandsFab';
 import type { LatLng } from '../../lib/routing';
 import {
@@ -135,6 +137,8 @@ export const HomePage: React.FC = () => {
   const [showLocationModal, setShowLocationModal] = useState(false);
   /** What the customer is typing in the delivery-address search box. */
   const [addressQuery, setAddressQuery] = useState('');
+  /** True while the full-screen "pick it on the map" view is open. */
+  const [showMapPicker, setShowMapPicker] = useState(false);
   const [isDetectingLocation, setIsDetectingLocation] = useState(false);
   /** Friendly, inline copy for a failed fix — never an alert, never coords. */
   const [locationError, setLocationError] = useState<string | null>(null);
@@ -1160,6 +1164,17 @@ export const HomePage: React.FC = () => {
               onPick={handleAddressPicked}
               placeholder="Area, street or landmark"
               searchLabel="Search"
+              trailing={
+                <button
+                  type="button"
+                  onClick={() => setShowMapPicker(true)}
+                  aria-label="Choose the delivery location on the map"
+                  className="flex h-12 shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-[13px] font-bold text-slate-700 transition hover:bg-slate-50 active:scale-[0.97]"
+                >
+                  <MapIcon className="h-4 w-4" aria-hidden="true" />
+                  Map
+                </button>
+              }
             />
 
             <button
@@ -1186,6 +1201,19 @@ export const HomePage: React.FC = () => {
             )}
           </div>
         </div>
+      )}
+
+      {/* Full-screen map: drop or drag the pin, then confirm back into the sheet */}
+      {showMapPicker && (
+        <DeliveryMapPicker
+          address={addressQuery.trim() || displayLocation}
+          fallbackCenter={liveLocation.point}
+          onConfirm={(picked) => {
+            setShowMapPicker(false);
+            handleAddressPicked(picked);
+          }}
+          onCancel={() => setShowMapPicker(false)}
+        />
       )}
 
       {/* Errands shortcut — bottom-right, above the mobile bottom nav */}

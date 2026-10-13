@@ -52,6 +52,12 @@ export interface AddressSearchFieldProps {
    * Leave it off for flows that only ever pick from the typed suggestions.
    */
   searchLabel?: string;
+  /**
+   * A second, quieter action rendered beside the Search button — the home
+   * screen's "open the map" shortcut. The drop-down spans the whole row, so
+   * it still opens underneath both.
+   */
+  trailing?: React.ReactNode;
 }
 
 /** Prefer Ghana, but never hide a place Nominatim only knows by its wider name. */
@@ -83,6 +89,7 @@ export const AddressSearchField: React.FC<AddressSearchFieldProps> = ({
   placeholder,
   disabled = false,
   searchLabel,
+  trailing,
 }) => {
   const fieldId = useId();
   const listId = `${fieldId}-suggestions`;
@@ -329,16 +336,21 @@ export const AddressSearchField: React.FC<AddressSearchFieldProps> = ({
           )}
         </div>
 
-        {searchLabel && (
-          <button
-            type="button"
-            onClick={handleSubmit}
-            disabled={disabled || value.trim().length === 0}
-            className="flex h-12 shrink-0 items-center gap-1.5 rounded-xl bg-brand px-4 text-[13px] font-bold text-white transition hover:bg-brand-dark active:scale-[0.97] disabled:opacity-50"
-          >
-            <Search className="h-4 w-4" aria-hidden="true" />
-            {searchLabel}
-          </button>
+        {(searchLabel || trailing) && (
+          <div className="flex shrink-0 items-center gap-2">
+            {searchLabel && (
+              <button
+                type="button"
+                onClick={handleSubmit}
+                disabled={disabled || value.trim().length === 0}
+                className="flex h-12 shrink-0 items-center gap-1.5 rounded-xl bg-brand px-4 text-[13px] font-bold text-white transition hover:bg-brand-dark active:scale-[0.97] disabled:opacity-50"
+              >
+                <Search className="h-4 w-4" aria-hidden="true" />
+                {searchLabel}
+              </button>
+            )}
+            {trailing}
+          </div>
         )}
       </div>
 
