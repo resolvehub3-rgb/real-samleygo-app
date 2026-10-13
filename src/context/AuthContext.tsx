@@ -38,6 +38,14 @@ interface AuthContextType {
   notifications: NotificationItem[];
   markNotificationAsRead: (id: string) => Promise<void>;
   /**
+   * Remove one notification from the signed-in user's OWN list. Row Level
+   * Security scopes the delete to `user_id = auth.uid()`, so this can only
+   * ever clear the caller's rows — never another user's.
+   */
+  dismissNotification: (id: string) => Promise<void>;
+  /** Empty the signed-in user's notification list in one action. */
+  clearNotifications: () => Promise<void>;
+  /**
    * `role` is the authoritative role resolved during sign-in, so callers can
    * route without depending on a (stale) render closure.
    */
@@ -490,6 +498,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     );
   };
 
+  /**
+   * Remove a single notification. The row is deleted first and dropped from
+   * the list afterwards, so the bell never shows something the database has
+   * already forgotten. RLS only ever matches this user's own `user_id`.
+   */
+  const dismissNotification = async (id: string) => {
+    await supabase.from('notifications').delete().eq('id', id);
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
+  };
+
+  /**
+   * Clear every notification this user has. Scoped by `user_id` in the query
+   * AND by Row Level Security, so one customer's "Clear all" can never touch
+   * another account's list.
+   */
+  const clearNotifications = async () => {
+    if (!user) return;
+    await supabase.from('notifications').delete().eq('user_id', user.id);
+    setNotifications([]);
+  };
+
   const unreadCount = notifications.filter((n) => !n.is_read).length;
 
   return (
@@ -503,6 +532,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         unreadCount,
         notifications,
         markNotificationAsRead,
+        dismissNotification,
+        clearNotifications,
         signIn,
         signUp,
         signOut,

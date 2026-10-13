@@ -11,6 +11,7 @@ import {
   Check,
   ChevronDown,
   Search,
+  X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useCart } from '../../context/CartContext';
@@ -19,7 +20,17 @@ import { UserAvatar } from './UserAvatar';
 import { isAuthPath } from '../../lib/roleRoutes';
 
 export const Navbar: React.FC = () => {
-  const { user, profile, role, signOut, unreadCount, notifications, markNotificationAsRead } = useAuth();
+  const {
+    user,
+    profile,
+    role,
+    signOut,
+    unreadCount,
+    notifications,
+    markNotificationAsRead,
+    dismissNotification,
+    clearNotifications,
+  } = useAuth();
   const { totalCount } = useCart();
   const navigate = useNavigate();
   const location = useLocation();
@@ -27,6 +38,9 @@ export const Navbar: React.FC = () => {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [headerSearch, setHeaderSearch] = useState('');
+  // Guards the "Clear all" button against a double tap while the delete is in
+  // flight, so one tap cannot race another.
+  const [isClearing, setIsClearing] = useState(false);
 
   // The super-admin console is a full-page workspace with its own sidebar nav,
   // so the public site header is suppressed there (AdminDashboard provides its
@@ -54,6 +68,18 @@ export const Navbar: React.FC = () => {
   ) {
     return null;
   }
+
+  const handleClearNotifications = async () => {
+    if (isClearing) return;
+    setIsClearing(true);
+    try {
+      // Deletes only this account's rows (user_id + Row Level Security), then
+      // empties the local list so the bell count drops to zero.
+      await clearNotifications();
+    } finally {
+      setIsClearing(false);
+    }
+  };
 
   const handleHeaderSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -171,9 +197,21 @@ export const Navbar: React.FC = () => {
                       aria-hidden="true"
                     />
                     <div className="fixed inset-x-2 top-[4.75rem] z-50 flex max-h-[70dvh] flex-col rounded-2xl bg-white shadow-2xl border border-slate-100 p-4 animate-in fade-in zoom-in-95 sm:absolute sm:inset-x-auto sm:top-auto sm:right-0 sm:mt-2 sm:w-96 sm:max-h-none">
-                      <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                      <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-100">
                         <h4 className="font-bold text-slate-900 text-sm">Notifications</h4>
-                        <span className="text-xs text-slate-500 font-medium">{unreadCount} new</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-slate-500 font-medium">{unreadCount} new</span>
+                          {notifications.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={handleClearNotifications}
+                              disabled={isClearing}
+                              className="rounded-lg px-2 py-1 text-[11px] font-bold text-slate-500 transition hover:bg-slate-100 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {isClearing ? 'Clearing…' : 'Clear all'}
+                            </button>
+                          )}
+                        </div>
                       </div>
 
                       <div className="flex-1 min-h-0 mt-2 overflow-y-auto overscroll-contain divide-y divide-slate-50 sm:flex-none sm:max-h-72">
@@ -196,9 +234,23 @@ export const Navbar: React.FC = () => {
                           >
                             <div className="flex items-start justify-between gap-2">
                               <p className="font-semibold text-xs text-slate-900">{item.title}</p>
-                              {!item.is_read && (
-                                <span className="w-2 h-2 rounded-full bg-emerald-600 flex-shrink-0 mt-1" />
-                              )}
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                {!item.is_read && (
+                                  <span className="w-2 h-2 rounded-full bg-emerald-600 mt-1" />
+                                )}
+                                {/* Dismiss just this one without following its link. */}
+                                <button
+                                  type="button"
+                                  aria-label={`Dismiss notification: ${item.title}`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    dismissNotification(item.id);
+                                  }}
+                                  className="flex h-6 w-6 items-center justify-center rounded-md text-slate-300 transition hover:bg-slate-100 hover:text-rose-600"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
                             </div>
                             <p className="text-[11px] text-slate-600 mt-0.5 line-clamp-2">{item.message}</p>
                             <span className="text-[9px] text-slate-400 mt-1 block">
