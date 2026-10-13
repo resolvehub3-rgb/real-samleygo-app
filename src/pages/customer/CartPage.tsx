@@ -11,9 +11,10 @@ import {
   CreditCard,
   Navigation,
   ArrowRight,
+  CheckCircle,
+  ChevronDown,
   ShieldCheck,
   AlertCircle,
-  CheckCircle,
 } from 'lucide-react';
 import { useCart } from '../../context/CartContext';
 import { useAuth } from '../../context/AuthContext';
@@ -48,6 +49,13 @@ const PAYMENT_METHODS = [
   { id: 'CARD', name: 'Debit / Credit Card (Visa / Mastercard)', color: 'border-slate-300' },
   { id: 'CASH', name: 'Cash on Delivery', color: 'border-emerald-300' },
 ];
+
+/** Every mobile-money tender needs the customer's wallet number. */
+const MOMO_METHODS = ['MTN_MOMO', 'TELECEL_CASH', 'AT_MONEY'];
+
+/** Never returns undefined: an unknown stored id falls back to the first tender. */
+const findPaymentMethod = (id: string) =>
+  PAYMENT_METHODS.find((method) => method.id === id) ?? PAYMENT_METHODS[0];
 
 export const CartPage: React.FC = () => {
   const { items, restaurant, subtotal, updateQuantity, removeItem, clearCart, deliveryNotes, setDeliveryNotes } = useCart();
@@ -439,7 +447,7 @@ export const CartPage: React.FC = () => {
         customer_id: user.id,
         amount: grandTotal,
         currency: 'GHS',
-        provider: paymentMethod.includes('MOMO') ? 'Hubtel/MTN' : 'Paystack',
+        provider: MOMO_METHODS.includes(paymentMethod) ? 'Hubtel/MTN' : 'Paystack',
         payment_method: paymentMethod,
         status: 'COMPLETED',
         payment_reference: paymentRef,
@@ -732,52 +740,52 @@ export const CartPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Payment Method Selection */}
+            {/* Payment Method Selection — a drop-down keeps the checkout short */}
             <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200 shadow-xs space-y-3">
               <h3 className="font-bold text-sm text-slate-900 flex items-center gap-2">
                 <CreditCard className="w-4 h-4 text-emerald-600" />
                 <span>Select Payment Method (Ghana)</span>
               </h3>
 
-              <div className="space-y-2">
-                {PAYMENT_METHODS.map((method) => (
-                  <label
-                    key={method.id}
-                    className={`flex items-center justify-between p-3 rounded-xl border cursor-pointer transition ${
-                      paymentMethod === method.id
-                        ? 'border-emerald-600 bg-emerald-50/50 shadow-xs'
-                        : 'border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <input
-                        type="radio"
-                        name="paymentMethod"
-                        value={method.id}
-                        checked={paymentMethod === method.id}
-                        onChange={(e) => setPaymentMethod(e.target.value)}
-                        className="text-emerald-600 focus:ring-emerald-500"
-                      />
-                      <span className="text-xs sm:text-sm font-semibold text-slate-800">
-                        {method.name}
-                      </span>
-                    </div>
-                    {paymentMethod === method.id && (
-                      <CheckCircle className="w-4 h-4 text-emerald-600" />
-                    )}
-                  </label>
-                ))}
+              <div className="relative">
+                <select
+                  id="cart-payment-method"
+                  name="paymentMethod"
+                  value={paymentMethod}
+                  onChange={(e) => setPaymentMethod(e.target.value)}
+                  aria-label="Select payment method"
+                  className="h-12 w-full appearance-none rounded-xl border border-slate-200 bg-slate-50 pl-11 pr-10 text-xs sm:text-sm font-semibold text-slate-800 cursor-pointer transition focus:border-emerald-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                >
+                  {PAYMENT_METHODS.map((method) => (
+                    <option key={method.id} value={method.id}>
+                      {method.name}
+                    </option>
+                  ))}
+                </select>
+
+                <CreditCard className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-emerald-600" />
+                <ChevronDown className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
               </div>
 
-              {paymentMethod.includes('MOMO') && (
-                <div className="pt-2">
+              <p className="flex items-center gap-1.5 text-[11px] text-slate-500">
+                <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                <span>
+                  Paying with{' '}
+                  <span className="font-bold text-slate-700">
+                    {findPaymentMethod(paymentMethod).name}
+                  </span>
+                </span>
+              </p>
+
+              {MOMO_METHODS.includes(paymentMethod) && (
+                <div className="pt-1">
                   <label htmlFor="cart-momo" className="block text-[11px] font-bold text-slate-700 mb-1">
                     Mobile Money Wallet Number
                   </label>
                   <input
                     type="tel"
                     id="cart-momo"
-                    placeholder="Enter Ghana Mobile Money number"
+                    placeholder="e.g. 024 123 4567"
                     value={momoNumber}
                     onChange={(e) => setMomoNumber(e.target.value)}
                     className="h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-0 text-xs font-semibold focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
