@@ -295,8 +295,16 @@ test('the app shell renders the site-wide legal footer', () => {
   for (const target of ['/terms', '/privacy', 'SUPPORT_PATH']) {
     assert.ok(footer.includes(target), `the footer does not link to ${target}`);
   }
-  // It must stand aside where another footer or shell already exists.
-  for (const rule of ['isAuthPath', 'legalDocumentForPath', "/admin", "/courier", "/restaurant/"]) {
+  // It must stand aside where another footer or shell already exists — and
+  // on the home screen, where the policy index outweighs the browse content.
+  for (const rule of [
+    "pathname === '/'",
+    'isAuthPath',
+    'legalDocumentForPath',
+    '/admin',
+    '/courier',
+    '/restaurant/',
+  ]) {
     assert.ok(footer.includes(rule), `the footer does not step aside on ${rule}`);
   }
 });

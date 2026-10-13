@@ -24,6 +24,9 @@ const PRIMARY_LINKS = [
 
 /** Routes that already render their own footer or their own full-screen chrome. */
 const hasOwnChrome = (pathname: string): boolean =>
+  // The home screen is a browse-and-decide surface — a nine-item policy index
+  // under it pushes the app's own content a long way down the page.
+  pathname === '/' ||
   isAuthPath(pathname) ||
   legalDocumentForPath(pathname) !== undefined ||
   pathname.startsWith('/admin') ||
