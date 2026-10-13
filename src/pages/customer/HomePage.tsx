@@ -83,6 +83,10 @@ const humanizeStatus = (status: string): string =>
     .map((word) => word.charAt(0) + word.slice(1).toLowerCase())
     .join(' ');
 
+/** How far the fresh-dish rail moves, in pixels, on each tick. */
+const RAIL_STEP_PX = 1;
+/** How often it moves: 30ms × 1px ≈ 33px/second — a slow, readable drift. */
+const RAIL_TICK_MS = 30;
 
 export const HomePage: React.FC = () => {
   const { user } = useAuth();
@@ -698,6 +702,51 @@ export const HomePage: React.FC = () => {
   const restaurantCountLabel =
     `${feedRestaurants.length} ${feedRestaurants.length === 1 ? 'Restaurant' : 'Restaurants'}`;
 
+  /* ---------------------------------------------------------------------
+     Fresh-dish rail: one row that drifts to the left on its own.
+     --------------------------------------------------------------------- */
+
+  const dishRailRef = useRef<HTMLDivElement>(null);
+  /** True once the visitor has expanded the rail into the full grid. */
+  const [showAllDishes, setShowAllDishes] = useState(false);
+  /** Hover, touch or keyboard focus all pause the drift. */
+  const [isRailPaused, setIsRailPaused] = useState(false);
+  /** The interval reads this ref, so pausing never restarts the timer. */
+  const isRailPausedRef = useRef(false);
+
+  useEffect(() => {
+    isRailPausedRef.current = isRailPaused;
+  }, [isRailPaused]);
+
+  // Close the rail again when the feed underneath it changes — a new search
+  // or category must not land behind a grid the visitor never asked for.
+  useEffect(() => {
+    setShowAllDishes(false);
+  }, [isCategoryFeed, searchQuery, selectedCuisine]);
+
+  useEffect(() => {
+    const track = dishRailRef.current;
+    if (showAllDishes || !track || feedDishes.length < 2) return undefined;
+
+    // A rail that never stops moving is uncomfortable to read and impossible
+    // to tap reliably, so it stays put for anyone who asked for less motion.
+    const reducedMotion =
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion) return undefined;
+
+    const id = window.setInterval(() => {
+      if (isRailPausedRef.current) return;
+      const max = track.scrollWidth - track.clientWidth;
+      if (max <= 0) return;
+      const next = track.scrollLeft + RAIL_STEP_PX;
+      // Wrap to the start rather than stopping dead at the end.
+      track.scrollLeft = next >= max ? 0 : next;
+    }, RAIL_TICK_MS);
+
+    return () => window.clearInterval(id);
+  }, [showAllDishes, feedDishes.length]);
+
   return (
     <div className="min-h-screen bg-canvas pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-12">
       {/* Live sync notice (kitchen menu changed while browsing) */}
@@ -1023,6 +1072,24 @@ export const HomePage: React.FC = () => {
                   : 'Recently added by partner kitchens'
               }
               countLabel={feedDishesLoading ? undefined : dishCountLabel}
+              action={
+                !feedDishesLoading && feedDishes.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllDishes((open) => !open)}
+                    aria-expanded={showAllDishes}
+                    className="inline-flex h-10 shrink-0 items-center gap-1 rounded-xl border border-slate-200 bg-white px-3.5 text-xs font-bold text-slate-700 shadow-xs transition hover:border-emerald-300 hover:text-brand-dark active:scale-95"
+                  >
+                    <span>{showAllDishes ? 'Show Less' : 'View All'}</span>
+                    <ChevronRight
+                      aria-hidden="true"
+                      className={`h-4 w-4 transition-transform duration-300 ${
+                        showAllDishes ? '-rotate-90' : ''
+                      }`}
+                    />
+                  </button>
+                ) : null
+              }
             />
 
             {feedDishesLoading ? (
@@ -1057,10 +1124,33 @@ export const HomePage: React.FC = () => {
                   ) : undefined
                 }
               />
-            ) : (
+            ) : showAllDishes ? (
+              /* Expanded: every dish, as a grid. */
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
                 {feedDishes.map((dish) => (
                   <FoodCard key={dish.id} dish={dish} onAdd={handleAddDishToCart} />
+                ))}
+              </div>
+            ) : (
+              /* Default: one row, drifting left, that stops for a hovering,
+                 touched or focused card and stays still for anyone who asked
+                 for reduced motion. */
+              <div
+                ref={dishRailRef}
+                role="region"
+                aria-label="Fresh dishes near you"
+                onMouseEnter={() => setIsRailPaused(true)}
+                onMouseLeave={() => setIsRailPaused(false)}
+                onTouchStart={() => setIsRailPaused(true)}
+                onTouchEnd={() => setIsRailPaused(false)}
+                onFocus={() => setIsRailPaused(true)}
+                onBlur={() => setIsRailPaused(false)}
+                className="no-scrollbar -mx-4 flex gap-3 overflow-x-auto overscroll-x-contain px-4 pb-1 sm:mx-0 sm:px-0"
+              >
+                {feedDishes.map((dish) => (
+                  <div key={dish.id} className="w-44 shrink-0 sm:w-52 lg:w-56">
+                    <FoodCard dish={dish} onAdd={handleAddDishToCart} />
+                  </div>
                 ))}
               </div>
             )}
