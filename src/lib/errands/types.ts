@@ -198,6 +198,12 @@ export interface ErrandsBooking {
   cancellationReason: string | null;
   failureNote: string | null;
   createdAt: string;
+  /**
+   * How the customer said they would settle (Cash, MoMo, card…). Written by
+   * the server from the booking RPC; `null` on a project that has not run the
+   * payment migration yet — never a guess.
+   */
+  paymentMethod: string | null;
   /** Exact endpoints/contacts — `null` for a driver who has not accepted. */
   details: ErrandsBookingDetails | null;
   /** 4-digit passenger-ride PIN — only ever returned to the customer. */

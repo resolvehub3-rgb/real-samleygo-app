@@ -430,6 +430,27 @@ begin
     if to_regprocedure('public.create_errands_booking(uuid, uuid)') is null then
         raise exception 'FAIL - create_errands_booking(quote_id, driver_id) is missing';
     end if;
+    -- Optional tender overload: the same booking plus the payment method the
+    -- customer chose. A project may run without that migration, so absence is
+    -- allowed — but when the column exists it MUST be constrained to exactly
+    -- the methods the platform records.
+    if exists (
+        select 1
+          from information_schema.columns c
+         where c.table_schema = 'public'
+           and c.table_name = 'errands_bookings'
+           and c.column_name = 'payment_method'
+    ) and not exists (
+        select 1
+          from information_schema.check_constraints cc
+          join information_schema.constraint_column_usage ccu
+            on ccu.constraint_name = cc.constraint_name
+           and ccu.table_schema = cc.constraint_schema
+         where cc.constraint_schema = 'public'
+           and cc.constraint_name = 'errands_bookings_payment_method_check'
+    ) then
+        raise exception 'FAIL - errands_bookings.payment_method is unconstrained';
+    end if;
     if to_regprocedure('public.errands_set_booking_status(uuid, text, text, text)') is null then
         raise exception 'FAIL - errands_set_booking_status(booking_id, status, note, trip_pin) is missing';
     end if;

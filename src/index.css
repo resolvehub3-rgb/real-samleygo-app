@@ -160,6 +160,101 @@
   }
 }
 
+/* ---------------------------------------------------------------------------
+   Errands ride-selection screen (map + bottom sheet).
+   The screen fills exactly the space between the sticky navbar and the mobile
+   bottom nav, so the PAGE never scrolls — the sheet's list does. Three
+   breakpoints because the navbar is h-14 / sm:h-16 and the bottom nav only
+   exists below md.
+   --------------------------------------------------------------------------- */
+.errands-screen {
+  height: calc(100dvh - env(safe-area-inset-top, 0px) - 3.5rem - 4rem - env(safe-area-inset-bottom, 0px));
+}
+@media (min-width: 640px) {
+  .errands-screen {
+    height: calc(100dvh - env(safe-area-inset-top, 0px) - 4rem - 4rem - env(safe-area-inset-bottom, 0px));
+  }
+}
+@media (min-width: 768px) {
+  .errands-screen {
+    height: calc(100dvh - env(safe-area-inset-top, 0px) - 4rem);
+  }
+}
+
+/* The ride sheet's resting heights live here (not in React's style prop) so a
+   re-render can never reset a drag that is in progress. */
+.sg-sheet {
+  height: 56%;
+  transition: height 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sg-sheet[data-expanded='true'] {
+  height: 82%;
+}
+.sg-sheet[data-dragging='true'] {
+  transition: none;
+}
+
+/* Map callouts: a 0×0 anchor sits exactly on the coordinate, the pill is
+   absolutely positioned around it (left of the pickup, above the drop-off)
+   with a small tail pointing back at the marker. */
+.sg-callout-anchor {
+  position: relative;
+  width: 0;
+  height: 0;
+}
+.sg-callout {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  color: #ffffff;
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.28);
+}
+.sg-callout__value {
+  opacity: 0.92;
+  font-weight: 700;
+}
+.sg-callout--pickup {
+  right: 0;
+  top: 0;
+  transform: translate(calc(-100% - 14px), -50%);
+  background: #059669;
+}
+.sg-callout--pickup::after {
+  content: '';
+  position: absolute;
+  right: -5px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-left: 6px solid #059669;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+}
+.sg-callout--dropoff {
+  left: 0;
+  top: 0;
+  transform: translate(-50%, calc(-100% - 16px));
+  background: #02472d;
+}
+.sg-callout--dropoff::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  transform: translateX(-50%);
+  border-top: 6px solid #02472d;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+}
+
 /* iOS Safe Area Padding */
 .pt-safe {
   padding-top: env(safe-area-inset-top, 0px);

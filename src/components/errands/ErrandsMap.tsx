@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Maximize2, Minimize2, MapPin } from 'lucide-react';
+import { Maximize2, Minimize2, MapPin, LocateFixed, Loader2 } from 'lucide-react';
 
 import {
   ACCRA,
@@ -7,6 +7,7 @@ import {
   fitPoints,
   isGoogleMapsConfigured,
   loadGoogleMaps,
+  panToAnimated,
 } from '../../lib/googleMaps';
 import { makePinContent, pinAnchor } from '../../lib/mapMarkers';
 import { LatLng, RoadRoute, fetchRoadRoute } from '../../lib/routing';
@@ -22,6 +23,10 @@ import type { ErrandsNearbyDriver, ErrandsServiceCategory } from '../../lib/erra
  * realtime/poll on the page). Nothing is simulated: if no road route resolves,
  * no line is drawn at all — the fare badge already says which measurement
  * priced the trip.
+ *
+ * On top of that, the two endpoints carry callout pills (driver-to-pickup ETA
+ * and estimated arrival) fed by the page, and a circular recenter control that
+ * returns the camera to the customer's own position when they have shared it.
  */
 
 export interface ErrandsMapProps {
@@ -33,11 +38,26 @@ export interface ErrandsMapProps {
   /** Live GPS of the booked driver, while a booking is active. */
   activeDriverPosition: LatLng | null;
   serviceCategory: ErrandsServiceCategory;
+  /**
+   * Value shown in the green pickup callout (the real road ETA of the nearest
+   * eligible driver to the pickup point). `null` renders the label alone —
+   * a missing ETA is never replaced with an invented minute count.
+   */
+  pickupCallout?: string | null;
+  /**
+   * Value shown in the dark drop-off callout (arrival clock time built from
+   * the server's trip duration). `null` renders the label alone.
+   */
+  destinationCallout?: string | null;
+  /** The customer's own GPS fix, when they have granted location access. */
+  userLocation?: LatLng | null;
+  /** Asked for when the map should recenter but no fix exists yet. */
+  onRecenter?: () => void;
   heightClassName?: string;
   /**
    * Reported when the map enters/leaves fullscreen. The page uses it to lift
-   * its sticky wrapper above the navbar while fullscreen — otherwise the
-   * wrapper's stacking context would paint the overlay underneath it.
+   * its overlay above the navbar while fullscreen — otherwise the
+   * stacking context would paint it underneath the navbar.
    */
   onFullscreenChange?: (isFullscreen: boolean) => void;
 }
@@ -82,6 +102,56 @@ const makeDriverPin = (driver: ErrandsNearbyDriver, selected: boolean) => {
   return { content, anchorLeft: anchor.anchorLeft, anchorTop: anchor.anchorTop };
 };
 
+const ENDPOINT_PIN_SIZE = 24;
+
+/**
+ * Circular endpoint markers: a white-faced green target for the pickup and a
+ * solid deep-green disc for the drop-off — the reference's location markers,
+ * with no emoji and nothing that depends on an image asset.
+ */
+const makeEndpointPin = (tone: 'pickup' | 'dropoff') => {
+  const root = document.createElement('div');
+  root.style.cssText = `position:relative;width:${ENDPOINT_PIN_SIZE}px;height:${ENDPOINT_PIN_SIZE}px;`;
+  const shadow = 'box-shadow:0 2px 7px rgba(15,23,42,.4);box-sizing:border-box;';
+  root.innerHTML =
+    tone === 'pickup'
+      ? `<span style="display:grid;place-items:center;width:${ENDPOINT_PIN_SIZE}px;height:${ENDPOINT_PIN_SIZE}px;border-radius:50%;background:#ffffff;border:4px solid #059669;${shadow}"><span style="width:8px;height:8px;border-radius:50%;background:#059669;"></span></span>`
+      : `<span style="display:grid;place-items:center;width:${ENDPOINT_PIN_SIZE}px;height:${ENDPOINT_PIN_SIZE}px;border-radius:50%;background:#02472d;border:3px solid #ffffff;${shadow}"><span style="width:7px;height:7px;border-radius:50%;background:#ffffff;"></span></span>`;
+  const half = ENDPOINT_PIN_SIZE / 2;
+  return { content: root, anchorLeft: `-${half}px`, anchorTop: `-${half}px` };
+};
+
+/**
+ * The pickup / drop-off callout pills. Built with `textContent` — never
+ * `innerHTML` with a dynamic value — so whatever the page computed can never
+ * be interpreted as markup.
+ */
+const makeCallout = (label: string, value: string | null, tone: 'pickup' | 'dropoff') => {
+  const root = document.createElement('div');
+  root.className = 'sg-callout-anchor';
+  const pill = document.createElement('span');
+  pill.className = `sg-callout sg-callout--${tone}`;
+  const labelEl = document.createElement('span');
+  labelEl.textContent = label;
+  pill.appendChild(labelEl);
+  if (value) {
+    const valueEl = document.createElement('span');
+    valueEl.className = 'sg-callout__value';
+    valueEl.textContent = value;
+    pill.appendChild(valueEl);
+  }
+  root.appendChild(pill);
+  return { content: root, anchorLeft: '0px', anchorTop: '0px' };
+};
+
+/** The customer's own position: a small blue dot, only when GPS is shared. */
+const makeUserDot = () => {
+  const root = document.createElement('div');
+  root.style.cssText =
+    'width:16px;height:16px;border-radius:50%;background:#3b82f6;border:3px solid #ffffff;box-shadow:0 0 0 6px rgba(59,130,246,.22),0 2px 6px rgba(15,23,42,.35);box-sizing:border-box;';
+  return { content: root, anchorLeft: '-8px', anchorTop: '-8px' };
+};
+
 export const ErrandsMap: React.FC<ErrandsMapProps> = ({
   pickup,
   destination,
@@ -89,17 +159,25 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
   selectedDriverId,
   activeDriverPosition,
   serviceCategory,
-  heightClassName = 'h-[45dvh]',
+  pickupCallout = null,
+  destinationCallout = null,
+  userLocation = null,
+  onRecenter,
+  heightClassName = 'h-full',
   onFullscreenChange,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
   const pickupMarkerRef = useRef<google.maps.marker.AdvancedMarkerElement | null>(null);
   const destinationMarkerRef = useRef<google.maps.marker.AdvancedMarkerElement | null>(null);
+  const pickupCalloutRef = useRef<google.maps.marker.AdvancedMarkerElement | null>(null);
+  const destinationCalloutRef = useRef<google.maps.marker.AdvancedMarkerElement | null>(null);
+  const userMarkerRef = useRef<google.maps.marker.AdvancedMarkerElement | null>(null);
   const driverMarkersRef = useRef<Map<string, DriverMarkerEntry>>(new Map());
   const routeLineRef = useRef<google.maps.Polyline | null>(null);
   const initRef = useRef(false);
   const resizeTimerRef = useRef<number | null>(null);
+  const pendingRecenterRef = useRef(false);
   const lastFitRef = useRef<{ pickup: LatLng | null; destination: LatLng | null }>({
     pickup: null,
     destination: null,
@@ -110,6 +188,7 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [locating, setLocating] = useState(false);
 
   /** Nudge the map so it re-measures its container after a size/parent change. */
   const triggerResize = useCallback((delayMs = 140) => {
@@ -182,6 +261,11 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
           zoom: pickup ? 14 : 11,
           mapId: MAP_ID,
           zoomControl: true,
+          // Kept clear of the top-right stack (recenter + fullscreen) that the
+          // ride-selection layout puts under the floating location bar.
+          zoomControlOptions: {
+            position: google.maps.ControlPosition.RIGHT_CENTER,
+          },
           scrollwheel: false,
           gestureHandling: 'greedy',
           clickableIcons: false,
@@ -217,6 +301,12 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
       pickupMarkerRef.current = null;
       if (destinationMarkerRef.current) destinationMarkerRef.current.map = null;
       destinationMarkerRef.current = null;
+      if (pickupCalloutRef.current) pickupCalloutRef.current.map = null;
+      pickupCalloutRef.current = null;
+      if (destinationCalloutRef.current) destinationCalloutRef.current.map = null;
+      destinationCalloutRef.current = null;
+      if (userMarkerRef.current) userMarkerRef.current.map = null;
+      userMarkerRef.current = null;
       for (const entry of driverMarkersRef.current.values()) entry.marker.map = null;
       driverMarkersRef.current.clear();
       routeLineRef.current?.setMap(null);
@@ -236,14 +326,14 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
 
     if (pickup) {
       if (!pickupMarkerRef.current) {
-        const anchor = pinAnchor(30);
+        const pin = makeEndpointPin('pickup');
         pickupMarkerRef.current = new google.maps.marker.AdvancedMarkerElement({
           map,
           position: pickup,
           title: 'Pickup',
-          content: makePinContent('🏠', '#02472d', 30),
-          anchorLeft: anchor.anchorLeft,
-          anchorTop: anchor.anchorTop,
+          content: pin.content,
+          anchorLeft: pin.anchorLeft,
+          anchorTop: pin.anchorTop,
           zIndex: 400,
         });
       } else {
@@ -256,14 +346,14 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
 
     if (destination) {
       if (!destinationMarkerRef.current) {
-        const anchor = pinAnchor(32);
+        const pin = makeEndpointPin('dropoff');
         destinationMarkerRef.current = new google.maps.marker.AdvancedMarkerElement({
           map,
           position: destination,
           title: 'Destination',
-          content: makePinContent('📍', '#dc2626', 32),
-          anchorLeft: anchor.anchorLeft,
-          anchorTop: anchor.anchorTop,
+          content: pin.content,
+          anchorLeft: pin.anchorLeft,
+          anchorTop: pin.anchorTop,
           zIndex: 500,
         });
       } else {
@@ -275,6 +365,120 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapReady, pickup?.lat, pickup?.lng, destination?.lat, destination?.lng]);
+
+  // ── Callout pills (driver→pickup ETA, estimated arrival) ─────────────────
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map) return;
+
+    if (pickup) {
+      const pin = makeCallout('Pickup', pickupCallout, 'pickup');
+      if (!pickupCalloutRef.current) {
+        pickupCalloutRef.current = new google.maps.marker.AdvancedMarkerElement({
+          map,
+          position: pickup,
+          title: pickupCallout ? `Pickup in ${pickupCallout}` : 'Pickup',
+          content: pin.content,
+          anchorLeft: pin.anchorLeft,
+          anchorTop: pin.anchorTop,
+          zIndex: 820,
+        });
+      } else {
+        pickupCalloutRef.current.position = pickup;
+        pickupCalloutRef.current.map = map;
+        pickupCalloutRef.current.content = pin.content;
+        pickupCalloutRef.current.title = pickupCallout ? `Pickup in ${pickupCallout}` : 'Pickup';
+      }
+    } else if (pickupCalloutRef.current) {
+      pickupCalloutRef.current.map = null;
+    }
+
+    if (destination) {
+      const pin = makeCallout('Dropoff', destinationCallout, 'dropoff');
+      if (!destinationCalloutRef.current) {
+        destinationCalloutRef.current = new google.maps.marker.AdvancedMarkerElement({
+          map,
+          position: destination,
+          title: destinationCallout ? `Arriving around ${destinationCallout}` : 'Destination',
+          content: pin.content,
+          anchorLeft: pin.anchorLeft,
+          anchorTop: pin.anchorTop,
+          zIndex: 830,
+        });
+      } else {
+        destinationCalloutRef.current.position = destination;
+        destinationCalloutRef.current.map = map;
+        destinationCalloutRef.current.content = pin.content;
+        destinationCalloutRef.current.title = destinationCallout
+          ? `Arriving around ${destinationCallout}`
+          : 'Destination';
+      }
+    } else if (destinationCalloutRef.current) {
+      destinationCalloutRef.current.map = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    mapReady,
+    pickup?.lat,
+    pickup?.lng,
+    pickupCallout,
+    destination?.lat,
+    destination?.lng,
+    destinationCallout,
+  ]);
+
+  // ── The customer's own position (only ever their real GPS fix) ───────────
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map) return;
+    setLocating(false);
+
+    if (!userLocation) {
+      if (userMarkerRef.current) userMarkerRef.current.map = null;
+      return;
+    }
+    if (!userMarkerRef.current) {
+      const dot = makeUserDot();
+      userMarkerRef.current = new google.maps.marker.AdvancedMarkerElement({
+        map,
+        position: userLocation,
+        title: 'Your location',
+        content: dot.content,
+        anchorLeft: dot.anchorLeft,
+        anchorTop: dot.anchorTop,
+        zIndex: 300,
+      });
+    } else {
+      userMarkerRef.current.position = userLocation;
+      userMarkerRef.current.map = map;
+    }
+
+    if (pendingRecenterRef.current) {
+      pendingRecenterRef.current = false;
+      panToAnimated(map, userLocation, 600);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapReady, userLocation?.lat, userLocation?.lng]);
+
+  /**
+   * Recenter: pan to the fix we already have (and ask for a fresher one), or
+   * ask for one and pan the moment it arrives. Never invents a position.
+   */
+  const handleRecenter = useCallback(() => {
+    const map = mapRef.current;
+    if (userLocation && map) {
+      panToAnimated(map, userLocation, 600);
+      onRecenter?.();
+      return;
+    }
+    if (!onRecenter) return;
+    pendingRecenterRef.current = true;
+    setLocating(true);
+    onRecenter();
+    window.setTimeout(() => setLocating(false), 6000);
+  }, [userLocation, onRecenter]);
 
   // ── Driver pins (keyed by driverId, updated in place) ─────────────────────
 
@@ -360,9 +564,11 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
         map,
         path: route.coordinates,
         geodesic: true,
-        strokeColor: '#059669',
-        strokeOpacity: 0.95,
-        strokeWeight: 4,
+        // Dark route line — matches the reference and stays legible on the
+        // muted street basemap.
+        strokeColor: '#065f46',
+        strokeOpacity: 1,
+        strokeWeight: 5,
         zIndex: 100,
       });
     });
@@ -414,9 +620,7 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
 
   if (!isGoogleMapsConfigured) {
     return (
-      <div
-        className={`relative overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 ${heightClassName}`}
-      >
+      <div className={`relative overflow-hidden bg-slate-100 ${heightClassName}`}>
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 px-6 text-center">
           <MapPin className="h-5 w-5 text-slate-400" aria-hidden="true" />
           <p className="text-xs font-semibold text-slate-600">
@@ -432,28 +636,44 @@ export const ErrandsMap: React.FC<ErrandsMapProps> = ({
       className={
         isFullscreen
           ? 'fixed inset-0 z-[60] h-dvh w-full bg-slate-100'
-          : `relative overflow-hidden rounded-b-2xl border border-slate-200 bg-slate-100 ${heightClassName}`
+          : `relative overflow-hidden bg-slate-100 ${heightClassName}`
       }
     >
       <div ref={containerRef} className="absolute inset-0" />
 
-      {/* Real fullscreen toggle: the box becomes a fixed overlay and the map is
-          re-measured, so every marker/polyline keeps its place. Top-LEFT so it
-          never collides with Google's own zoom control on the right. */}
       {mapReady && !mapError && (
-        <button
-          type="button"
-          onClick={toggleFullscreen}
-          aria-label={isFullscreen ? 'Exit fullscreen map' : 'View map fullscreen'}
-          aria-pressed={isFullscreen}
-          className="absolute left-3 top-3 z-10 flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white/95 text-slate-700 shadow-card backdrop-blur transition hover:bg-white active:scale-95"
-        >
-          {isFullscreen ? (
-            <Minimize2 className="h-4 w-4" aria-hidden="true" />
-          ) : (
-            <Maximize2 className="h-4 w-4" aria-hidden="true" />
-          )}
-        </button>
+        <>
+          {/* Recenter — top-right, under the floating location bar. Returns the
+              camera to the customer's own fix; asks for one when none exists. */}
+          <button
+            type="button"
+            onClick={handleRecenter}
+            aria-label="Recenter map on my location"
+            className="absolute right-3 top-[4.75rem] z-10 flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-brand-dark shadow-card backdrop-blur transition hover:bg-white active:scale-95"
+          >
+            {locating ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <LocateFixed className="h-4 w-4" aria-hidden="true" />
+            )}
+          </button>
+
+          {/* Real fullscreen toggle: the box becomes a fixed overlay and the map
+              is re-measured, so every marker/polyline keeps its place. */}
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            aria-label={isFullscreen ? 'Exit fullscreen map' : 'View map fullscreen'}
+            aria-pressed={isFullscreen}
+            className="absolute right-3 top-[7.5rem] z-10 flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white/95 text-slate-700 shadow-card backdrop-blur transition hover:bg-white active:scale-95"
+          >
+            {isFullscreen ? (
+              <Minimize2 className="h-4 w-4" aria-hidden="true" />
+            ) : (
+              <Maximize2 className="h-4 w-4" aria-hidden="true" />
+            )}
+          </button>
+        </>
       )}
 
       {mapError && (

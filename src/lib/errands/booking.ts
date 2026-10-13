@@ -11,6 +11,10 @@
  */
 
 import { supabase, isSupabaseConfigured, cleanRpcErrorMessage } from '../supabase';
+import {
+  DEFAULT_ERRANDS_PAYMENT_METHOD,
+  isErrandsPaymentMethod,
+} from './rideOptions';
 import type { ErrandsBooking, ErrandsBookingStatus } from './types';
 
 /** How long the driver has to respond before a request expires (mirrors SQL). */
@@ -60,6 +64,7 @@ interface BookingRow {
   created_at?: string;
   details?: Record<string, unknown> | null;
   trip_pin?: string | null;
+  payment_method?: string | null;
 }
 
 const asNumber = (value: unknown, fallback = 0): number => {
@@ -149,6 +154,7 @@ export function parseBooking(row: BookingRow | null | undefined): ErrandsBooking
     createdAt: String(row.created_at ?? ''),
     details: parseDetails(row.details),
     tripPin: asString(row.trip_pin),
+    paymentMethod: asString(row.payment_method),
   };
 }
 
@@ -172,10 +178,20 @@ function actionError(error: { message?: string | null } | null, fallback: string
  * expiry, single use) and the driver's eligibility under a row lock, so two
  * customers racing for the same driver resolve to exactly one winner — the
  * loser receives an honest "just became unavailable" message.
+ *
+ * The RPC answers with the new booking's id rather than a full row, so the
+ * booking is read back through `errands_booking_payload` — the same secured
+ * reader every other screen uses.
+ *
+ * `paymentMethod` rides the 3-argument overload added by the payment
+ * migration. A project that has not run that migration yet simply falls back
+ * to the original 2-argument call: the booking still succeeds and cash — the
+ * only tender that needs no third party — stays the honest default.
  */
 export async function createErrandsBooking(input: {
   quoteId: string;
   driverId: string;
+  paymentMethod?: string | null;
 }): Promise<ErrandsCreateResult> {
   if (!isSupabaseConfigured) {
     return { ok: false, error: 'Connect Supabase to book an Errand.' };
@@ -184,17 +200,43 @@ export async function createErrandsBooking(input: {
     return { ok: false, error: 'Select a driver to continue.' };
   }
 
-  const { data, error } = await supabase.rpc('create_errands_booking', {
+  const paymentMethod = isErrandsPaymentMethod(input.paymentMethod)
+    ? input.paymentMethod
+    : DEFAULT_ERRANDS_PAYMENT_METHOD;
+
+  let { data, error } = await supabase.rpc('create_errands_booking', {
     p_quote_id: input.quoteId,
     p_driver_id: input.driverId,
+    p_payment_method: paymentMethod,
   });
+
+  // The overload does not exist yet (payment migration not applied): retry the
+  // original signature once rather than blocking the customer from booking.
+  if (
+    error &&
+    /does not exist|could not find the function|unexpected argument|p_payment_method/i.test(
+      error.message ?? ''
+    )
+  ) {
+    const retry = await supabase.rpc('create_errands_booking', {
+      p_quote_id: input.quoteId,
+      p_driver_id: input.driverId,
+    });
+    data = retry.data;
+    error = retry.error;
+  }
 
   if (error) {
     return { ok: false, error: actionError(error, 'Could not book this driver.') };
   }
 
-  const row = data as BookingRow | null;
-  const booking = parseBooking(row);
+  const payload = data as { id?: string | null; booking_id?: string | null } | null;
+  const bookingId = payload?.id ?? payload?.booking_id;
+  if (!bookingId) {
+    return { ok: false, error: 'The booking could not be confirmed. Please try again.' };
+  }
+
+  const booking = await fetchErrandsBooking(bookingId);
   if (!booking) {
     return { ok: false, error: 'The booking could not be confirmed. Please try again.' };
   }

@@ -747,24 +747,39 @@ test('the FAB sits bottom-right above the nav, safe-area aware, and links to /er
   assert.ok(/<ErrandsFab/.test(home), 'the FAB must be mounted on the customer home screen');
 });
 
-test('the Errands map stays visible: sticky under the navbar at ~45dvh', () => {
+test('the Errands screen fits the viewport: map on top, sheet below, page never scrolls', () => {
   const page = read('src', 'pages', 'customer', 'ErrandsPage.tsx');
   assert.ok(
-    page.includes('sticky top-[calc(3.5rem+env(safe-area-inset-top))]'),
-    'the map must stick flush under the h-14 navbar (safe-area-inset-TOP drives its height)'
+    page.includes('errands-screen'),
+    'the screen must opt into the viewport-fitted height from index.css'
   );
   assert.ok(
-    page.includes('sm:top-[calc(4rem+env(safe-area-inset-top))]'),
-    'on sm+ the navbar is h-16, so the sticky offset must grow with it'
+    page.includes('absolute inset-x-0 top-0 h-[48%]'),
+    'the map must fill the upper portion edge-to-edge (no card, no rounded box)'
   );
+  assert.ok(
+    page.includes('heightClassName="h-full"'),
+    'the map must fill its container so the sheet can overlap it'
+  );
+  assert.ok(
+    /<RideSheet/.test(page),
+    'the booking surface must be a draggable bottom sheet, not a scrolling page'
+  );
+
+  const css = read('src', 'index.css');
+  assert.ok(
+    /env\(safe-area-inset-top/.test(css) && /env\(safe-area-inset-bottom/.test(css),
+    'the screen height must subtract the safe areas around the navbar and bottom nav'
+  );
+  assert.ok(
+    css.includes('.errands-screen'),
+    'the fitted height must live in one shared class, not scattered arbitrary values'
+  );
+
   const map = read('src', 'components', 'errands', 'ErrandsMap.tsx');
   assert.ok(
-    map.includes('h-[45dvh]'),
-    'the map must occupy roughly 45% of the viewport by default'
-  );
-  assert.ok(
-    page.includes('pb-[calc(5rem+env(safe-area-inset-bottom))]'),
-    'the page must clear the bottom nav with safe-area padding'
+    !/rounded-b-2xl border border-slate-200/.test(map),
+    'the map is no longer a bordered card — it is edge-to-edge'
   );
 });
 
@@ -782,7 +797,7 @@ test('the map has a real, functional fullscreen toggle', () => {
   const page = read('src', 'pages', 'customer', 'ErrandsPage.tsx');
   assert.ok(
     page.includes('onFullscreenChange={setMapFullscreen}'),
-    'the page must be told when fullscreen starts so its sticky wrapper can clear the navbar'
+    'the page must be told when fullscreen starts so its overlays can lift above the navbar'
   );
 });
 
