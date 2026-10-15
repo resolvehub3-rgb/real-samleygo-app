@@ -27,6 +27,13 @@ const hasOwnChrome = (pathname: string): boolean =>
   // The home screen is a browse-and-decide surface — a nine-item policy index
   // under it pushes the app's own content a long way down the page.
   pathname === '/' ||
+  // The transactional surfaces — searching, the cart, an order and errands —
+  // keep the focus on the task in hand, not on a policy index.
+  pathname.startsWith('/restaurants') ||
+  pathname.startsWith('/cart') ||
+  pathname.startsWith('/checkout') ||
+  pathname.startsWith('/orders') ||
+  pathname.startsWith('/errands') ||
   isAuthPath(pathname) ||
   legalDocumentForPath(pathname) !== undefined ||
   pathname.startsWith('/admin') ||

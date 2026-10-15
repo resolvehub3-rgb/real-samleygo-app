@@ -299,6 +299,11 @@ test('the app shell renders the site-wide legal footer', () => {
   // on the home screen, where the policy index outweighs the browse content.
   for (const rule of [
     "pathname === '/'",
+    "'/restaurants'",
+    "'/cart'",
+    "'/checkout'",
+    "'/orders'",
+    "'/errands'",
     'isAuthPath',
     'legalDocumentForPath',
     '/admin',
