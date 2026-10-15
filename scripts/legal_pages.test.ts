@@ -304,6 +304,7 @@ test('the app shell renders the site-wide legal footer', () => {
     "'/checkout'",
     "'/orders'",
     "'/errands'",
+    "'/profile'",
     'isAuthPath',
     'legalDocumentForPath',
     '/admin',

@@ -34,6 +34,8 @@ const hasOwnChrome = (pathname: string): boolean =>
   pathname.startsWith('/checkout') ||
   pathname.startsWith('/orders') ||
   pathname.startsWith('/errands') ||
+  // The account page carries its own "Legal & policies" card.
+  pathname.startsWith('/profile') ||
   isAuthPath(pathname) ||
   legalDocumentForPath(pathname) !== undefined ||
   pathname.startsWith('/admin') ||
