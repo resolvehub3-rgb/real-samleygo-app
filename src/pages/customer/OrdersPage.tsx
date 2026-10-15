@@ -28,7 +28,6 @@ import {
 } from '../../lib/errands/types';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { ReorderButton } from '../../components/common/ReorderButton';
-import { TestRingBellButton } from '../../components/common/TestRingBellButton';
 import { playCustomerSound, playCustomerStatusAlert } from '../../lib/soundAlerts';
 
 export const OrdersPage: React.FC = () => {
@@ -337,11 +336,6 @@ export const OrdersPage: React.FC = () => {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <TestRingBellButton
-              tone="customer"
-              className="h-11 px-3 rounded-xl border border-slate-200 bg-white text-xs font-bold text-slate-700 shadow-xs hover:bg-slate-100"
-              iconClassName="text-emerald-600"
-            />
             <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-1 rounded-xl">
               {orders.length} {orders.length === 1 ? 'Order' : 'Orders'}
             </span>

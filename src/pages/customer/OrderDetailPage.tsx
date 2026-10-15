@@ -36,7 +36,6 @@ import { CourierLiveMap } from '../../components/courier/CourierLiveMap';
 import { LiveDeliveryMapModal } from '../../components/common/LiveDeliveryMapModal';
 import { UserAvatar } from '../../components/common/UserAvatar';
 import { ReorderButton } from '../../components/common/ReorderButton';
-import { TestRingBellButton } from '../../components/common/TestRingBellButton';
 import {
   playCustomerArrivedAlert,
   playCustomerSound,
@@ -725,11 +724,6 @@ export const OrderDetailPage: React.FC = () => {
                 {(isDelivered || isCancelled) && (
                   <ReorderButton order={order} className="inline-flex h-11 items-center rounded-xl px-3.5 text-xs" />
                 )}
-                <TestRingBellButton
-                  tone="customer"
-                  className="h-11 px-3 rounded-xl bg-slate-100 text-xs font-bold text-slate-700 hover:bg-slate-200"
-                  iconClassName="text-emerald-600"
-                />
               </div>
             </div>
 
